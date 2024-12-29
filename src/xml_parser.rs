@@ -399,28 +399,25 @@ impl TablesBuilder {
 /// use std::fs::File;
 /// use std::io::BufReader;
 ///
-/// fn example() -> xml2arrow::Result<()> {
-///     let xml_content = r#"<data><item><value>123</value></item></data>"#;
-///     let config = Config {
-///         tables: vec![TableConfig {
-///             name: "items".to_string(),
-///             xml_path: "/data".to_string(),
-///             row_element: "item".to_string(),
-///             levels: vec![],
-///             fields: vec![FieldConfig {
-///                 name: "value".to_string(),
-///                 xml_path: "value".to_string(),
-///                 data_type: DType::Int32,
-///                 nullable: true,
-///                 scale: None,
-///                 offset: None,
-///             }],
+/// let xml_content = r#"<data><item><value>123</value></item></data>"#;
+/// let config = Config {
+///     tables: vec![TableConfig {
+///         name: "items".to_string(),
+///         xml_path: "/data".to_string(),
+///         row_element: "item".to_string(),
+///         levels: vec![],
+///         fields: vec![FieldConfig {
+///             name: "value".to_string(),
+///             xml_path: "/data/item/value".to_string(),
+///             data_type: DType::Int32,
+///             nullable: false,
+///             scale: None,
+///             offset: None,
 ///         }],
-///     };
-///     let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
-///     // ... use record_batches
-///     Ok(())
-/// }
+///     }],
+/// };
+/// let record_batches = parse_xml(xml_content.as_bytes(), &config).unwrap();
+/// // ... use record_batches
 /// ```
 pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<String, RecordBatch>> {
     let mut reader = Reader::from_reader(reader);
