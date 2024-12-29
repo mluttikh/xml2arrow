@@ -39,7 +39,9 @@ tables:
   * `name`: The name of the field in the Arrow schema.
   * `xml_path`: An XPath-like string that specifies the XML element containing the field's value.
   * `data_type`: The Arrow data type of the field. Supported types are:
-    * `Boolean` (`true` or `false`)
+    * `Boolean` (*true* or *false*)
+    * `Int16`
+    * `UInt16`
     * `Int32`
     * `UInt32`
     * `Int64`
@@ -63,6 +65,3 @@ let file = File::open("data.xml").unwrap();
 let reader = BufReader::new(file);
 let record_batches = parse_xml(reader, &config).unwrap();
 ```
-
-## Contributing
-Contributions are welcome! Please open an issue or submit a pull request on GitHub.

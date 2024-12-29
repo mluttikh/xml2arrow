@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use arrow::array::{
     Array, ArrayBuilder, AsArray, BooleanBuilder, Float32Array, Float32Builder, Float64Array,
-    Float64Builder, Int32Builder, Int64Builder, RecordBatch, StringBuilder, UInt32Builder,
-    UInt64Builder,
+    Float64Builder, Int16Builder, Int32Builder, Int64Builder, RecordBatch, StringBuilder,
+    UInt16Builder, UInt32Builder, UInt64Builder,
 };
 use arrow::compute::kernels::numeric;
 use arrow::datatypes::{DataType, Field, Float32Type, Float64Type, Schema};
@@ -71,6 +71,36 @@ impl FieldBuilder {
                     builder.append_null();
                 } else {
                     builder.append_value("")
+                }
+            }
+            DataType::UInt16 => {
+                let builder = self
+                    .array_builder
+                    .as_any_mut()
+                    .downcast_mut::<UInt16Builder>()
+                    .expect("UInt16Builder");
+                if self.has_value {
+                    match value.parse::<u16>() {
+                        Ok(val) => builder.append_value(val),
+                        Err(_) => builder.append_null(),
+                    }
+                } else {
+                    builder.append_null();
+                }
+            }
+            DataType::Int16 => {
+                let builder = self
+                    .array_builder
+                    .as_any_mut()
+                    .downcast_mut::<Int16Builder>()
+                    .expect("Int16Builder");
+                if self.has_value {
+                    match value.parse::<i16>() {
+                        Ok(val) => builder.append_value(val),
+                        Err(_) => builder.append_null(),
+                    }
+                } else {
+                    builder.append_null();
                 }
             }
             DataType::Int32 => {
@@ -220,6 +250,8 @@ impl FieldBuilder {
 fn make_builder(dtype: DType) -> Result<Box<dyn ArrayBuilder>> {
     match dtype {
         DType::Boolean => Ok(Box::new(BooleanBuilder::default())),
+        DType::Int16 => Ok(Box::new(Int16Builder::default())),
+        DType::UInt16 => Ok(Box::new(UInt16Builder::default())),
         DType::Int32 => Ok(Box::new(Int32Builder::default())),
         DType::UInt32 => Ok(Box::new(UInt32Builder::default())),
         DType::Int64 => Ok(Box::new(Int64Builder::default())),
@@ -476,7 +508,7 @@ mod tests {
     use super::*;
     use crate::config::{Config, DType, FieldConfig, TableConfig};
     use arrow::array::{
-        BooleanArray, Int32Array, Int64Array, StringArray, UInt32Array, UInt64Array,
+        BooleanArray, Int16Array, Int32Array, Int64Array, StringArray, UInt32Array, UInt64Array,
     };
 
     fn approx_equal(a: f64, b: f64, abs: f64) -> bool {
@@ -545,7 +577,7 @@ mod tests {
                         FieldConfig {
                             name: "id".to_string(),
                             xml_path: "/data/dataset/table/item/id".to_string(),
-                            data_type: DType::Int32,
+                            data_type: DType::UInt32,
                             nullable: false,
                             scale: None,
                             offset: None,
@@ -642,7 +674,7 @@ mod tests {
                     fields: vec![FieldConfig {
                         name: "value".to_string(),
                         xml_path: "/data/dataset/other_items/other_item/value".to_string(),
-                        data_type: DType::Int32,
+                        data_type: DType::Int16,
                         nullable: false,
                         scale: None,
                         offset: None,
@@ -661,7 +693,7 @@ mod tests {
             .column_by_name("id")
             .unwrap()
             .as_any()
-            .downcast_ref::<Int32Array>()
+            .downcast_ref::<UInt32Array>()
             .unwrap();
         assert_eq!(id_array.value(0), 1);
         assert_eq!(id_array.value(1), 2);
@@ -750,7 +782,7 @@ mod tests {
             .column_by_name("value")
             .unwrap()
             .as_any()
-            .downcast_ref::<Int32Array>()
+            .downcast_ref::<Int16Array>()
             .unwrap();
         assert_eq!(other_value_array.value(0), 123);
         assert_eq!(other_value_array.value(1), 456);
@@ -811,7 +843,7 @@ mod tests {
                         FieldConfig {
                             name: "id".to_string(),
                             xml_path: "/data/product_list/product/id".to_string(),
-                            data_type: DType::Int32,
+                            data_type: DType::Int16,
                             nullable: true,
                             scale: None,
                             offset: None,
@@ -861,7 +893,7 @@ mod tests {
             .column_by_name("id")
             .unwrap()
             .as_any()
-            .downcast_ref::<Int32Array>()
+            .downcast_ref::<Int16Array>()
             .unwrap();
         assert_eq!(id_array.value(0), 1);
         assert_eq!(id_array.value(1), 2);
