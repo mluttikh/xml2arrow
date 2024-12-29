@@ -6,7 +6,7 @@ description = "Efficiently convert XML data to Apache Arrow format for high-perf
 license = "MIT"
 repository = "https://github.com/mluttikh/xml2arrow"
 keywords = ["xml", "arrow", "parser", "conversion"]
-categories = ["data-formats", "data-structures", "encoding"]
+categories = ["data-structures", "encoding"]
 readme = "README.md"
 
 [dependencies]
