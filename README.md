@@ -53,6 +53,8 @@ tables:
 
 2. Parse the XML
 ```Rust
+use std::fs::File;
+use std::io::BufReader;
 use xml2arrow::(Config, parse_xml};
 
 let config = Config::from_yaml_file("config.yaml").unwrap();
