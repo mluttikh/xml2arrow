@@ -50,9 +50,12 @@ create_exception!(
 );
 
 #[cfg(feature = "python")]
+create_exception!(xml2arrow, TableNotFoundError, pyo3::exceptions::PyException);
+
+#[cfg(feature = "python")]
 create_exception!(
     xml2arrow,
-    TableNotFound
+    NoTableOnStackError,
     pyo3::exceptions::PyException
 );
 
@@ -64,9 +67,12 @@ impl From<Error> for PyErr {
             Error::Utf8Error(e) => e.into(),
             Error::Arrow(e) => PyArrowException::new_err(e.to_string()),
             Error::XMLParsing(e) => XmlParsingError::new_err(e.to_string()),
-            Error::YamlParsing(e) => YamlParsingError::new_err(e.to_string()),
+            Error::Yaml(e) => YamlParsingError::new_err(e.to_string()),
             Error::UnsupportedDataType(e) => UnsupportedDataTypeError::new_err(e.to_string()),
-            Error::TableNotFound(e) => TableNotFound::new_err(e.to_string()),
+            Error::TableNotFound(e) => TableNotFoundError::new_err(e.to_string()),
+            Error::NoTableOnStack => {
+                NoTableOnStackError::new_err("There is no table on the stack".to_string())
+            }
         }
     }
 }
