@@ -378,7 +378,6 @@ impl TablesBuilder {
 
     pub fn current_builder_mut(&mut self) -> Result<&mut TableBuilder> {
         let table_path = self.builder_stack.back().ok_or(Error::NoTableOnStack)?;
-        println!("TABLE PATH: {:?}", table_path.to_string());
         self.table_builders
             .get_mut(table_path)
             .ok_or_else(|| Error::TableNotFound(table_path.to_string()))
