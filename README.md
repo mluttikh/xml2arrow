@@ -1,3 +1,8 @@
+[![Build Status](https://github.com/mluttikh/xml2arrow/actions/workflows/rust.yml/badge.svg)](https://github.com/mluttikh/xml2arrow/actions/workflows/rust.yml)
+[![crates.io](https://img.shields.io/crates/v/xml2arrow)](https://crates.io/crates/xml2arrow)
+[![crates.io](https://img.shields.io/crates/d/xml2arrow)](https://crates.io/crates/xml2arrow)
+[![docs.rs](https://docs.rs/xml2arrow/badge.svg)](https://docs.rs/xml2arrow)
+[![License](https://img.shields.io/crates/l/xml2arrow)](LICENSE)
 # XML2ARROW
 
 A Rust crate for efficiently converting XML data to Apache Arrow format.
