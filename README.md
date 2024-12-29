@@ -1,4 +1,4 @@
-[![Build Status](https://github.com/mluttikh/xml2arrow/actions/workflows/rust.yml/badge.svg)](https://github.com/mluttikh/xml2arrow/actions/workflows/rust.yml)
+[![Build Status](https://github.com/mluttikh/xml2arrow/actions/workflows/ci.yml/badge.svg)](https://github.com/mluttikh/xml2arrow/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/xml2arrow)](https://crates.io/crates/xml2arrow)
 [![crates.io](https://img.shields.io/crates/d/xml2arrow)](https://crates.io/crates/xml2arrow)
 [![docs.rs](https://docs.rs/xml2arrow/badge.svg)](https://docs.rs/xml2arrow)
