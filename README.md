@@ -236,11 +236,11 @@ use std::fs::File;
 use std::io::BufReader;
 use xml2arrow::(Config, parse_xml};
 
-let config = Config::from_yaml_file("stations.yaml").unwrap();
+let config = Config::from_yaml_file("stations.yaml").unwrap();  // Load configuration
 
 let file = File::open("stations.xml").unwrap();
 let reader = BufReader::new(file);
-let record_batches = parse_xml(reader, &config).unwrap();
+let record_batches = parse_xml(reader, &config).unwrap();       // Parse XML using configuration
 ```
 
 ```
