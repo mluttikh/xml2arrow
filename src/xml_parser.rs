@@ -73,21 +73,6 @@ impl FieldBuilder {
                     builder.append_value("")
                 }
             }
-            DataType::UInt16 => {
-                let builder = self
-                    .array_builder
-                    .as_any_mut()
-                    .downcast_mut::<UInt16Builder>()
-                    .expect("UInt16Builder");
-                if self.has_value {
-                    match value.parse::<u16>() {
-                        Ok(val) => builder.append_value(val),
-                        Err(_) => builder.append_null(),
-                    }
-                } else {
-                    builder.append_null();
-                }
-            }
             DataType::Int16 => {
                 let builder = self
                     .array_builder
@@ -97,7 +82,32 @@ impl FieldBuilder {
                 if self.has_value {
                     match value.parse::<i16>() {
                         Ok(val) => builder.append_value(val),
-                        Err(_) => builder.append_null(),
+                        Err(e) => {
+                            return Err(Error::ParseError(format!(
+                                "Failed to parse value '{}' as Int16: {}",
+                                value, e
+                            )));
+                        }
+                    }
+                } else {
+                    builder.append_null();
+                }
+            }
+            DataType::UInt16 => {
+                let builder = self
+                    .array_builder
+                    .as_any_mut()
+                    .downcast_mut::<UInt16Builder>()
+                    .expect("UInt16Builder");
+                if self.has_value {
+                    match value.parse::<u16>() {
+                        Ok(val) => builder.append_value(val),
+                        Err(e) => {
+                            return Err(Error::ParseError(format!(
+                                "Failed to parse value '{}' as UInt16: {}",
+                                value, e
+                            )));
+                        }
                     }
                 } else {
                     builder.append_null();
@@ -112,7 +122,12 @@ impl FieldBuilder {
                 if self.has_value {
                     match value.parse::<i32>() {
                         Ok(val) => builder.append_value(val),
-                        Err(_) => builder.append_null(),
+                        Err(e) => {
+                            return Err(Error::ParseError(format!(
+                                "Failed to parse value '{}' as Int32: {}",
+                                value, e
+                            )));
+                        }
                     }
                 } else {
                     builder.append_null();
@@ -127,7 +142,12 @@ impl FieldBuilder {
                 if self.has_value {
                     match value.parse::<u32>() {
                         Ok(val) => builder.append_value(val),
-                        Err(_) => builder.append_null(),
+                        Err(e) => {
+                            return Err(Error::ParseError(format!(
+                                "Failed to parse value '{}' as UInt32: {}",
+                                value, e
+                            )));
+                        }
                     }
                 } else {
                     builder.append_null();
@@ -142,7 +162,12 @@ impl FieldBuilder {
                 if self.has_value {
                     match value.parse::<i64>() {
                         Ok(val) => builder.append_value(val),
-                        Err(_) => builder.append_null(),
+                        Err(e) => {
+                            return Err(Error::ParseError(format!(
+                                "Failed to parse value '{}' as Int64: {}",
+                                value, e
+                            )));
+                        }
                     }
                 } else {
                     builder.append_null();
@@ -157,7 +182,12 @@ impl FieldBuilder {
                 if self.has_value {
                     match value.parse::<u64>() {
                         Ok(val) => builder.append_value(val),
-                        Err(_) => builder.append_null(),
+                        Err(e) => {
+                            return Err(Error::ParseError(format!(
+                                "Failed to parse value '{}' as UInt64: {}",
+                                value, e
+                            )));
+                        }
                     }
                 } else {
                     builder.append_null();
@@ -172,7 +202,12 @@ impl FieldBuilder {
                 if self.has_value {
                     match value.parse::<f32>() {
                         Ok(val) => builder.append_value(val),
-                        Err(_) => builder.append_null(),
+                        Err(e) => {
+                            return Err(Error::ParseError(format!(
+                                "Failed to parse value '{}' as Float32: {}",
+                                value, e
+                            )));
+                        }
                     }
                 } else {
                     builder.append_null();
@@ -187,7 +222,12 @@ impl FieldBuilder {
                 if self.has_value {
                     match value.parse::<f64>() {
                         Ok(val) => builder.append_value(val),
-                        Err(_) => builder.append_null(),
+                        Err(e) => {
+                            return Err(Error::ParseError(format!(
+                                "Failed to parse value '{}' as Float64: {}",
+                                value, e
+                            )));
+                        }
                     }
                 } else {
                     builder.append_null();
@@ -200,7 +240,16 @@ impl FieldBuilder {
                     .downcast_mut::<BooleanBuilder>()
                     .expect("BooleanBuilder");
                 if self.has_value {
-                    builder.append_value(value == "true");
+                    match value.as_str() {
+                        "true" => builder.append_value(true),
+                        "false" => builder.append_value(false),
+                        _ => {
+                            return Err(Error::ParseError(format!(
+                                "Failed to parse value '{}' as boolean, expected 'true' or 'false'",
+                                value
+                            )));
+                        }
+                    }
                 } else {
                     builder.append_null();
                 }

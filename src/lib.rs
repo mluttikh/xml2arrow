@@ -5,7 +5,7 @@
 //! This can be particularly useful for working with XML data in Rust-based data pipelines.
 pub mod config;
 
-mod errors;
+pub mod errors;
 pub use errors::{Error, Result};
 
 mod xml_parser;
