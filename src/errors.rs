@@ -42,26 +42,43 @@ pub enum Error {
 }
 
 #[cfg(feature = "python")]
-create_exception!(xml2arrow, XmlParsingError, pyo3::exceptions::PyException);
+create_exception!(
+    xml2arrow,
+    XmlParsingError,
+    pyo3::exceptions::PyException,
+    "Raised when an error occurs during XML parsing."
+);
 
 #[cfg(feature = "python")]
-create_exception!(xml2arrow, YamlParsingError, pyo3::exceptions::PyException);
+create_exception!(
+    xml2arrow,
+    YamlParsingError,
+    pyo3::exceptions::PyException,
+    "Raised when an error occurs during YAML configuration parsing."
+);
 
 #[cfg(feature = "python")]
 create_exception!(
     xml2arrow,
     UnsupportedDataTypeError,
-    pyo3::exceptions::PyException
+    pyo3::exceptions::PyException,
+    "Raised when an unsupported data type is encountered."
 );
 
 #[cfg(feature = "python")]
-create_exception!(xml2arrow, TableNotFoundError, pyo3::exceptions::PyException);
+create_exception!(
+    xml2arrow,
+    TableNotFoundError,
+    pyo3::exceptions::PyException,
+    "Raised when a table specified in the configuration is not found in the XML data."
+);
 
 #[cfg(feature = "python")]
 create_exception!(
     xml2arrow,
     NoTableOnStackError,
-    pyo3::exceptions::PyException
+    pyo3::exceptions::PyException,
+    "Raised when an operation is performed that requires a table to be on the stack, but none is present."
 );
 
 #[cfg(feature = "python")]
