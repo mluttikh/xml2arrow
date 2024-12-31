@@ -14,7 +14,10 @@ pub type Result<T> = core::result::Result<T, Error>;
 pub enum Error {
     /// Errors from the QuickXML crate during XML parsing
     #[from]
-    XMLParsing(quick_xml::Error),
+    XmlParsing(quick_xml::Error),
+    /// Errors from the QuickXML crate that can be raised during parsing attributes.
+    #[from]
+    XmlParseAttr(quick_xml::events::attributes::AttrError),
     /// Errors from the Serde YAML crate during configuration parsing
     #[from]
     Yaml(serde_yaml::Error),
@@ -71,7 +74,8 @@ impl From<Error> for PyErr {
             Error::Io(e) => e.into(),
             Error::Utf8Error(e) => e.into(),
             Error::Arrow(e) => PyArrowException::new_err(e.to_string()),
-            Error::XMLParsing(e) => XmlParsingError::new_err(e.to_string()),
+            Error::XmlParsing(e) => XmlParsingError::new_err(e.to_string()),
+            Error::XmlParseAttr(e) => XmlParsingError::new_err(e.to_string()),
             Error::Yaml(e) => YamlParsingError::new_err(e.to_string()),
             Error::UnsupportedDataType(e) => UnsupportedDataTypeError::new_err(e.to_string()),
             Error::TableNotFound(e) => TableNotFoundError::new_err(e.to_string()),
