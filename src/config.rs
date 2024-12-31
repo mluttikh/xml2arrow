@@ -85,11 +85,9 @@ pub struct TableConfig {
     pub name: String,
     /// The XML path to the table elements. For example `/data/dataset/table`.
     pub xml_path: String,
-    /// The name of the XML element that represents a single row in the table.
-    pub row_element: String,
     /// The levels of nesting for this table. This is used to create the indices for nested tables.
-    /// For example if the xml_path is `/data/dataset/table/item/properties` and the row element is `property`
-    /// the levels should be `["table", "properties"]`.
+    /// For example if the xml_path is `/data/dataset/table/item/properties` the levels should
+    /// be `["table", "properties"]`.
     pub levels: Vec<String>,
     /// A vector of `FieldConfig` structs, each defining a field (column) in the table.
     pub fields: Vec<FieldConfig>,
@@ -162,7 +160,6 @@ mod tests {
                 tables: vec![TableConfig {
                     name: "table1".to_string(),
                     xml_path: "/path/to".to_string(),
-                    row_element: "root".to_string(),
                     levels: vec![],
                     fields: vec![
                         FieldConfig {

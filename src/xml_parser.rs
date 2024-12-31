@@ -485,7 +485,6 @@ impl XmlToArrowConverter {
 ///     tables: vec![TableConfig {
 ///         name: "items".to_string(),
 ///         xml_path: "/data".to_string(),
-///         row_element: "item".to_string(),
 ///         levels: vec![],
 ///         fields: vec![FieldConfig {
 ///             name: "value".to_string(),
@@ -646,7 +645,6 @@ mod tests {
                 TableConfig {
                     name: "items".to_string(),
                     xml_path: "/data/dataset/table".to_string(),
-                    row_element: "item".to_string(),
                     levels: vec!["table".to_string()],
                     fields: vec![
                         FieldConfig {
@@ -718,7 +716,6 @@ mod tests {
                 TableConfig {
                     name: "properties".to_string(),
                     xml_path: "/data/dataset/table/item/properties".to_string(),
-                    row_element: "property".to_string(),
                     levels: vec!["table".to_string(), "properties".to_string()],
                     fields: vec![
                         FieldConfig {
@@ -744,7 +741,6 @@ mod tests {
                 TableConfig {
                     name: "other_items".to_string(),
                     xml_path: "/data/dataset/other_items".to_string(),
-                    row_element: "other_item".to_string(),
                     levels: vec!["table".to_string()],
                     fields: vec![FieldConfig {
                         name: "value".to_string(),
@@ -905,14 +901,12 @@ mod tests {
                 TableConfig {
                     name: "/".to_string(),
                     xml_path: "/".to_string(),
-                    row_element: "invalid".to_string(),
                     levels: vec![],
                     fields: vec![],
                 },
                 TableConfig {
                     name: "products".to_string(),
                     xml_path: "/data/product_list".to_string(),
-                    row_element: "product".to_string(),
                     levels: vec!["product".to_string()],
                     fields: vec![
                         FieldConfig {
@@ -944,7 +938,6 @@ mod tests {
                 TableConfig {
                     name: "items".to_string(),
                     xml_path: "/data/product_list/product/items".to_string(),
-                    row_element: "item".to_string(),
                     levels: vec!["product".to_string(), "item".to_string()],
                     fields: vec![FieldConfig {
                         name: "item".to_string(),
@@ -1030,7 +1023,6 @@ mod tests {
             tables: vec![TableConfig {
                 name: "items".to_string(),
                 xml_path: "/data".to_string(),
-                row_element: "item".to_string(),
                 levels: vec![],
                 fields: vec![
                     FieldConfig {
@@ -1145,7 +1137,6 @@ mod tests {
             tables: vec![TableConfig {
                 name: "items".to_string(),
                 xml_path: "/data".to_string(),
-                row_element: "item".to_string(),
                 levels: vec![],
                 fields: vec![FieldConfig {
                     name: "text".to_string(),
@@ -1186,7 +1177,6 @@ mod tests {
             tables: vec![TableConfig {
                 name: "items".to_string(),
                 xml_path: "/data".to_string(),
-                row_element: "item".to_string(),
                 levels: vec![],
                 fields: vec![FieldConfig {
                     name: "value".to_string(),
@@ -1231,7 +1221,6 @@ mod tests {
             tables: vec![TableConfig {
                 name: "items".to_string(),
                 xml_path: "/data".to_string(),
-                row_element: "item".to_string(),
                 levels: vec![],
                 fields: vec![FieldConfig {
                     name: "value".to_string(),
@@ -1287,7 +1276,6 @@ mod tests {
             tables: vec![TableConfig {
                 name: "items".to_string(),
                 xml_path: "/data/items".to_string(),
-                row_element: "item".to_string(),
                 levels: vec![],
                 fields: vec![
                     FieldConfig {
