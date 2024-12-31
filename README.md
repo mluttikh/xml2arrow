@@ -54,7 +54,7 @@ tables:
     * `Float32`
     * `Float64`
     * `Utf8` (Strings)
-  * `nullable`: A boolean value indicating whether the field can contain null values.
+  * `nullable`: A boolean value indicating whether the field can contain null values. This field is optional and defaults to `false` if not specified.
   * `scale` (Optional): A scaling factor for float fields (e.g., to convert units).
   * `offset` (Optional): An offset value for float fields (e.g., to convert units).
 

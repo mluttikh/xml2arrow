@@ -1373,8 +1373,8 @@ mod tests {
             .as_any()
             .downcast_ref::<BooleanArray>()
             .unwrap();
-        assert_eq!(valid_array.value(0), true);
-        assert_eq!(valid_array.value(1), false);
+        assert!(valid_array.value(0));
+        assert!(!valid_array.value(1));
 
         let name_array = batch
             .column_by_name("name")
