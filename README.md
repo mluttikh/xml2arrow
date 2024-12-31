@@ -42,7 +42,7 @@ tables:
 * `levels`: An array of strings that represent parent tables to create an index for nested structures. If the XML structure is `/library/shelfs/shelf/books/book` you should define levels like this: `levels: ["shelfs", "books"]`. This will create indexes named `<shelfs>` and `<books>`.
 * `fields`: A list of field configurations for each column in the Arrow table.
   * `name`: The name of the field in the Arrow schema.
-  * `xml_path`: An XPath-like string that specifies the XML element containing the field's value.
+  * `xml_path`: An XPath-like string that specifies the XML element or attribute containing the field's value. To select an attribute, append `@` followed by the attribute name to the element's path. For example, `/library/book/@id` selects the `id` attribute of the `book` element.
   * `data_type`: The Arrow data type of the field. Supported types are:
     * `Boolean` (*true* or *false*)
     * `Int16`
@@ -83,8 +83,7 @@ Suppose we have the following XML file (`stations.xml`):
     <creation_time>2024-12-30T13:59:15Z</creation_time>
   </header>
   <monitoring_stations>
-    <monitoring_station>
-      <id>MS001</id>
+    <monitoring_station id="MS001">
       <location>
         <latitude>-61.39110459389277</latitude>
         <longitude>48.08662749089257</longitude>
@@ -109,8 +108,7 @@ Suppose we have the following XML file (`stations.xml`):
         <install_date>2024-03-31</install_date>
       </metadata>
     </monitoring_station>
-    <monitoring_station>
-      <id>MS002</id>
+    <monitoring_station id="MS002">
       <location>
         <latitude>11.891496388319311</latitude>
         <longitude>135.09336983543022</longitude>
@@ -179,7 +177,7 @@ tables:
     - station
     fields:
     - name: id
-      xml_path: /report/monitoring_stations/monitoring_station/id
+      xml_path: /report/monitoring_stations/monitoring_station/@id  # Path to an attribute
       data_type: Utf8
       nullable: false
     - name: latitude
