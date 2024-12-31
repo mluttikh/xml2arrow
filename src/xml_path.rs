@@ -51,6 +51,7 @@ mod tests {
     #[rstest]
     #[case("/root/node1", vec!["root", "node1"])]
     #[case("/path/with/empty/segments//more/nodes", vec!["path", "with", "empty", "segments", "more", "nodes"])]
+    #[case("/library/books/book/@id", vec!["library", "books", "book", "@id"])]
     #[case("", vec![])]
     fn test_new_from_string(#[case] path_str: &str, #[case] expected_parts: Vec<&str>) {
         let path = XmlPath::new(path_str);
@@ -64,18 +65,24 @@ mod tests {
     }
 
     #[rstest]
-    #[case("/root/node1", "/root/node1/new_node")]
-    #[case("/path/with/segments", "/path/with/segments/new_node")]
-    #[case("", "/new_node")]
-    fn test_append_node(#[case] path_str: &str, #[case] expected_path: &str) {
+    #[case("/root/node1", "new_node", "/root/node1/new_node")]
+    #[case("/path/with/segments", "new_node", "/path/with/segments/new_node")]
+    #[case("/library", "@id", "/library/@id")]
+    #[case("", "new_node", "/new_node")]
+    fn test_append_node(
+        #[case] path_str: &str,
+        #[case] new_node: &str,
+        #[case] expected_path: &str,
+    ) {
         let mut path = XmlPath::new(path_str);
-        path.append_node("new_node");
+        path.append_node(new_node);
         assert_eq!(path.to_string(), expected_path);
     }
 
     #[rstest]
     #[case("/root/node1/node2", "/root/node1", Some(Atom::from("node2")))]
     #[case("/path/only", "/path", Some(Atom::from("only")))]
+    #[case("/library/@id", "/library", Some(Atom::from("@id")))]
     #[case("", "/", None)]
     fn test_remove_node(
         #[case] path_str: &str,
