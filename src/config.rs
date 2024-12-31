@@ -107,7 +107,8 @@ pub struct FieldConfig {
     pub xml_path: String,
     /// The data type of the field. This determines the Arrow data type of the resulting column.
     pub data_type: DType,
-    /// Whether the field is nullable (can contain null values).
+    /// Whether the field is nullable (can contain null values). Defaults to false.
+    #[serde(default)]
     pub nullable: bool,
     /// Scale for decimal types.
     pub scale: Option<f64>,
@@ -153,63 +154,6 @@ mod tests {
 
     use super::*;
     use rstest::rstest;
-
-    #[rstest]
-    fn test_yaml_rw_old() {
-        let config = Config {
-            tables: vec![
-                TableConfig {
-                    name: "table1".to_string(),
-                    xml_path: "/path/to".to_string(),
-                    row_element: "root".to_string(),
-                    levels: vec![],
-                    fields: vec![
-                        FieldConfig {
-                            name: "field1".to_string(),
-                            xml_path: "/path/to/field1".to_string(),
-                            data_type: DType::Utf8,
-                            nullable: true,
-                            scale: None,
-                            offset: None,
-                        },
-                        FieldConfig {
-                            name: "field2".to_string(),
-                            xml_path: "field2/@attr".to_string(),
-                            data_type: DType::Int32,
-                            nullable: false,
-                            scale: None,
-                            offset: None,
-                        },
-                    ],
-                },
-                TableConfig {
-                    name: "table2".to_string(),
-                    xml_path: "/other".to_string(),
-                    row_element: "table_element".to_string(),
-                    levels: vec![],
-                    fields: vec![FieldConfig {
-                        name: "field3".to_string(),
-                        xml_path: "/other/path/field3".to_string(),
-                        data_type: DType::Float64,
-                        nullable: false,
-                        scale: Some(1e-2),
-                        offset: Some(273.0),
-                    }],
-                },
-            ],
-        };
-
-        // Write to a temporary file
-        let temp_file = tempfile::NamedTempFile::new().unwrap();
-        let path = temp_file.path().to_path_buf();
-        config.to_yaml_file(&path).unwrap();
-
-        // Read from the same file
-        let read_config = Config::from_yaml_file(&path).unwrap();
-
-        // Check if the read config is the same as the original
-        assert_eq!(config, read_config);
-    }
 
     #[rstest]
     fn test_yaml_rw(
@@ -288,5 +232,17 @@ mod tests {
         let result = config.to_yaml_file(PathBuf::from("/not/existing/path/config.yaml"));
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::Io(_)));
+    }
+
+    #[test]
+    fn test_field_config_default_nullable_from_yaml() {
+        let yaml_string = r#"
+    name: test_field
+    xml_path: /path/to/field
+    data_type: Utf8
+    "#;
+
+        let field_config: FieldConfig = serde_yaml::from_str(yaml_string).unwrap();
+        assert!(!field_config.nullable);
     }
 }
