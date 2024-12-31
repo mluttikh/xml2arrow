@@ -11,6 +11,7 @@ use arrow::compute::kernels::numeric;
 use arrow::datatypes::{DataType, Field, Float32Type, Float64Type, Schema};
 use fxhash::FxBuildHasher;
 use indexmap::IndexMap;
+use quick_xml::events::attributes::Attributes;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
@@ -516,6 +517,7 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
                     tables_builder.start_table(&xml_path);
                     continue;
                 }
+                parse_attributes(e.attributes(), &mut xml_path, &mut tables_builder)?;
             }
             Event::Text(e) => {
                 let table_builder = tables_builder.current_builder_mut()?;
@@ -549,6 +551,24 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
 
     let batches = tables_builder.finish()?;
     Ok(batches)
+}
+
+#[inline]
+fn parse_attributes(
+    attributes: Attributes,
+    xml_path: &mut XmlPath,
+    tables_builder: &mut TablesBuilder,
+) -> Result<()> {
+    for attribute in attributes {
+        let attribute = attribute?;
+        let key = std::str::from_utf8(attribute.key.local_name().into_inner())?;
+        let node = "@".to_string() + key;
+        let table_builder = tables_builder.current_builder_mut()?;
+        xml_path.append_node(&node);
+        table_builder.set_field_value(xml_path, std::str::from_utf8(attribute.value.as_ref())?);
+        xml_path.remove_node();
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1237,6 +1257,126 @@ mod tests {
             (67.89 * 0.01) + 10.0,
             1e-6
         )); // 10.6789
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_xml_with_attributes() -> Result<()> {
+        let xml_data = r#"
+            <data>
+                <items>
+                    <item id="1" value="10" type="A" valid="true">
+                        <name>Item One</name>
+                    </item>
+                    <item id="2" value="20" valid="false">
+                        <name>Item Two</name>
+                    </item>
+                </items>
+            </data>
+        "#;
+
+        let config = Config {
+            tables: vec![TableConfig {
+                name: "items".to_string(),
+                xml_path: "/data/items".to_string(),
+                row_element: "item".to_string(),
+                levels: vec![],
+                fields: vec![
+                    FieldConfig {
+                        name: "id".to_string(),
+                        xml_path: "/data/items/item/@id".to_string(),
+                        data_type: DType::Utf8,
+                        nullable: false,
+                        scale: None,
+                        offset: None,
+                    },
+                    FieldConfig {
+                        name: "value".to_string(),
+                        xml_path: "/data/items/item/@value".to_string(),
+                        data_type: DType::Int32,
+                        nullable: false,
+                        scale: None,
+                        offset: None,
+                    },
+                    FieldConfig {
+                        name: "type".to_string(),
+                        xml_path: "/data/items/item/@type".to_string(),
+                        data_type: DType::Utf8,
+                        nullable: true,
+                        scale: None,
+                        offset: None,
+                    },
+                    FieldConfig {
+                        name: "valid".to_string(),
+                        xml_path: "/data/items/item/@valid".to_string(),
+                        data_type: DType::Boolean,
+                        nullable: false,
+                        scale: None,
+                        offset: None,
+                    },
+                    FieldConfig {
+                        name: "name".to_string(),
+                        xml_path: "/data/items/item/name".to_string(),
+                        data_type: DType::Utf8,
+                        nullable: false,
+                        scale: None,
+                        offset: None,
+                    },
+                ],
+            }],
+        };
+
+        let record_batches = parse_xml(xml_data.as_bytes(), &config)?;
+
+        assert!(record_batches.contains_key("items"));
+        let batch = record_batches.get("items").unwrap();
+        assert_eq!(batch.num_rows(), 2);
+
+        let id_array = batch
+            .column_by_name("id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(id_array.value(0), "1");
+        assert_eq!(id_array.value(1), "2");
+
+        let value_array = batch
+            .column_by_name("value")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert_eq!(value_array.value(0), 10);
+        assert_eq!(value_array.value(1), 20);
+
+        let type_array = batch
+            .column_by_name("type")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(type_array.value(0), "A");
+        assert!(type_array.is_null(1));
+
+        let valid_array = batch
+            .column_by_name("valid")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap();
+        assert_eq!(valid_array.value(0), true);
+        assert_eq!(valid_array.value(1), false);
+
+        let name_array = batch
+            .column_by_name("name")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(name_array.value(0), "Item One");
+        assert_eq!(name_array.value(1), "Item Two");
 
         Ok(())
     }
