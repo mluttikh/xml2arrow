@@ -37,7 +37,7 @@ struct FieldBuilder {
 
 impl FieldBuilder {
     fn new(field_config: &FieldConfig) -> Result<Self> {
-        let array_builder = make_builder(field_config.data_type)?;
+        let array_builder = create_array_builder(field_config.data_type)?;
         let field = Field::new(
             &field_config.name,
             field_config.data_type.as_arrow_type(),
@@ -297,7 +297,7 @@ impl FieldBuilder {
     }
 }
 
-fn make_builder(dtype: DType) -> Result<Box<dyn ArrayBuilder>> {
+fn create_array_builder(dtype: DType) -> Result<Box<dyn ArrayBuilder>> {
     match dtype {
         DType::Boolean => Ok(Box::new(BooleanBuilder::default())),
         DType::Int16 => Ok(Box::new(Int16Builder::default())),
@@ -321,7 +321,7 @@ struct TableBuilder {
 }
 
 impl TableBuilder {
-    pub fn new(table_config: &TableConfig) -> Result<Self> {
+    fn new(table_config: &TableConfig) -> Result<Self> {
         let mut index_builders = Vec::with_capacity(table_config.levels.len());
         index_builders.resize_with(table_config.levels.len(), UInt32Builder::default);
         let mut builder = Self {
@@ -339,17 +339,17 @@ impl TableBuilder {
         Ok(builder)
     }
 
-    pub fn end_row(&mut self, indices: &[u32]) -> Result<()> {
+    fn end_row(&mut self, indices: &[u32]) -> Result<()> {
         // Append the current row's data to the arrays
-        let result = self.save_row(indices);
+        self.save_row(indices)?;
         for field_builder in self.field_builders.values_mut() {
             field_builder.has_value = false;
             field_builder.current_value.clear();
         }
-        result
+        Ok(())
     }
 
-    pub fn add_column(&mut self, field_config: &FieldConfig) -> Result<()> {
+    fn add_column(&mut self, field_config: &FieldConfig) -> Result<()> {
         self.field_builders.insert(
             XmlPath::new(&field_config.xml_path),
             FieldBuilder::new(field_config)?,
@@ -357,13 +357,13 @@ impl TableBuilder {
         Ok(())
     }
 
-    pub fn set_field_value(&mut self, field_path: &XmlPath, value: &str) {
+    fn set_field_value(&mut self, field_path: &XmlPath, value: &str) {
         if let Some(field_builder) = self.field_builders.get_mut(field_path) {
             field_builder.set_current_value(value);
         }
     }
 
-    pub fn save_row(&mut self, indices: &[u32]) -> Result<()> {
+    fn save_row(&mut self, indices: &[u32]) -> Result<()> {
         for (index, index_builder) in indices.iter().zip(&mut self.index_builders) {
             index_builder.append_value(*index)
         }
@@ -375,7 +375,7 @@ impl TableBuilder {
         Ok(())
     }
 
-    pub fn finish(&mut self) -> Result<RecordBatch> {
+    fn finish(&mut self) -> Result<RecordBatch> {
         let num_arrays = self.field_builders.len() + self.index_builders.len();
         let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(num_arrays);
         let mut fields: Vec<Field> = Vec::with_capacity(num_arrays);
@@ -398,13 +398,13 @@ impl TableBuilder {
     }
 }
 
-struct TablesBuilder {
+struct XmlToArrowConverter {
     table_builders: IndexMap<XmlPath, TableBuilder, FxBuildHasher>,
     builder_stack: VecDeque<XmlPath>,
 }
 
-impl TablesBuilder {
-    pub fn from_config(config: &Config) -> Result<Self> {
+impl XmlToArrowConverter {
+    fn from_config(config: &Config) -> Result<Self> {
         let mut table_builders =
             IndexMap::with_capacity_and_hasher(config.tables.len(), FxBuildHasher::default());
 
@@ -422,27 +422,27 @@ impl TablesBuilder {
         })
     }
 
-    pub fn is_table_path(&self, xml_path: &XmlPath) -> bool {
+    fn is_table_path(&self, xml_path: &XmlPath) -> bool {
         self.table_builders.contains_key(xml_path)
     }
 
-    pub fn current_builder_mut(&mut self) -> Result<&mut TableBuilder> {
+    fn current_table_builder_mut(&mut self) -> Result<&mut TableBuilder> {
         let table_path = self.builder_stack.back().ok_or(Error::NoTableOnStack)?;
         self.table_builders
             .get_mut(table_path)
             .ok_or_else(|| Error::TableNotFound(table_path.to_string()))
     }
 
-    pub fn start_table(&mut self, table_path: &XmlPath) {
+    fn start_table(&mut self, table_path: &XmlPath) {
         self.builder_stack.push_back(table_path.clone());
     }
 
-    pub fn end_table(&mut self) -> Result<()> {
+    fn end_table(&mut self) -> Result<()> {
         self.builder_stack.pop_back();
         Ok(())
     }
 
-    pub fn finish(mut self) -> Result<IndexMap<String, arrow::record_batch::RecordBatch>> {
+    fn finish(mut self) -> Result<IndexMap<String, arrow::record_batch::RecordBatch>> {
         let mut record_batches = IndexMap::new();
         for table_builder in &mut self.table_builders.values_mut() {
             if !table_builder.field_builders.is_empty() {
@@ -504,7 +504,7 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
     let mut reader = Reader::from_reader(reader);
     reader.config_mut().trim_text(true);
     let mut xml_path = XmlPath::new("/");
-    let mut tables_builder = TablesBuilder::from_config(config)?;
+    let mut xml_to_arrow_converter = XmlToArrowConverter::from_config(config)?;
 
     let mut buf = Vec::new();
 
@@ -513,32 +513,26 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
             Event::Start(e) => {
                 let node = std::str::from_utf8(e.local_name().into_inner())?;
                 xml_path.append_node(node);
-                if tables_builder.is_table_path(&xml_path) {
-                    tables_builder.start_table(&xml_path);
-                    continue;
+                if xml_to_arrow_converter.is_table_path(&xml_path) {
+                    xml_to_arrow_converter.start_table(&xml_path);
                 }
-                parse_attributes(e.attributes(), &mut xml_path, &mut tables_builder)?;
+                parse_attributes(e.attributes(), &mut xml_path, &mut xml_to_arrow_converter)?;
             }
             Event::Text(e) => {
-                let table_builder = tables_builder.current_builder_mut()?;
+                let table_builder = xml_to_arrow_converter.current_table_builder_mut()?;
                 table_builder.set_field_value(&xml_path, &e.unescape()?);
             }
             Event::End(_) => {
-                if tables_builder.is_table_path(&xml_path) {
-                    tables_builder.end_table()?;
+                if xml_to_arrow_converter.is_table_path(&xml_path) {
+                    xml_to_arrow_converter.end_table()?;
                 }
                 xml_path.remove_node();
-                if tables_builder.is_table_path(&xml_path) {
+                if xml_to_arrow_converter.is_table_path(&xml_path) {
                     // This is the root element of the table
-                    let mut num_rows = vec![];
-                    for table_path in tables_builder.builder_stack.iter().skip(1) {
-                        let table_builder = tables_builder
-                            .table_builders
-                            .get(table_path)
-                            .ok_or_else(|| Error::TableNotFound(table_path.to_string()))?;
-                        num_rows.push(table_builder.num_rows as u32);
-                    }
-                    tables_builder.current_builder_mut()?.end_row(&num_rows)?;
+                    let indices = get_parent_indices(&xml_to_arrow_converter)?;
+                    xml_to_arrow_converter
+                        .current_table_builder_mut()?
+                        .end_row(&indices)?;
                 }
             }
             Event::Eof => {
@@ -549,7 +543,7 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
         buf.clear();
     }
 
-    let batches = tables_builder.finish()?;
+    let batches = xml_to_arrow_converter.finish()?;
     Ok(batches)
 }
 
@@ -557,18 +551,31 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
 fn parse_attributes(
     attributes: Attributes,
     xml_path: &mut XmlPath,
-    tables_builder: &mut TablesBuilder,
+    xml_to_arrow_converter: &mut XmlToArrowConverter,
 ) -> Result<()> {
     for attribute in attributes {
         let attribute = attribute?;
         let key = std::str::from_utf8(attribute.key.local_name().into_inner())?;
         let node = "@".to_string() + key;
-        let table_builder = tables_builder.current_builder_mut()?;
+        let table_builder = xml_to_arrow_converter.current_table_builder_mut()?;
         xml_path.append_node(&node);
         table_builder.set_field_value(xml_path, std::str::from_utf8(attribute.value.as_ref())?);
         xml_path.remove_node();
     }
     Ok(())
+}
+
+#[inline]
+fn get_parent_indices(xml_to_arrow_converter: &XmlToArrowConverter) -> Result<Vec<u32>> {
+    let mut indices = Vec::with_capacity(xml_to_arrow_converter.builder_stack.len() - 1);
+    for table_path in xml_to_arrow_converter.builder_stack.iter().skip(1) {
+        let table_builder = xml_to_arrow_converter
+            .table_builders
+            .get(table_path)
+            .ok_or_else(|| Error::TableNotFound(table_path.to_string()))?;
+        indices.push(table_builder.num_rows as u32);
+    }
+    Ok(indices)
 }
 
 #[cfg(test)]
