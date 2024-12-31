@@ -551,13 +551,13 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
 fn parse_attributes(
     attributes: Attributes,
     xml_path: &mut XmlPath,
-    tables_builder: &mut XmlToArrowConverter,
+    xml_to_arrow_converter: &mut XmlToArrowConverter,
 ) -> Result<()> {
     for attribute in attributes {
         let attribute = attribute?;
         let key = std::str::from_utf8(attribute.key.local_name().into_inner())?;
         let node = "@".to_string() + key;
-        let table_builder = tables_builder.current_table_builder_mut()?;
+        let table_builder = xml_to_arrow_converter.current_table_builder_mut()?;
         xml_path.append_node(&node);
         table_builder.set_field_value(xml_path, std::str::from_utf8(attribute.value.as_ref())?);
         xml_path.remove_node();
