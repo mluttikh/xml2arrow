@@ -582,7 +582,8 @@ mod tests {
     use super::*;
     use crate::config::{Config, DType, FieldConfig, TableConfig};
     use arrow::array::{
-        BooleanArray, Int16Array, Int32Array, Int64Array, StringArray, UInt32Array, UInt64Array,
+        BooleanArray, Int16Array, Int32Array, Int64Array, StringArray, UInt16Array, UInt32Array,
+        UInt64Array,
     };
 
     fn approx_equal(a: f64, b: f64, abs: f64) -> bool {
@@ -1018,7 +1019,21 @@ mod tests {
 
     #[test]
     fn test_parse_xml_different_data_types() -> Result<()> {
-        let xml_content = r#"<data><item><int>123</int><float>3.17</float><bool>true</bool><uint32>4294967290</uint32><int32>-55769</int32><uint64>18446744073709551610</uint64><int64>9223372036854775807</int64></item></data>"#;
+        let xml_content = r#"
+            <data>
+              <item>
+                <int>123</int>
+                <float32>3.17</float32>
+                <float64>0.123456789</float64>
+                <bool>true</bool>
+                <uint16>62535</uint16>
+                <int16>-23452</int16>
+                <uint32>4294967290</uint32>
+                <int32>-55769</int32>
+                <uint64>18446744073709551610</uint64>
+                <int64>9223372036854775807</int64>
+              </item>
+            </data>"#;
         let config = Config {
             tables: vec![TableConfig {
                 name: "items".to_string(),
@@ -1029,15 +1044,23 @@ mod tests {
                         name: "int".to_string(),
                         xml_path: "/data/item/int".to_string(),
                         data_type: DType::Int32,
-                        nullable: true,
+                        nullable: false,
                         scale: None,
                         offset: None,
                     },
                     FieldConfig {
-                        name: "float".to_string(),
-                        xml_path: "/data/item/float".to_string(),
+                        name: "float32".to_string(),
+                        xml_path: "/data/item/float32".to_string(),
                         data_type: DType::Float32,
-                        nullable: true,
+                        nullable: false,
+                        scale: None,
+                        offset: None,
+                    },
+                    FieldConfig {
+                        name: "float64".to_string(),
+                        xml_path: "/data/item/float64".to_string(),
+                        data_type: DType::Float64,
+                        nullable: false,
                         scale: None,
                         offset: None,
                     },
@@ -1045,7 +1068,23 @@ mod tests {
                         name: "bool".to_string(),
                         xml_path: "/data/item/bool".to_string(),
                         data_type: DType::Boolean,
-                        nullable: true,
+                        nullable: false,
+                        scale: None,
+                        offset: None,
+                    },
+                    FieldConfig {
+                        name: "uint16".to_string(),
+                        xml_path: "/data/item/uint16".to_string(),
+                        data_type: DType::UInt16,
+                        nullable: false,
+                        scale: None,
+                        offset: None,
+                    },
+                    FieldConfig {
+                        name: "int16".to_string(),
+                        xml_path: "/data/item/int16".to_string(),
+                        data_type: DType::Int16,
+                        nullable: false,
                         scale: None,
                         offset: None,
                     },
@@ -1053,7 +1092,7 @@ mod tests {
                         name: "uint32".to_string(),
                         xml_path: "/data/item/uint32".to_string(),
                         data_type: DType::UInt32,
-                        nullable: true,
+                        nullable: false,
                         scale: None,
                         offset: None,
                     },
@@ -1061,7 +1100,7 @@ mod tests {
                         name: "int32".to_string(),
                         xml_path: "/data/item/int32".to_string(),
                         data_type: DType::Int32,
-                        nullable: true,
+                        nullable: false,
                         scale: None,
                         offset: None,
                     },
@@ -1069,7 +1108,7 @@ mod tests {
                         name: "uint64".to_string(),
                         xml_path: "/data/item/uint64".to_string(),
                         data_type: DType::UInt64,
-                        nullable: true,
+                        nullable: false,
                         scale: None,
                         offset: None,
                     },
@@ -1077,7 +1116,7 @@ mod tests {
                         name: "int64".to_string(),
                         xml_path: "/data/item/int64".to_string(),
                         data_type: DType::Int64,
-                        nullable: true,
+                        nullable: false,
                         scale: None,
                         offset: None,
                     },
@@ -1095,13 +1134,21 @@ mod tests {
             .unwrap();
         assert_eq!(int_array.value(0), 123);
 
-        let float_array = items_batch
-            .column_by_name("float")
+        let float32_array = items_batch
+            .column_by_name("float32")
             .unwrap()
             .as_any()
             .downcast_ref::<Float32Array>()
             .unwrap();
-        assert_eq!(float_array.value(0), 3.17);
+        assert_eq!(float32_array.value(0), 3.17);
+
+        let float64_array = items_batch
+            .column_by_name("float64")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(float64_array.value(0), 0.123456789);
 
         let bool_array = items_batch
             .column_by_name("bool")
@@ -1110,6 +1157,22 @@ mod tests {
             .downcast_ref::<BooleanArray>()
             .unwrap();
         assert!(bool_array.value(0));
+
+        let uint16_array = items_batch
+            .column_by_name("uint16")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt16Array>()
+            .unwrap();
+        assert_eq!(uint16_array.value(0), 62535);
+
+        let int16_array = items_batch
+            .column_by_name("int16")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int16Array>()
+            .unwrap();
+        assert_eq!(int16_array.value(0), -23452);
 
         let uint32_array = items_batch
             .column_by_name("uint32")
