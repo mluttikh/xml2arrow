@@ -44,8 +44,16 @@ pub enum Error {
 #[cfg(feature = "python")]
 create_exception!(
     xml2arrow,
-    XmlParsingError,
+    Xml2ArrowError,
     pyo3::exceptions::PyException,
+    "Base exception for the xml2arrow package."
+);
+
+#[cfg(feature = "python")]
+create_exception!(
+    xml2arrow,
+    XmlParsingError,
+    Xml2ArrowError,
     "Raised when an error occurs during XML parsing."
 );
 
@@ -53,7 +61,7 @@ create_exception!(
 create_exception!(
     xml2arrow,
     YamlParsingError,
-    pyo3::exceptions::PyException,
+    Xml2ArrowError,
     "Raised when an error occurs during YAML configuration parsing."
 );
 
@@ -61,7 +69,7 @@ create_exception!(
 create_exception!(
     xml2arrow,
     UnsupportedDataTypeError,
-    pyo3::exceptions::PyException,
+    Xml2ArrowError,
     "Raised when an unsupported data type is encountered."
 );
 
@@ -69,7 +77,7 @@ create_exception!(
 create_exception!(
     xml2arrow,
     TableNotFoundError,
-    pyo3::exceptions::PyException,
+    Xml2ArrowError,
     "Raised when a table specified in the configuration is not found in the XML data."
 );
 
@@ -77,12 +85,17 @@ create_exception!(
 create_exception!(
     xml2arrow,
     NoTableOnStackError,
-    pyo3::exceptions::PyException,
+    Xml2ArrowError,
     "Raised when an operation is performed that requires a table to be on the stack, but none is present."
 );
 
 #[cfg(feature = "python")]
-create_exception!(xml2arrow, ParseError, pyo3::exceptions::PyException);
+create_exception!(
+    xml2arrow,
+    ParseError,
+    Xml2ArrowError,
+    "Raised when an error occurs during parsing of values from strings to specific data types."
+);
 
 #[cfg(feature = "python")]
 impl From<Error> for PyErr {
