@@ -16,7 +16,7 @@ A Rust crate for efficiently converting XML data to Apache Arrow format.
 - 🚀 **High-performance** XML parsing using [quick-xml](https://github.com/tafia/quick-xml)
 - 📊 **Flexible Mapping:** Map complex XML structures to Apache Arrow with YAML
 - 🔄 **Nested Structure Support:** Handle deeply nested XML hierarchies
-- 🎯 **Customizable Type Conversion:** Automatically convert data types and apply scaling or offsets for unit conversion.
+- 🎯 **Customizable Type Conversion:** Automatically convert data types and apply unit conversion.
 - 💡 **Attribute & Element Extraction:** Seamlessly extract XML attributes or elements
 
 ## Usage
