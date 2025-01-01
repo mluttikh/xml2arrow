@@ -505,7 +505,7 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
     let mut xml_path = XmlPath::new("/");
     let mut xml_to_arrow_converter = XmlToArrowConverter::from_config(config)?;
 
-    let mut buf = Vec::new();
+    let mut buf = Vec::with_capacity(256);
 
     loop {
         match reader.read_event_into(&mut buf)? {
@@ -1018,7 +1018,7 @@ mod tests {
 
     #[test]
     fn test_parse_xml_different_data_types() -> Result<()> {
-        let xml_content = r#"<data><item><int>123</int><float>3.17</float><bool>true</bool><uint32>4294967290</uint32><uint64>18446744073709551610</uint64><int64>9223372036854775807</int64></item></data>"#;
+        let xml_content = r#"<data><item><int>123</int><float>3.17</float><bool>true</bool><uint32>4294967290</uint32><int32>-55769</int32><uint64>18446744073709551610</uint64><int64>9223372036854775807</int64></item></data>"#;
         let config = Config {
             tables: vec![TableConfig {
                 name: "items".to_string(),
@@ -1053,6 +1053,14 @@ mod tests {
                         name: "uint32".to_string(),
                         xml_path: "/data/item/uint32".to_string(),
                         data_type: DType::UInt32,
+                        nullable: true,
+                        scale: None,
+                        offset: None,
+                    },
+                    FieldConfig {
+                        name: "int32".to_string(),
+                        xml_path: "/data/item/int32".to_string(),
+                        data_type: DType::Int32,
                         nullable: true,
                         scale: None,
                         offset: None,
@@ -1110,6 +1118,14 @@ mod tests {
             .downcast_ref::<UInt32Array>()
             .unwrap();
         assert_eq!(uint32_array.value(0), 4294967290);
+
+        let int32_array = items_batch
+            .column_by_name("int32")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert_eq!(int32_array.value(0), -55769);
 
         let uint64_array = items_batch
             .column_by_name("uint64")
