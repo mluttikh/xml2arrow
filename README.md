@@ -9,7 +9,15 @@ A Rust crate for efficiently converting XML data to Apache Arrow format.
 
 ## Overview
 
-`xml2arrow` provides a high-performance solution for transforming XML documents into Apache Arrow tables. It leverages the `quick-xml` parser for efficient XML processing and the `arrow` crate for building Arrow data structures. This makes it ideal for handling large XML datasets and integrating them into data processing pipelines that utilize the Arrow ecosystem.
+`xml2arrow` provides a high-performance solution for transforming XML documents into Apache Arrow tables. It leverages the [quick-xml](https://github.com/tafia/quick-xml) parser for efficient XML processing and the [arrow](https://github.com/apache/arrow-rs) crate for building Arrow data structures. This makes it ideal for handling large XML datasets and integrating them into data processing pipelines that utilize the Arrow ecosystem.
+
+## Features
+
+- 🚀 **High-performance** XML parsing using [quick-xml](https://github.com/tafia/quick-xml)
+- 📊 **Flexible Mapping:** Map complex XML structures to Apache Arrow with YAML
+- 🔄 **Nested Structure Support:** Handle deeply nested XML hierarchies
+- 🎯 **Customizable Type Conversion:** Automatically convert data types and apply unit conversion.
+- 💡 **Attribute & Element Extraction:** Seamlessly extract XML attributes or elements
 
 ## Usage
 
