@@ -359,7 +359,7 @@ struct TableBuilder {
     table_config: TableConfig,
     index_builders: Vec<UInt32Builder>,
     field_builders: IndexMap<XmlPath, FieldBuilder, FxBuildHasher>,
-    num_rows: usize,
+    row_index: usize,
 }
 
 impl TableBuilder {
@@ -373,7 +373,7 @@ impl TableBuilder {
                 table_config.fields.len(),
                 FxBuildHasher::default(),
             ),
-            num_rows: 0,
+            row_index: 0,
         };
         for field_config in &table_config.fields {
             builder.add_column(field_config)?;
@@ -413,7 +413,7 @@ impl TableBuilder {
         for field_builder in self.field_builders.values_mut() {
             field_builder.append_current_value()?;
         }
-        self.num_rows += 1;
+        self.row_index += 1;
         Ok(())
     }
 
@@ -475,8 +475,14 @@ impl XmlToArrowConverter {
             .ok_or_else(|| Error::TableNotFound(table_path.to_string()))
     }
 
-    fn start_table(&mut self, table_path: &XmlPath) {
+    fn start_table(&mut self, table_path: &XmlPath) -> Result<()> {
         self.builder_stack.push_back(table_path.clone());
+        let table_builder = self
+            .table_builders
+            .get_mut(table_path)
+            .ok_or_else(|| Error::TableNotFound(table_path.to_string()))?;
+        table_builder.row_index = 0;
+        Ok(())
     }
 
     fn end_table(&mut self) -> Result<()> {
@@ -555,7 +561,7 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
                 let node = std::str::from_utf8(e.local_name().into_inner())?;
                 xml_path.append_node(node);
                 if xml_to_arrow_converter.is_table_path(&xml_path) {
-                    xml_to_arrow_converter.start_table(&xml_path);
+                    xml_to_arrow_converter.start_table(&xml_path)?;
                 }
                 parse_attributes(e.attributes(), &mut xml_path, &mut xml_to_arrow_converter)?;
             }
@@ -570,7 +576,7 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
                 xml_path.remove_node();
                 if xml_to_arrow_converter.is_table_path(&xml_path) {
                     // This is the root element of the table
-                    let indices = get_parent_indices(&xml_to_arrow_converter)?;
+                    let indices = get_parent_row_indices(&xml_to_arrow_converter)?;
                     xml_to_arrow_converter
                         .current_table_builder_mut()?
                         .end_row(&indices)?;
@@ -607,14 +613,14 @@ fn parse_attributes(
 }
 
 #[inline]
-fn get_parent_indices(xml_to_arrow_converter: &XmlToArrowConverter) -> Result<Vec<u32>> {
+fn get_parent_row_indices(xml_to_arrow_converter: &XmlToArrowConverter) -> Result<Vec<u32>> {
     let mut indices = Vec::with_capacity(xml_to_arrow_converter.builder_stack.len() - 1);
     for table_path in xml_to_arrow_converter.builder_stack.iter().skip(1) {
         let table_builder = xml_to_arrow_converter
             .table_builders
             .get(table_path)
             .ok_or_else(|| Error::TableNotFound(table_path.to_string()))?;
-        indices.push(table_builder.num_rows as u32);
+        indices.push(table_builder.row_index as u32);
     }
     Ok(indices)
 }
@@ -1527,6 +1533,86 @@ mod tests {
             .unwrap();
         assert_eq!(name_array.value(0), "Item One");
         assert_eq!(name_array.value(1), "Item Two");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_nested_row_index() -> Result<()> {
+        let xml_content = r#"
+            <data>
+                <dataset>
+                    <table>
+                        <group>
+                            <item id="1"></item>
+                            <item id="2"></item>
+                        </group>
+                        <group>
+                            <item id="3"></item>
+                        </group>
+                    </table>
+                </dataset>
+            </data>
+        "#;
+
+        let config = Config {
+            tables: vec![
+                TableConfig {
+                    name: "groups".to_string(),
+                    xml_path: "/data/dataset/table".to_string(),
+                    levels: vec!["table".to_string()],
+                    fields: vec![],
+                },
+                TableConfig {
+                    name: "items".to_string(),
+                    xml_path: "/data/dataset/table/group".to_string(),
+                    levels: vec!["table".to_string(), "group".to_string()], // Two levels
+                    fields: vec![FieldConfig {
+                        name: "id".to_string(),
+                        xml_path: "/data/dataset/table/group/item/@id".to_string(),
+                        data_type: DType::UInt32,
+                        nullable: false,
+                        scale: None,
+                        offset: None,
+                    }],
+                },
+            ],
+        };
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let items_batch = record_batches.get("items").unwrap();
+
+        assert_eq!(items_batch.num_rows(), 3);
+
+        let table_index_array = items_batch
+            .column_by_name("<table>")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        assert_eq!(table_index_array.value(0), 0);
+        assert_eq!(table_index_array.value(1), 0);
+        assert_eq!(table_index_array.value(2), 1);
+
+        let group_index_array = items_batch
+            .column_by_name("<group>")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        assert_eq!(group_index_array.value(0), 0);
+        assert_eq!(group_index_array.value(1), 1);
+        assert_eq!(group_index_array.value(2), 0);
+
+        let id_array = items_batch
+            .column_by_name("id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        assert_eq!(id_array.value(0), 1);
+        assert_eq!(id_array.value(1), 2);
+        assert_eq!(id_array.value(2), 3);
 
         Ok(())
     }
