@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use arrow::array::{
     Array, ArrayBuilder, AsArray, BooleanBuilder, Float32Array, Float32Builder, Float64Array,
-    Float64Builder, Int16Builder, Int32Builder, Int64Builder, RecordBatch, StringBuilder,
-    UInt16Builder, UInt32Builder, UInt64Builder,
+    Float64Builder, Int16Builder, Int32Builder, Int64Builder, Int8Builder, RecordBatch,
+    StringBuilder, UInt16Builder, UInt32Builder, UInt64Builder, UInt8Builder,
 };
 use arrow::compute::kernels::numeric;
 use arrow::datatypes::{DataType, Field, Float32Type, Float64Type, Schema};
@@ -72,6 +72,46 @@ impl FieldBuilder {
                     builder.append_null();
                 } else {
                     builder.append_value("")
+                }
+            }
+            DataType::Int8 => {
+                let builder = self
+                    .array_builder
+                    .as_any_mut()
+                    .downcast_mut::<Int8Builder>()
+                    .expect("Int8Builder");
+                if self.has_value {
+                    match value.parse::<i8>() {
+                        Ok(val) => builder.append_value(val),
+                        Err(e) => {
+                            return Err(Error::ParseError(format!(
+                                "Failed to parse value '{}' as Int16: {}",
+                                value, e
+                            )));
+                        }
+                    }
+                } else {
+                    builder.append_null();
+                }
+            }
+            DataType::UInt8 => {
+                let builder = self
+                    .array_builder
+                    .as_any_mut()
+                    .downcast_mut::<UInt8Builder>()
+                    .expect("UInt8Builder");
+                if self.has_value {
+                    match value.parse::<u8>() {
+                        Ok(val) => builder.append_value(val),
+                        Err(e) => {
+                            return Err(Error::ParseError(format!(
+                                "Failed to parse value '{}' as UInt16: {}",
+                                value, e
+                            )));
+                        }
+                    }
+                } else {
+                    builder.append_null();
                 }
             }
             DataType::Int16 => {
@@ -300,6 +340,8 @@ impl FieldBuilder {
 fn create_array_builder(dtype: DType) -> Result<Box<dyn ArrayBuilder>> {
     match dtype {
         DType::Boolean => Ok(Box::new(BooleanBuilder::default())),
+        DType::Int8 => Ok(Box::new(Int8Builder::default())),
+        DType::UInt8 => Ok(Box::new(UInt8Builder::default())),
         DType::Int16 => Ok(Box::new(Int16Builder::default())),
         DType::UInt16 => Ok(Box::new(UInt16Builder::default())),
         DType::Int32 => Ok(Box::new(Int32Builder::default())),
@@ -582,8 +624,8 @@ mod tests {
     use super::*;
     use crate::config::{Config, DType, FieldConfig, TableConfig};
     use arrow::array::{
-        BooleanArray, Int16Array, Int32Array, Int64Array, StringArray, UInt16Array, UInt32Array,
-        UInt64Array,
+        BooleanArray, Int16Array, Int32Array, Int64Array, Int8Array, StringArray, UInt16Array,
+        UInt32Array, UInt64Array, UInt8Array,
     };
 
     fn approx_equal(a: f64, b: f64, abs: f64) -> bool {
@@ -1025,6 +1067,8 @@ mod tests {
                 <float32>3.17</float32>
                 <float64>0.123456789</float64>
                 <bool>true</bool>
+                <uint8>252</uint8>
+                <int8>-124</int8>
                 <uint16>62535</uint16>
                 <int16>-23452</int16>
                 <uint32>4294967290</uint32>
@@ -1060,6 +1104,22 @@ mod tests {
                         name: "bool".to_string(),
                         xml_path: "/data/item/bool".to_string(),
                         data_type: DType::Boolean,
+                        nullable: false,
+                        scale: None,
+                        offset: None,
+                    },
+                    FieldConfig {
+                        name: "uint8".to_string(),
+                        xml_path: "/data/item/uint8".to_string(),
+                        data_type: DType::UInt8,
+                        nullable: false,
+                        scale: None,
+                        offset: None,
+                    },
+                    FieldConfig {
+                        name: "int8".to_string(),
+                        xml_path: "/data/item/int8".to_string(),
+                        data_type: DType::Int8,
                         nullable: false,
                         scale: None,
                         offset: None,
@@ -1149,6 +1209,22 @@ mod tests {
             .downcast_ref::<BooleanArray>()
             .unwrap();
         assert!(bool_array.value(0));
+
+        let uint8_array = items_batch
+            .column_by_name("uint8")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt8Array>()
+            .unwrap();
+        assert_eq!(uint8_array.value(0), 252);
+
+        let int8_array = items_batch
+            .column_by_name("int8")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int8Array>()
+            .unwrap();
+        assert_eq!(int8_array.value(0), -124);
 
         let uint16_array = items_batch
             .column_by_name("uint16")
