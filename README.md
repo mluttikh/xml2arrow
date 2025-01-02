@@ -2,10 +2,13 @@
 [![crates.io](https://img.shields.io/crates/v/xml2arrow)](https://crates.io/crates/xml2arrow)
 [![crates.io](https://img.shields.io/crates/d/xml2arrow)](https://crates.io/crates/xml2arrow)
 [![docs.rs](https://docs.rs/xml2arrow/badge.svg)](https://docs.rs/xml2arrow)
+[![Python](https://img.shields.io/badge/python-xml2arrow-blue.svg?style=flat&logo=python)](https://github.com/mluttikh/xml2arrow-python)
 [![License](https://img.shields.io/crates/l/xml2arrow)](LICENSE)
 # XML2ARROW
 
 A Rust crate for efficiently converting XML data to Apache Arrow format.
+
+A Python version of this library is also available on GitHub: [https://github.com/mluttikh/xml2arrow-python](https://github.com/mluttikh/xml2arrow-python)
 
 ## Overview
 
