@@ -184,7 +184,7 @@ tables:
   - name: stations
     xml_path: /report/monitoring_stations
     levels:
-    - station  
+    - station
     fields:
     - name: id
       xml_path: /report/monitoring_stations/monitoring_station/@id  # Path to an attribute
