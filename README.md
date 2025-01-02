@@ -21,9 +21,11 @@ A Rust crate for efficiently converting XML data to Apache Arrow format.
 
 ## Usage
 
-1. Create a Configuration File (YAML):
+`xml2arrow` converts XML data to Apache Arrow format using a YAML configuration file.
 
-The configuration file (YAML format) defines how your XML structure maps to Arrow tables and fields. Here's a detailed explanation of the configuration structure:
+### 1. Configuration File (YAML):
+
+The YAML configuration defines the mapping between your XML structure and Arrow tables and fields.
 
 ```yaml
 tables:
@@ -39,49 +41,48 @@ tables:
       nullable: <true|false>   # Whether the field can be null
       scale: <number>          # Optional scaling factor for floats. 
       offset: <number>         # Optional offset for numeric floats
-  - name: ...
+  - name: ...                  # Define additional tables as needed
 ```
 
-* `tables`: A list of table configurations. Each entry defines a separate Arrow table to be extracted from the XML.
-* `name`: The name given to the resulting Arrow *RecordBatch* (which represents a table).
-* `xml_path`: An XPath-like string that specifies the XML element that is the parent of the elements representing rows in the table. For example, if your XML contains `<library><book>...</book><book>...</book></library>`, the `xml_path` would be `/library`.
-* `levels`: An array of strings that represent parent tables to create an index for nested structures. If the XML structure is `/library/shelfs/shelf/books/book` you should define levels like this: `levels: ["shelfs", "books"]`. This will create indexes named `<shelfs>` and `<books>`.
-* `fields`: A list of field configurations for each column in the Arrow table.
-  * `name`: The name of the field in the Arrow schema.
-  * `xml_path`: An XPath-like string that specifies the XML element or attribute containing the field's value. To select an attribute, append `@` followed by the attribute name to the element's path. For example, `/library/book/@id` selects the `id` attribute of the `book` element.
-  * `data_type`: The Arrow data type of the field. Supported types are:
-    * `Boolean` (*true* or *false*)
-    * `Int8`
-    * `UInt8`
-    * `Int16`
-    * `UInt16`
-    * `Int32`
-    * `UInt32`
-    * `Int64`
-    * `UInt64`
-    * `Float32`
-    * `Float64`
-    * `Utf8` (Strings)
-  * `nullable`: A boolean value indicating whether the field can contain null values. This field is optional and defaults to `false` if not specified.
-  * `scale` (Optional): A scaling factor for float fields (e.g., to convert units).
-  * `offset` (Optional): An offset value for float fields (e.g., to convert units).
+*   **`tables`:** A list of table configurations. Each entry defines a separate Arrow table.
+    *   **`name`:** The name of the resulting Arrow `RecordBatch` (table).
+    *   **`xml_path`:** An XPath-like string specifying the parent element of the row elements. For example, for `<library><book>...</book><book>...</book></library>`, the `xml_path` would be `/library`.
+    *   **`levels`:** An array of strings representing parent tables for creating indexes in nested structures. For `/library/shelves/shelf/books/book`, use `levels: ["shelves", "books"]`. This creates indexes named `<shelves>` and `<books>`.
+    *   **`fields`:** A list of field configurations (columns) for the Arrow table.
+        *   **`name`:** The name of the field in the Arrow schema.
+        *   **`xml_path`:** An XPath-like string selecting the field's value. Use `@` to select attributes (e.g., `/library/book/@id`).
+        *   **`data_type`:** The Arrow data type. Supported types:
+            *   `Boolean` (`true` or `false`)
+            *   `Int8`, `UInt8`, `Int16`, `UInt16`, `Int32`, `UInt32`, `Int64`, `UInt64`
+            *   `Float32`, `Float64`
+            *   `Utf8` (Strings)
+        *   **`nullable` (Optional):** Whether the field can be null (defaults to `false`).
+        *   **`scale` (Optional):** A scaling factor for float fields.
+        *   **`offset` (Optional):** An offset value for float fields.
 
-2. Parse the XML
-```Rust
+### 2. Parsing the XML
+```rust
 use std::fs::File;
 use std::io::BufReader;
-use xml2arrow::(Config, parse_xml};
+use xml2arrow::{Config, parse_xml};
 
-let config = Config::from_yaml_file("config.yaml").unwrap();
+fn main() -> Result<(), Box<dyn std::error::Error>>{
+    let config = Config::from_yaml_file("config.yaml")?;
 
-let file = File::open("data.xml").unwrap();
-let reader = BufReader::new(file);
-let record_batches = parse_xml(reader, &config).unwrap();
+    let file = File::open("data.xml")?;
+    let reader = BufReader::new(file);
+    let record_batches = parse_xml(reader, &config)?;
+
+    // Process the record batches...
+    Ok(())
+}
 ```
 
 ## Example
 
-Suppose we have the following XML file (`stations.xml`):
+This example demonstrates how to convert meteorological station data from XML to Arrow format.
+
+**1. XML Data (`stations.xml`):**
 
 ```xml
 <report>
@@ -95,7 +96,7 @@ Suppose we have the following XML file (`stations.xml`):
       <location>
         <latitude>-61.39110459389277</latitude>
         <longitude>48.08662749089257</longitude>
-        <elevation unit="m">547.1050788360882</elevation>
+        <elevation>547.1050788360882</elevation>
       </location>
       <measurements>
         <measurement>
@@ -157,7 +158,7 @@ Suppose we have the following XML file (`stations.xml`):
 </report>
 ```
 
-We can define a YAML configuration file (`stations.yaml`) to specify how to convert the XML data to Arrow tables:
+**2. Configuration File (`stations.yaml`):**
 
 ```yaml
 tables:
@@ -180,7 +181,7 @@ tables:
   - name: stations
     xml_path: /report/monitoring_stations
     levels:
-    - station
+    - station  
     fields:
     - name: id
       xml_path: /report/monitoring_stations/monitoring_station/@id  # Path to an attribute
@@ -209,7 +210,7 @@ tables:
   - name: measurements
     xml_path: /report/monitoring_stations/monitoring_station/measurements
     levels:
-    - station
+    - station  # Link to the 'stations' table by element order
     - measurement
     fields:
     - name: timestamp
@@ -232,19 +233,30 @@ tables:
       nullable: false
 ```
 
-Here's how to use `xml2arrow` to parse the XML and YAML files and get the resulting Arrow tables:
+**3. Parsing the XML (Rust):**
 
 ```rust
 use std::fs::File;
 use std::io::BufReader;
-use xml2arrow::(Config, parse_xml};
+use xml2arrow::{Config, parse_xml};
 
-let config = Config::from_yaml_file("stations.yaml").unwrap();  // Load configuration
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = Config::from_yaml_file("stations.yaml")?;
 
-let file = File::open("stations.xml").unwrap();
-let reader = BufReader::new(file);
-let record_batches = parse_xml(reader, &config).unwrap();       // Parse XML using configuration
+    let file = File::open("stations.xml")?;
+    let reader = BufReader::new(file);
+    let record_batches = parse_xml(reader, &config)?;
+
+    // Accessing the record batches (example)
+    for (name, batch) in record_batches {
+        // Process the record batches...
+    }
+
+    Ok(())
+}
 ```
+
+**4. Expected Output (Conceptual):**
 
 ```
 - report:
