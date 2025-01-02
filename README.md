@@ -82,7 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>>{
 
 This example demonstrates how to convert meteorological station data from XML to Arrow format.
 
-**1. XML Data (`stations.xml`):**
+### 1. XML Data (`stations.xml`)
 
 ```xml
 <report>
@@ -158,7 +158,7 @@ This example demonstrates how to convert meteorological station data from XML to
 </report>
 ```
 
-**2. Configuration File (`stations.yaml`):**
+### 2. Configuration File (`stations.yaml`)
 
 ```yaml
 tables:
@@ -233,7 +233,7 @@ tables:
       nullable: false
 ```
 
-**3. Parsing the XML (Rust):**
+### 3. Parsing the XML
 
 ```rust
 use std::fs::File;
@@ -256,7 +256,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-**4. Expected Output (Conceptual):**
+### 4. Expected Record Batches (Conceptual)
 
 ```
 - report:
