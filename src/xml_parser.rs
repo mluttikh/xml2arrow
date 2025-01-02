@@ -85,7 +85,7 @@ impl FieldBuilder {
                         Ok(val) => builder.append_value(val),
                         Err(e) => {
                             return Err(Error::ParseError(format!(
-                                "Failed to parse value '{}' as Int16: {}",
+                                "Failed to parse value '{}' as Int8: {}",
                                 value, e
                             )));
                         }
@@ -105,7 +105,7 @@ impl FieldBuilder {
                         Ok(val) => builder.append_value(val),
                         Err(e) => {
                             return Err(Error::ParseError(format!(
-                                "Failed to parse value '{}' as UInt16: {}",
+                                "Failed to parse value '{}' as UInt8: {}",
                                 value, e
                             )));
                         }
