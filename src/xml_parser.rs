@@ -1022,7 +1022,6 @@ mod tests {
         let xml_content = r#"
             <data>
               <item>
-                <int>123</int>
                 <float32>3.17</float32>
                 <float64>0.123456789</float64>
                 <bool>true</bool>
@@ -1032,6 +1031,7 @@ mod tests {
                 <int32>-55769</int32>
                 <uint64>18446744073709551610</uint64>
                 <int64>9223372036854775807</int64>
+                <utf8>Héllo你😊</utf8>
               </item>
             </data>"#;
         let config = Config {
@@ -1040,14 +1040,6 @@ mod tests {
                 xml_path: "/data".to_string(),
                 levels: vec![],
                 fields: vec![
-                    FieldConfig {
-                        name: "int".to_string(),
-                        xml_path: "/data/item/int".to_string(),
-                        data_type: DType::Int32,
-                        nullable: false,
-                        scale: None,
-                        offset: None,
-                    },
                     FieldConfig {
                         name: "float32".to_string(),
                         xml_path: "/data/item/float32".to_string(),
@@ -1120,19 +1112,19 @@ mod tests {
                         scale: None,
                         offset: None,
                     },
+                    FieldConfig {
+                        name: "utf8".to_string(),
+                        xml_path: "/data/item/utf8".to_string(),
+                        data_type: DType::Utf8,
+                        nullable: false,
+                        scale: None,
+                        offset: None,
+                    },
                 ],
             }],
         };
         let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let items_batch = record_batches.get("items").unwrap();
-
-        let int_array = items_batch
-            .column_by_name("int")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
-        assert_eq!(int_array.value(0), 123);
 
         let float32_array = items_batch
             .column_by_name("float32")
@@ -1205,6 +1197,14 @@ mod tests {
             .downcast_ref::<Int64Array>()
             .unwrap();
         assert_eq!(int64_array.value(0), 9223372036854775807);
+
+        let utf8_array = items_batch
+            .column_by_name("utf8")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(utf8_array.value(0), "Héllo你😊");
 
         Ok(())
     }
