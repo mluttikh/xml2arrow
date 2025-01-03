@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::io::BufRead;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use arrow::array::{
@@ -21,17 +22,21 @@ use crate::errors::Result;
 use crate::xml_path::XmlPath;
 use crate::Config;
 
-/// Represents a single field in the Arrow table
+/// Builds Arrow arrays for a single field based on parsed XML data.
+///
+/// This struct manages the accumulation of values from the XML and their conversion
+/// to the appropriate Arrow data type. It also handles null values and applies
+/// scaling and offset transformations if configured.
 struct FieldBuilder {
-    /// Configuration of the field
+    /// Configuration of the field, including name, data type, nullability, scaling, and offset.
     field_config: FieldConfig,
     /// The Arrow field description
     field: Field,
-    /// The Arrow array builder
+    /// The Arrow array builder used to construct the array.
     array_builder: Box<dyn ArrayBuilder>,
-    /// Does the builder contain a value?
+    /// Indicates whether the builder has received any values for the current row.
     has_value: bool,
-    /// Cache for the current value
+    /// Temporary storage for accumulating the current value from potentially multiple XML text nodes.
     current_value: String,
 }
 
@@ -57,6 +62,8 @@ impl FieldBuilder {
         self.has_value = true;
     }
 
+    /// Appends the currently accumulated value to the appropriate Arrow array builder,
+    /// performing type conversion and handling nulls.
     fn append_current_value(&mut self) -> Result<()> {
         let value = &self.current_value;
         match self.field.data_type() {
@@ -337,8 +344,8 @@ impl FieldBuilder {
     }
 }
 
-fn create_array_builder(dtype: DType) -> Result<Box<dyn ArrayBuilder>> {
-    match dtype {
+fn create_array_builder(data_type: DType) -> Result<Box<dyn ArrayBuilder>> {
+    match data_type {
         DType::Boolean => Ok(Box::new(BooleanBuilder::default())),
         DType::Int8 => Ok(Box::new(Int8Builder::default())),
         DType::UInt8 => Ok(Box::new(UInt8Builder::default())),
@@ -354,11 +361,19 @@ fn create_array_builder(dtype: DType) -> Result<Box<dyn ArrayBuilder>> {
     }
 }
 
-/// Represents a single table being parsed
+/// Builds an Arrow RecordBatch for a single table defined in the configuration.
+///
+/// This struct manages the building of a single Arrow `RecordBatch` by collecting
+/// data for each field defined in the table's configuration. It also handles
+/// parent/child relationships between tables through index builders.
 struct TableBuilder {
+    /// The table's configuration.
     table_config: TableConfig,
+    // Builders for the parent row indices, used for representing nested tables.
     index_builders: Vec<UInt32Builder>,
+    /// Builders for each field in the table, mapped by their XML path.
     field_builders: IndexMap<XmlPath, FieldBuilder, FxBuildHasher>,
+    /// The current row index for this table.
     row_index: usize,
 }
 
@@ -440,8 +455,15 @@ impl TableBuilder {
     }
 }
 
+/// Converts parsed XML events into Arrow RecordBatches.
+///
+/// This struct maintains a stack of table builders to handle nested XML structures.
+/// It uses the provided `Config` to determine which XML elements represent tables
+/// and which elements represent fields.
 struct XmlToArrowConverter {
+    /// Table builders for each table defined in the configuration.
     table_builders: IndexMap<XmlPath, TableBuilder, FxBuildHasher>,
+    /// Stack of XML paths representing the current nesting level of tables.
     builder_stack: VecDeque<XmlPath>,
 }
 
@@ -473,6 +495,18 @@ impl XmlToArrowConverter {
         self.table_builders
             .get_mut(table_path)
             .ok_or_else(|| Error::TableNotFound(table_path.to_string()))
+    }
+
+    fn parent_row_indices(&self) -> Result<Vec<u32>> {
+        let mut indices = Vec::with_capacity(self.builder_stack.len() - 1);
+        for table_path in self.builder_stack.iter().skip(1) {
+            let table_builder = self
+                .table_builders
+                .get(table_path)
+                .ok_or_else(|| Error::TableNotFound(table_path.to_string()))?;
+            indices.push(table_builder.row_index as u32);
+        }
+        Ok(indices)
     }
 
     fn start_table(&mut self, table_path: &XmlPath) -> Result<()> {
@@ -553,30 +587,76 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
     let mut xml_path = XmlPath::new("/");
     let mut xml_to_arrow_converter = XmlToArrowConverter::from_config(config)?;
 
-    let mut buf = Vec::with_capacity(256);
+    // Use specialized parsing logic based on whether attribute parsing is required.
+    // This avoids unnecessary attribute processing and Empty event handling
+    // when attributes are not needed, improving performance.
+    if config.requires_attribute_parsing() {
+        process_xml_events::<_, true>(
+            &mut reader,
+            &mut xml_path,
+            &mut xml_to_arrow_converter,
+            PhantomData,
+        )?;
+    } else {
+        process_xml_events::<_, false>(
+            &mut reader,
+            &mut xml_path,
+            &mut xml_to_arrow_converter,
+            PhantomData,
+        )?;
+    }
 
+    let batches = xml_to_arrow_converter.finish()?;
+    Ok(batches)
+}
+
+fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
+    reader: &mut Reader<B>,
+    xml_path: &mut XmlPath,
+    xml_to_arrow_converter: &mut XmlToArrowConverter,
+    _marker: PhantomData<bool>,
+) -> Result<()> {
+    let mut buf = Vec::with_capacity(256);
     loop {
         match reader.read_event_into(&mut buf)? {
             Event::Start(e) => {
                 let node = std::str::from_utf8(e.local_name().into_inner())?;
                 xml_path.append_node(node);
-                if xml_to_arrow_converter.is_table_path(&xml_path) {
-                    xml_to_arrow_converter.start_table(&xml_path)?;
+                if xml_to_arrow_converter.is_table_path(xml_path) {
+                    xml_to_arrow_converter.start_table(xml_path)?;
                 }
-                parse_attributes(e.attributes(), &mut xml_path, &mut xml_to_arrow_converter)?;
+                if PARSE_ATTRIBUTES {
+                    parse_attributes(e.attributes(), xml_path, xml_to_arrow_converter)?;
+                }
+            }
+            Event::Empty(e) => {
+                if PARSE_ATTRIBUTES {
+                    let node = std::str::from_utf8(e.local_name().into_inner())?;
+                    xml_path.append_node(node);
+                    parse_attributes(e.attributes(), xml_path, xml_to_arrow_converter)?;
+                    xml_path.remove_node();
+                    if xml_to_arrow_converter.is_table_path(xml_path) {
+                        // This is the root element of the table
+                        let indices = xml_to_arrow_converter.parent_row_indices()?;
+                        xml_to_arrow_converter
+                            .current_table_builder_mut()?
+                            .end_row(&indices)?;
+                    }
+                }
             }
             Event::Text(e) => {
-                let table_builder = xml_to_arrow_converter.current_table_builder_mut()?;
-                table_builder.set_field_value(&xml_path, &e.unescape()?);
+                xml_to_arrow_converter
+                    .current_table_builder_mut()?
+                    .set_field_value(xml_path, &e.unescape()?);
             }
             Event::End(_) => {
-                if xml_to_arrow_converter.is_table_path(&xml_path) {
+                if xml_to_arrow_converter.is_table_path(xml_path) {
                     xml_to_arrow_converter.end_table()?;
                 }
                 xml_path.remove_node();
-                if xml_to_arrow_converter.is_table_path(&xml_path) {
+                if xml_to_arrow_converter.is_table_path(xml_path) {
                     // This is the root element of the table
-                    let indices = get_parent_row_indices(&xml_to_arrow_converter)?;
+                    let indices = xml_to_arrow_converter.parent_row_indices()?;
                     xml_to_arrow_converter
                         .current_table_builder_mut()?
                         .end_row(&indices)?;
@@ -589,9 +669,7 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
         }
         buf.clear();
     }
-
-    let batches = xml_to_arrow_converter.finish()?;
-    Ok(batches)
+    Ok(())
 }
 
 #[inline]
@@ -610,19 +688,6 @@ fn parse_attributes(
         xml_path.remove_node();
     }
     Ok(())
-}
-
-#[inline]
-fn get_parent_row_indices(xml_to_arrow_converter: &XmlToArrowConverter) -> Result<Vec<u32>> {
-    let mut indices = Vec::with_capacity(xml_to_arrow_converter.builder_stack.len() - 1);
-    for table_path in xml_to_arrow_converter.builder_stack.iter().skip(1) {
-        let table_builder = xml_to_arrow_converter
-            .table_builders
-            .get(table_path)
-            .ok_or_else(|| Error::TableNotFound(table_path.to_string()))?;
-        indices.push(table_builder.row_index as u32);
-    }
-    Ok(indices)
 }
 
 #[cfg(test)]
@@ -842,8 +907,8 @@ mod tests {
             .as_any()
             .downcast_ref::<BooleanArray>()
             .unwrap();
-        assert_eq!(in_stock_array.value(0), true);
-        assert_eq!(in_stock_array.value(1), false);
+        assert!(in_stock_array.value(0));
+        assert!(!in_stock_array.value(1));
 
         let count_array = items_batch
             .column_by_name("count")
@@ -1613,6 +1678,84 @@ mod tests {
         assert_eq!(id_array.value(0), 1);
         assert_eq!(id_array.value(1), 2);
         assert_eq!(id_array.value(2), 3);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_empty_tags() -> Result<()> {
+        let xml_content = r#"
+            <data>
+                <dataset>
+                    <table>
+                        <item id="1" name="Item 1" />
+                        <item id="2" />
+                        <item id="3" name="Item 3" />
+                    </table>
+                </dataset>
+            </data>
+        "#;
+
+        let config = Config {
+            tables: vec![TableConfig {
+                name: "items".to_string(),
+                xml_path: "/data/dataset/table".to_string(),
+                levels: vec!["table".to_string()],
+                fields: vec![
+                    FieldConfig {
+                        name: "id".to_string(),
+                        xml_path: "/data/dataset/table/item/@id".to_string(),
+                        data_type: DType::UInt8,
+                        nullable: false,
+                        scale: None,
+                        offset: None,
+                    },
+                    FieldConfig {
+                        name: "name".to_string(),
+                        xml_path: "/data/dataset/table/item/@name".to_string(),
+                        data_type: DType::Utf8,
+                        nullable: true, // Name is nullable because of the empty tag
+                        scale: None,
+                        offset: None,
+                    },
+                ],
+            }],
+        };
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let items_batch = record_batches.get("items").unwrap();
+
+        assert_eq!(items_batch.num_rows(), 3);
+
+        let table_index_array = items_batch
+            .column_by_name("<table>")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        assert_eq!(table_index_array.value(0), 0);
+        assert_eq!(table_index_array.value(1), 1);
+        assert_eq!(table_index_array.value(2), 2);
+
+        let id_array = items_batch
+            .column_by_name("id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt8Array>()
+            .unwrap();
+        assert_eq!(id_array.value(0), 1);
+        assert_eq!(id_array.value(1), 2);
+        assert_eq!(id_array.value(2), 3);
+
+        let name_array = items_batch
+            .column_by_name("name")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(name_array.value(0), "Item 1");
+        assert!(name_array.is_null(1)); // Check for null value
+        assert_eq!(name_array.value(2), "Item 3");
 
         Ok(())
     }

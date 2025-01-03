@@ -72,6 +72,25 @@ impl Config {
         let writer = BufWriter::new(file);
         serde_yaml::to_writer(writer, self).map_err(Error::Yaml)
     }
+
+    /// Checks if the configuration contains any fields that require attribute parsing.
+    ///
+    /// This method iterates through all tables and their fields in the configuration and returns
+    /// `true` if any field's XML path contains the "@" symbol, indicating that it targets an attribute.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the configuration contains at least one attribute to parse, `false` otherwise.
+    pub fn requires_attribute_parsing(&self) -> bool {
+        for table in &self.tables {
+            for field in &table.fields {
+                if field.xml_path.contains("@") {
+                    return true;
+                }
+            }
+        }
+        false
+    }
 }
 
 /// Configuration for an XML table to be parsed into an Arrow record batch.
