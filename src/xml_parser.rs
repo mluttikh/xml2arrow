@@ -22,17 +22,21 @@ use crate::errors::Result;
 use crate::xml_path::XmlPath;
 use crate::Config;
 
-/// Represents a single field in the Arrow table
+/// Builds Arrow arrays for a single field based on parsed XML data.
+///
+/// This struct manages the accumulation of values from the XML and their conversion
+/// to the appropriate Arrow data type. It also handles null values and applies
+/// scaling and offset transformations if configured.
 struct FieldBuilder {
-    /// Configuration of the field
+    /// Configuration of the field, including name, data type, nullability, scaling, and offset.
     field_config: FieldConfig,
     /// The Arrow field description
     field: Field,
-    /// The Arrow array builder
+    /// The Arrow array builder used to construct the array.
     array_builder: Box<dyn ArrayBuilder>,
-    /// Does the builder contain a value?
+    /// Indicates whether the builder has received any values for the current row.
     has_value: bool,
-    /// Cache for the current value
+    /// Temporary storage for accumulating the current value from potentially multiple XML text nodes.
     current_value: String,
 }
 
@@ -58,6 +62,8 @@ impl FieldBuilder {
         self.has_value = true;
     }
 
+    /// Appends the currently accumulated value to the appropriate Arrow array builder,
+    /// performing type conversion and handling nulls.
     fn append_current_value(&mut self) -> Result<()> {
         let value = &self.current_value;
         match self.field.data_type() {
@@ -355,11 +361,19 @@ fn create_array_builder(data_type: DType) -> Result<Box<dyn ArrayBuilder>> {
     }
 }
 
-/// Represents a single table being parsed
+/// Builds an Arrow RecordBatch for a single table defined in the configuration.
+///
+/// This struct manages the building of a single Arrow `RecordBatch` by collecting
+/// data for each field defined in the table's configuration. It also handles
+/// parent/child relationships between tables through index builders.
 struct TableBuilder {
+    /// The table's configuration.
     table_config: TableConfig,
+    // Builders for the parent row indices, used for representing nested tables.
     index_builders: Vec<UInt32Builder>,
+    /// Builders for each field in the table, mapped by their XML path.
     field_builders: IndexMap<XmlPath, FieldBuilder, FxBuildHasher>,
+    /// The current row index for this table.
     row_index: usize,
 }
 
@@ -441,8 +455,15 @@ impl TableBuilder {
     }
 }
 
+/// Converts parsed XML events into Arrow RecordBatches.
+///
+/// This struct maintains a stack of table builders to handle nested XML structures.
+/// It uses the provided `Config` to determine which XML elements represent tables
+/// and which elements represent fields.
 struct XmlToArrowConverter {
+    /// Table builders for each table defined in the configuration.
     table_builders: IndexMap<XmlPath, TableBuilder, FxBuildHasher>,
+    /// Stack of XML paths representing the current nesting level of tables.
     builder_stack: VecDeque<XmlPath>,
 }
 
