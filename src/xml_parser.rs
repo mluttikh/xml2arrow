@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::io::BufRead;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use arrow::array::{
@@ -337,8 +338,8 @@ impl FieldBuilder {
     }
 }
 
-fn create_array_builder(dtype: DType) -> Result<Box<dyn ArrayBuilder>> {
-    match dtype {
+fn create_array_builder(data_type: DType) -> Result<Box<dyn ArrayBuilder>> {
+    match data_type {
         DType::Boolean => Ok(Box::new(BooleanBuilder::default())),
         DType::Int8 => Ok(Box::new(Int8Builder::default())),
         DType::UInt8 => Ok(Box::new(UInt8Builder::default())),
@@ -475,6 +476,18 @@ impl XmlToArrowConverter {
             .ok_or_else(|| Error::TableNotFound(table_path.to_string()))
     }
 
+    fn parent_row_indices(&self) -> Result<Vec<u32>> {
+        let mut indices = Vec::with_capacity(self.builder_stack.len() - 1);
+        for table_path in self.builder_stack.iter().skip(1) {
+            let table_builder = self
+                .table_builders
+                .get(table_path)
+                .ok_or_else(|| Error::TableNotFound(table_path.to_string()))?;
+            indices.push(table_builder.row_index as u32);
+        }
+        Ok(indices)
+    }
+
     fn start_table(&mut self, table_path: &XmlPath) -> Result<()> {
         self.builder_stack.push_back(table_path.clone());
         let table_builder = self
@@ -553,30 +566,76 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
     let mut xml_path = XmlPath::new("/");
     let mut xml_to_arrow_converter = XmlToArrowConverter::from_config(config)?;
 
-    let mut buf = Vec::with_capacity(256);
+    // Use specialized parsing logic based on whether attribute parsing is required.
+    // This avoids unnecessary attribute processing and Empty event handling
+    // when attributes are not needed, improving performance.
+    if config.requires_attribute_parsing() {
+        process_xml_events::<_, true>(
+            &mut reader,
+            &mut xml_path,
+            &mut xml_to_arrow_converter,
+            PhantomData,
+        )?;
+    } else {
+        process_xml_events::<_, false>(
+            &mut reader,
+            &mut xml_path,
+            &mut xml_to_arrow_converter,
+            PhantomData,
+        )?;
+    }
 
+    let batches = xml_to_arrow_converter.finish()?;
+    Ok(batches)
+}
+
+fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
+    reader: &mut Reader<B>,
+    xml_path: &mut XmlPath,
+    xml_to_arrow_converter: &mut XmlToArrowConverter,
+    _marker: PhantomData<bool>,
+) -> Result<()> {
+    let mut buf = Vec::with_capacity(256);
     loop {
         match reader.read_event_into(&mut buf)? {
             Event::Start(e) => {
                 let node = std::str::from_utf8(e.local_name().into_inner())?;
                 xml_path.append_node(node);
-                if xml_to_arrow_converter.is_table_path(&xml_path) {
-                    xml_to_arrow_converter.start_table(&xml_path)?;
+                if xml_to_arrow_converter.is_table_path(xml_path) {
+                    xml_to_arrow_converter.start_table(xml_path)?;
                 }
-                parse_attributes(e.attributes(), &mut xml_path, &mut xml_to_arrow_converter)?;
+                if PARSE_ATTRIBUTES {
+                    parse_attributes(e.attributes(), xml_path, xml_to_arrow_converter)?;
+                }
+            }
+            Event::Empty(e) => {
+                if PARSE_ATTRIBUTES {
+                    let node = std::str::from_utf8(e.local_name().into_inner())?;
+                    xml_path.append_node(node);
+                    parse_attributes(e.attributes(), xml_path, xml_to_arrow_converter)?;
+                    xml_path.remove_node();
+                    if xml_to_arrow_converter.is_table_path(xml_path) {
+                        // This is the root element of the table
+                        let indices = xml_to_arrow_converter.parent_row_indices()?;
+                        xml_to_arrow_converter
+                            .current_table_builder_mut()?
+                            .end_row(&indices)?;
+                    }
+                }
             }
             Event::Text(e) => {
-                let table_builder = xml_to_arrow_converter.current_table_builder_mut()?;
-                table_builder.set_field_value(&xml_path, &e.unescape()?);
+                xml_to_arrow_converter
+                    .current_table_builder_mut()?
+                    .set_field_value(xml_path, &e.unescape()?);
             }
             Event::End(_) => {
-                if xml_to_arrow_converter.is_table_path(&xml_path) {
+                if xml_to_arrow_converter.is_table_path(xml_path) {
                     xml_to_arrow_converter.end_table()?;
                 }
                 xml_path.remove_node();
-                if xml_to_arrow_converter.is_table_path(&xml_path) {
+                if xml_to_arrow_converter.is_table_path(xml_path) {
                     // This is the root element of the table
-                    let indices = get_parent_row_indices(&xml_to_arrow_converter)?;
+                    let indices = xml_to_arrow_converter.parent_row_indices()?;
                     xml_to_arrow_converter
                         .current_table_builder_mut()?
                         .end_row(&indices)?;
@@ -589,9 +648,7 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
         }
         buf.clear();
     }
-
-    let batches = xml_to_arrow_converter.finish()?;
-    Ok(batches)
+    Ok(())
 }
 
 #[inline]
@@ -610,19 +667,6 @@ fn parse_attributes(
         xml_path.remove_node();
     }
     Ok(())
-}
-
-#[inline]
-fn get_parent_row_indices(xml_to_arrow_converter: &XmlToArrowConverter) -> Result<Vec<u32>> {
-    let mut indices = Vec::with_capacity(xml_to_arrow_converter.builder_stack.len() - 1);
-    for table_path in xml_to_arrow_converter.builder_stack.iter().skip(1) {
-        let table_builder = xml_to_arrow_converter
-            .table_builders
-            .get(table_path)
-            .ok_or_else(|| Error::TableNotFound(table_path.to_string()))?;
-        indices.push(table_builder.row_index as u32);
-    }
-    Ok(indices)
 }
 
 #[cfg(test)]
@@ -842,8 +886,8 @@ mod tests {
             .as_any()
             .downcast_ref::<BooleanArray>()
             .unwrap();
-        assert_eq!(in_stock_array.value(0), true);
-        assert_eq!(in_stock_array.value(1), false);
+        assert!(in_stock_array.value(0));
+        assert!(!in_stock_array.value(1));
 
         let count_array = items_batch
             .column_by_name("count")
@@ -1613,6 +1657,84 @@ mod tests {
         assert_eq!(id_array.value(0), 1);
         assert_eq!(id_array.value(1), 2);
         assert_eq!(id_array.value(2), 3);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_empty_tags() -> Result<()> {
+        let xml_content = r#"
+            <data>
+                <dataset>
+                    <table>
+                        <item id="1" name="Item 1" />
+                        <item id="2" />
+                        <item id="3" name="Item 3" />
+                    </table>
+                </dataset>
+            </data>
+        "#;
+
+        let config = Config {
+            tables: vec![TableConfig {
+                name: "items".to_string(),
+                xml_path: "/data/dataset/table".to_string(),
+                levels: vec!["table".to_string()],
+                fields: vec![
+                    FieldConfig {
+                        name: "id".to_string(),
+                        xml_path: "/data/dataset/table/item/@id".to_string(),
+                        data_type: DType::UInt8,
+                        nullable: false,
+                        scale: None,
+                        offset: None,
+                    },
+                    FieldConfig {
+                        name: "name".to_string(),
+                        xml_path: "/data/dataset/table/item/@name".to_string(),
+                        data_type: DType::Utf8,
+                        nullable: true, // Name is nullable because of the empty tag
+                        scale: None,
+                        offset: None,
+                    },
+                ],
+            }],
+        };
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let items_batch = record_batches.get("items").unwrap();
+
+        assert_eq!(items_batch.num_rows(), 3);
+
+        let table_index_array = items_batch
+            .column_by_name("<table>")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        assert_eq!(table_index_array.value(0), 0);
+        assert_eq!(table_index_array.value(1), 1);
+        assert_eq!(table_index_array.value(2), 2);
+
+        let id_array = items_batch
+            .column_by_name("id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt8Array>()
+            .unwrap();
+        assert_eq!(id_array.value(0), 1);
+        assert_eq!(id_array.value(1), 2);
+        assert_eq!(id_array.value(2), 3);
+
+        let name_array = items_batch
+            .column_by_name("name")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(name_array.value(0), "Item 1");
+        assert!(name_array.is_null(1)); // Check for null value
+        assert_eq!(name_array.value(2), "Item 3");
 
         Ok(())
     }
