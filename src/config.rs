@@ -144,6 +144,10 @@ pub struct FieldConfig {
     pub offset: Option<f64>,
 }
 
+/// A builder for configuring a `FieldConfig` struct.
+///
+/// This builder allows you to set the various properties of a field
+/// definition within a table configuration for parsing XML data.
 #[derive(Default)]
 pub struct FieldConfigBuilder {
     name: String,
@@ -155,6 +159,19 @@ pub struct FieldConfigBuilder {
 }
 
 impl FieldConfigBuilder {
+    /// Creates a new `FieldConfigBuilder` with the provided name, XML path, and data type.
+    ///
+    /// This is the starting point for building a `FieldConfig`.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The name of the field.
+    /// * `xml_path` - The XML path that points to the location of the field data in the XML document.
+    /// * `data_type` - The data type of the field.
+    ///
+    /// # Returns
+    ///
+    /// A new `FieldConfigBuilder` instance with the provided properties.
     pub fn new(name: &str, xml_path: &str, data_type: DType) -> Self {
         Self {
             name: name.to_string(),
@@ -164,21 +181,61 @@ impl FieldConfigBuilder {
         }
     }
 
+    /// Sets the `nullable` flag for the field configuration being built.
+    ///
+    /// This method allows you to specify whether the field can be null (missing data) in the XML document.
+    ///
+    /// # Arguments
+    ///
+    /// * `nullable` - A boolean value indicating whether the field is nullable.
+    ///
+    /// # Returns
+    ///
+    /// The builder instance itself, allowing for method chaining.
     pub fn nullable(mut self, nullable: bool) -> Self {
         self.nullable = nullable;
         self
     }
 
+    /// Sets the `scale` factor for the field configuration being built.
+    ///
+    /// This method is typically used with float data types to specify the scale factor.
+    ///
+    /// # Arguments
+    ///
+    /// * `scale` - The scale factor as an f64 value.
+    ///
+    /// # Returns
+    ///
+    /// The builder instance itself, allowing for method chaining.
     pub fn scale(mut self, scale: f64) -> Self {
         self.scale = Some(scale);
         self
     }
 
+    /// Sets the `offset` value for the field configuration being built.
+    ///
+    /// This method can be used with float data types to specify an offset value.
+    ///
+    /// # Arguments
+    ///
+    /// * `offset` - The offset value as an f64 value.
+    ///
+    /// # Returns
+    ///
+    /// The builder instance itself, allowing for method chaining.
     pub fn offset(mut self, offset: f64) -> Self {
         self.offset = Some(offset);
         self
     }
 
+    /// Consumes the builder and builds the final `FieldConfig` struct.
+    ///
+    /// This method takes the configuration set on the builder and returns a new `FieldConfig` instance.
+    ///
+    /// # Returns
+    ///
+    /// A `FieldConfig` struct with the configured properties
     pub fn build(self) -> FieldConfig {
         FieldConfig {
             name: self.name,

@@ -558,26 +558,14 @@ impl XmlToArrowConverter {
 /// # Example
 ///
 /// ```rust
-/// use xml2arrow::{parse_xml, config::{Config, TableConfig, FieldConfig, DType}};
+/// use xml2arrow::{parse_xml, config::{Config, TableConfig, FieldConfigBuilder, DType}};
 /// use std::fs::File;
 /// use std::io::BufReader;
 ///
 /// let xml_content = r#"<data><item><value>123</value></item></data>"#;
-/// let config = Config {
-///     tables: vec![TableConfig {
-///         name: "items".to_string(),
-///         xml_path: "/data".to_string(),
-///         levels: vec![],
-///         fields: vec![FieldConfig {
-///             name: "value".to_string(),
-///             xml_path: "/data/item/value".to_string(),
-///             data_type: DType::Int32,
-///             nullable: false,
-///             scale: None,
-///             offset: None,
-///         }],
-///     }],
-/// };
+/// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build()];
+/// let tables = vec![TableConfig::new("items", "/data", vec![], fields)];
+/// let config = Config { tables };
 /// let record_batches = parse_xml(xml_content.as_bytes(), &config).unwrap();
 /// // ... use record_batches
 /// ```
