@@ -112,6 +112,17 @@ pub struct TableConfig {
     pub fields: Vec<FieldConfig>,
 }
 
+impl TableConfig {
+    pub fn new(name: &str, xml_path: &str, levels: Vec<String>, fields: Vec<FieldConfig>) -> Self {
+        Self {
+            name: name.to_string(),
+            xml_path: xml_path.to_string(),
+            levels,
+            fields,
+        }
+    }
+}
+
 /// Configuration for a single field within an XML table.
 ///
 /// This struct defines how a specific XML element or attribute should be extracted and
@@ -133,8 +144,112 @@ pub struct FieldConfig {
     pub offset: Option<f64>,
 }
 
+/// A builder for configuring a `FieldConfig` struct.
+///
+/// This builder allows you to set the various properties of a field
+/// definition within a table configuration for parsing XML data.
+#[derive(Default)]
+pub struct FieldConfigBuilder {
+    name: String,
+    xml_path: String,
+    data_type: DType,
+    nullable: bool,
+    scale: Option<f64>,
+    offset: Option<f64>,
+}
+
+impl FieldConfigBuilder {
+    /// Creates a new `FieldConfigBuilder` with the provided name, XML path, and data type.
+    ///
+    /// This is the starting point for building a `FieldConfig`.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The name of the field.
+    /// * `xml_path` - The XML path that points to the location of the field data in the XML document.
+    /// * `data_type` - The data type of the field.
+    ///
+    /// # Returns
+    ///
+    /// A new `FieldConfigBuilder` instance with the provided properties.
+    pub fn new(name: &str, xml_path: &str, data_type: DType) -> Self {
+        Self {
+            name: name.to_string(),
+            xml_path: xml_path.to_string(),
+            data_type,
+            ..Default::default()
+        }
+    }
+
+    /// Sets the `nullable` flag for the field configuration being built.
+    ///
+    /// This method allows you to specify whether the field can be null (missing data) in the XML document.
+    ///
+    /// # Arguments
+    ///
+    /// * `nullable` - A boolean value indicating whether the field is nullable.
+    ///
+    /// # Returns
+    ///
+    /// The builder instance itself, allowing for method chaining.
+    pub fn nullable(mut self, nullable: bool) -> Self {
+        self.nullable = nullable;
+        self
+    }
+
+    /// Sets the `scale` factor for the field configuration being built.
+    ///
+    /// This method is typically used with float data types to specify the scale factor.
+    ///
+    /// # Arguments
+    ///
+    /// * `scale` - The scale factor as an f64 value.
+    ///
+    /// # Returns
+    ///
+    /// The builder instance itself, allowing for method chaining.
+    pub fn scale(mut self, scale: f64) -> Self {
+        self.scale = Some(scale);
+        self
+    }
+
+    /// Sets the `offset` value for the field configuration being built.
+    ///
+    /// This method can be used with float data types to specify an offset value.
+    ///
+    /// # Arguments
+    ///
+    /// * `offset` - The offset value as an f64 value.
+    ///
+    /// # Returns
+    ///
+    /// The builder instance itself, allowing for method chaining.
+    pub fn offset(mut self, offset: f64) -> Self {
+        self.offset = Some(offset);
+        self
+    }
+
+    /// Consumes the builder and builds the final `FieldConfig` struct.
+    ///
+    /// This method takes the configuration set on the builder and returns a new `FieldConfig` instance.
+    ///
+    /// # Returns
+    ///
+    /// A `FieldConfig` struct with the configured properties
+    pub fn build(self) -> FieldConfig {
+        FieldConfig {
+            name: self.name,
+            xml_path: self.xml_path,
+            data_type: self.data_type,
+            nullable: self.nullable,
+            scale: self.scale,
+            offset: self.offset,
+        }
+    }
+}
+
 /// Represents the data type of a field.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum DType {
     Boolean,
     Float32,
@@ -147,6 +262,7 @@ pub enum DType {
     UInt32,
     Int64,
     UInt64,
+    #[default]
     Utf8,
 }
 
@@ -169,6 +285,20 @@ impl DType {
     }
 }
 
+/// Creates a `Config` struct from a YAML string at compile time.
+///
+/// This macro takes a YAML string literal as input and parses it into a `Config` struct at compile time.
+/// It panics if the YAML is invalid.
+#[macro_export]
+macro_rules! config_from_yaml {
+    ($yaml:expr) => {{
+        match serde_yaml::from_str($yaml) {
+            Ok(config) => config,
+            Err(e) => panic!("Invalid YAML configuration: {}", e),
+        }
+    }};
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -180,37 +310,14 @@ mod tests {
     fn test_yaml_rw(
         #[values(
             Config {
-                tables: vec![TableConfig {
-                    name: "table1".to_string(),
-                    xml_path: "/path/to".to_string(),
-                    levels: vec![],
-                    fields: vec![
-                        FieldConfig {
-                            name: "string_field".to_string(),
-                            xml_path: "string_field".to_string(),
-                            data_type: DType::Utf8,
-                            nullable: true,
-                            scale: None,
-                            offset: None,
-                        },
-                        FieldConfig {
-                            name: "int32_field".to_string(),
-                            xml_path: "int32_field".to_string(),
-                            data_type: DType::Int32,
-                            nullable: false,
-                            scale: None,
-                            offset: None,
-                        },
-                        FieldConfig {
-                            name: "float64_field".to_string(),
-                            xml_path: "float64_field".to_string(),
-                            data_type: DType::Float64,
-                            nullable: true,
-                            scale: Some(1.0e-9),
-                            offset: Some(1.0e-3),
-                        },
-                    ],
-                }],
+                tables: vec![
+                    TableConfig::new("table1", "/path/to", vec![], vec![
+                        FieldConfigBuilder::new("string_field", "/path/to/string_field", DType::Utf8).nullable(true).build(),
+                        FieldConfigBuilder::new("int32_field", "/path/to/int32_field", DType::Int32).build(),
+                        FieldConfigBuilder::new("float64_field", "/path/to/float64_field", DType::Float64).nullable(true).scale(1.0e-9).offset(1.0e-3).build(),
+                        ]
+                    ),
+                ],
             },
             Config { tables: vec![] }
         )]

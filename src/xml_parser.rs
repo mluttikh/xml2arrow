@@ -558,26 +558,14 @@ impl XmlToArrowConverter {
 /// # Example
 ///
 /// ```rust
-/// use xml2arrow::{parse_xml, config::{Config, TableConfig, FieldConfig, DType}};
+/// use xml2arrow::{parse_xml, config::{Config, TableConfig, FieldConfigBuilder, DType}};
 /// use std::fs::File;
 /// use std::io::BufReader;
 ///
 /// let xml_content = r#"<data><item><value>123</value></item></data>"#;
-/// let config = Config {
-///     tables: vec![TableConfig {
-///         name: "items".to_string(),
-///         xml_path: "/data".to_string(),
-///         levels: vec![],
-///         fields: vec![FieldConfig {
-///             name: "value".to_string(),
-///             xml_path: "/data/item/value".to_string(),
-///             data_type: DType::Int32,
-///             nullable: false,
-///             scale: None,
-///             offset: None,
-///         }],
-///     }],
-/// };
+/// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build()];
+/// let tables = vec![TableConfig::new("items", "/data", vec![], fields)];
+/// let config = Config { tables };
 /// let record_batches = parse_xml(xml_content.as_bytes(), &config).unwrap();
 /// // ... use record_batches
 /// ```
@@ -693,7 +681,8 @@ fn parse_attributes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, DType, FieldConfig, TableConfig};
+    use crate::config::Config;
+    use crate::config_from_yaml;
     use arrow::array::{
         BooleanArray, Int16Array, Int32Array, Int64Array, Int8Array, StringArray, UInt16Array,
         UInt32Array, UInt64Array, UInt8Array,
@@ -754,119 +743,67 @@ mod tests {
         </data>
         "#;
 
-        let config = Config {
-            tables: vec![
-                TableConfig {
-                    name: "items".to_string(),
-                    xml_path: "/data/dataset/table".to_string(),
-                    levels: vec!["table".to_string()],
-                    fields: vec![
-                        FieldConfig {
-                            name: "id".to_string(),
-                            xml_path: "/data/dataset/table/item/id".to_string(),
-                            data_type: DType::UInt32,
-                            nullable: false,
-                            scale: None,
-                            offset: None,
-                        },
-                        FieldConfig {
-                            name: "name".to_string(),
-                            xml_path: "/data/dataset/table/item/name".to_string(),
-                            data_type: DType::Utf8,
-                            nullable: false,
-                            scale: None,
-                            offset: None,
-                        },
-                        FieldConfig {
-                            name: "price".to_string(),
-                            xml_path: "/data/dataset/table/item/price".to_string(),
-                            data_type: DType::Float64,
-                            nullable: false,
-                            scale: None,
-                            offset: None,
-                        },
-                        FieldConfig {
-                            name: "category".to_string(),
-                            xml_path: "/data/dataset/table/item/category".to_string(),
-                            data_type: DType::Utf8,
-                            nullable: true,
-                            scale: None,
-                            offset: None,
-                        },
-                        FieldConfig {
-                            name: "in_stock".to_string(),
-                            xml_path: "/data/dataset/table/item/in_stock".to_string(),
-                            data_type: DType::Boolean,
-                            nullable: true,
-                            scale: None,
-                            offset: None,
-                        },
-                        FieldConfig {
-                            name: "count".to_string(),
-                            xml_path: "/data/dataset/table/item/count".to_string(),
-                            data_type: DType::UInt32,
-                            nullable: true,
-                            scale: None,
-                            offset: None,
-                        },
-                        FieldConfig {
-                            name: "big_count".to_string(),
-                            xml_path: "/data/dataset/table/item/big_count".to_string(),
-                            data_type: DType::UInt64,
-                            nullable: true,
-                            scale: None,
-                            offset: None,
-                        },
-                        FieldConfig {
-                            name: "big_int".to_string(),
-                            xml_path: "/data/dataset/table/item/big_int".to_string(),
-                            data_type: DType::Int64,
-                            nullable: true,
-                            scale: None,
-                            offset: None,
-                        },
-                    ],
-                },
-                TableConfig {
-                    name: "properties".to_string(),
-                    xml_path: "/data/dataset/table/item/properties".to_string(),
-                    levels: vec!["table".to_string(), "properties".to_string()],
-                    fields: vec![
-                        FieldConfig {
-                            name: "key".to_string(),
-                            xml_path: "/data/dataset/table/item/properties/property/key"
-                                .to_string(),
-                            data_type: DType::Utf8,
-                            nullable: true,
-                            scale: None,
-                            offset: None,
-                        },
-                        FieldConfig {
-                            name: "value".to_string(),
-                            xml_path: "/data/dataset/table/item/properties/property/value"
-                                .to_string(),
-                            data_type: DType::Utf8,
-                            nullable: true,
-                            scale: None,
-                            offset: None,
-                        },
-                    ],
-                },
-                TableConfig {
-                    name: "other_items".to_string(),
-                    xml_path: "/data/dataset/other_items".to_string(),
-                    levels: vec!["table".to_string()],
-                    fields: vec![FieldConfig {
-                        name: "value".to_string(),
-                        xml_path: "/data/dataset/other_items/other_item/value".to_string(),
-                        data_type: DType::Int16,
-                        nullable: false,
-                        scale: None,
-                        offset: None,
-                    }],
-                },
-            ],
-        };
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data/dataset/table
+                    levels: ["table"]
+                    fields:
+                      - name: id
+                        xml_path: /data/dataset/table/item/id
+                        data_type: UInt32
+                        nullable: false
+                      - name: name
+                        xml_path: /data/dataset/table/item/name
+                        data_type: Utf8
+                        nullable: false
+                      - name: price
+                        xml_path: /data/dataset/table/item/price
+                        data_type: Float64
+                        nullable: false
+                      - name: category
+                        xml_path: /data/dataset/table/item/category
+                        data_type: Utf8
+                        nullable: true
+                      - name: in_stock
+                        xml_path: /data/dataset/table/item/in_stock
+                        data_type: Boolean
+                        nullable: true
+                      - name: count
+                        xml_path: /data/dataset/table/item/count
+                        data_type: UInt32
+                        nullable: true
+                      - name: big_count
+                        xml_path: /data/dataset/table/item/big_count
+                        data_type: UInt64
+                        nullable: true
+                      - name: big_int
+                        xml_path: /data/dataset/table/item/big_int
+                        data_type: Int64
+                        nullable: true
+                  - name: properties
+                    xml_path: /data/dataset/table/item/properties
+                    levels: ["table", "properties"]
+                    fields:
+                      - name: key
+                        xml_path: /data/dataset/table/item/properties/property/key
+                        data_type: Utf8
+                        nullable: true
+                      - name: value
+                        xml_path: /data/dataset/table/item/properties/property/value
+                        data_type: Utf8
+                        nullable: true
+                  - name: other_items
+                    xml_path: /data/dataset/other_items
+                    levels: ["table"]
+                    fields:
+                      - name: value
+                        xml_path: /data/dataset/other_items/other_item/value
+                        data_type: Int16
+                        nullable: false
+            "#
+        );
 
         let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
 
@@ -1010,60 +947,41 @@ mod tests {
             </data>
         "#;
 
-        let config = Config {
-            tables: vec![
-                TableConfig {
-                    name: "/".to_string(),
-                    xml_path: "/".to_string(),
-                    levels: vec![],
-                    fields: vec![],
-                },
-                TableConfig {
-                    name: "products".to_string(),
-                    xml_path: "/data/product_list".to_string(),
-                    levels: vec!["product".to_string()],
-                    fields: vec![
-                        FieldConfig {
-                            name: "id".to_string(),
-                            xml_path: "/data/product_list/product/id".to_string(),
-                            data_type: DType::Int16,
-                            nullable: true,
-                            scale: None,
-                            offset: None,
-                        },
-                        FieldConfig {
-                            name: "price".to_string(),
-                            xml_path: "/data/product_list/product/price".to_string(),
-                            data_type: DType::Float64,
-                            nullable: true,
-                            scale: Some(1e-2),
-                            offset: Some(0.1),
-                        },
-                        FieldConfig {
-                            name: "name".to_string(),
-                            xml_path: "/data/product_list/product/name".to_string(),
-                            data_type: DType::Utf8,
-                            nullable: true,
-                            scale: None,
-                            offset: None,
-                        },
-                    ],
-                },
-                TableConfig {
-                    name: "items".to_string(),
-                    xml_path: "/data/product_list/product/items".to_string(),
-                    levels: vec!["product".to_string(), "item".to_string()],
-                    fields: vec![FieldConfig {
-                        name: "item".to_string(),
-                        xml_path: "/data/product_list/product/items/item".to_string(),
-                        data_type: DType::Utf8,
-                        nullable: true,
-                        scale: None,
-                        offset: None,
-                    }],
-                },
-            ],
-        };
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: /
+                    xml_path: /
+                    levels: []
+                    fields: []
+                  - name: products
+                    xml_path: /data/product_list
+                    levels: ["product"]
+                    fields:
+                      - name: id
+                        xml_path: /data/product_list/product/id
+                        data_type: Int16
+                        nullable: true
+                      - name: price
+                        xml_path: /data/product_list/product/price
+                        data_type: Float64
+                        nullable: true
+                        scale: 0.01
+                        offset: 0.1
+                      - name: name
+                        xml_path: /data/product_list/product/name
+                        data_type: Utf8
+                        nullable: true
+                  - name: items
+                    xml_path: /data/product_list/product/items
+                    levels: ["product", "item"]
+                    fields:
+                      - name: item
+                        xml_path: /data/product_list/product/items/item
+                        data_type: Utf8
+                        nullable: true
+            "#
+        );
 
         let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
 
@@ -1149,111 +1067,51 @@ mod tests {
                 <utf8>Héllo你😊</utf8>
               </item>
             </data>"#;
-        let config = Config {
-            tables: vec![TableConfig {
-                name: "items".to_string(),
-                xml_path: "/data".to_string(),
-                levels: vec![],
-                fields: vec![
-                    FieldConfig {
-                        name: "float32".to_string(),
-                        xml_path: "/data/item/float32".to_string(),
-                        data_type: DType::Float32,
-                        nullable: false,
-                        scale: None,
-                        offset: None,
-                    },
-                    FieldConfig {
-                        name: "float64".to_string(),
-                        xml_path: "/data/item/float64".to_string(),
-                        data_type: DType::Float64,
-                        nullable: false,
-                        scale: None,
-                        offset: None,
-                    },
-                    FieldConfig {
-                        name: "bool".to_string(),
-                        xml_path: "/data/item/bool".to_string(),
-                        data_type: DType::Boolean,
-                        nullable: false,
-                        scale: None,
-                        offset: None,
-                    },
-                    FieldConfig {
-                        name: "uint8".to_string(),
-                        xml_path: "/data/item/uint8".to_string(),
-                        data_type: DType::UInt8,
-                        nullable: false,
-                        scale: None,
-                        offset: None,
-                    },
-                    FieldConfig {
-                        name: "int8".to_string(),
-                        xml_path: "/data/item/int8".to_string(),
-                        data_type: DType::Int8,
-                        nullable: false,
-                        scale: None,
-                        offset: None,
-                    },
-                    FieldConfig {
-                        name: "uint16".to_string(),
-                        xml_path: "/data/item/uint16".to_string(),
-                        data_type: DType::UInt16,
-                        nullable: false,
-                        scale: None,
-                        offset: None,
-                    },
-                    FieldConfig {
-                        name: "int16".to_string(),
-                        xml_path: "/data/item/int16".to_string(),
-                        data_type: DType::Int16,
-                        nullable: false,
-                        scale: None,
-                        offset: None,
-                    },
-                    FieldConfig {
-                        name: "uint32".to_string(),
-                        xml_path: "/data/item/uint32".to_string(),
-                        data_type: DType::UInt32,
-                        nullable: false,
-                        scale: None,
-                        offset: None,
-                    },
-                    FieldConfig {
-                        name: "int32".to_string(),
-                        xml_path: "/data/item/int32".to_string(),
-                        data_type: DType::Int32,
-                        nullable: false,
-                        scale: None,
-                        offset: None,
-                    },
-                    FieldConfig {
-                        name: "uint64".to_string(),
-                        xml_path: "/data/item/uint64".to_string(),
-                        data_type: DType::UInt64,
-                        nullable: false,
-                        scale: None,
-                        offset: None,
-                    },
-                    FieldConfig {
-                        name: "int64".to_string(),
-                        xml_path: "/data/item/int64".to_string(),
-                        data_type: DType::Int64,
-                        nullable: false,
-                        scale: None,
-                        offset: None,
-                    },
-                    FieldConfig {
-                        name: "utf8".to_string(),
-                        xml_path: "/data/item/utf8".to_string(),
-                        data_type: DType::Utf8,
-                        nullable: false,
-                        scale: None,
-                        offset: None,
-                    },
-                ],
-            }],
-        };
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: float32
+                        xml_path: /data/item/float32
+                        data_type: Float32
+                      - name: float64
+                        xml_path: /data/item/float64
+                        data_type: Float64
+                      - name: bool
+                        xml_path: /data/item/bool
+                        data_type: Boolean
+                      - name: uint8
+                        xml_path: /data/item/uint8
+                        data_type: UInt8
+                      - name: int8
+                        xml_path: /data/item/int8
+                        data_type: Int8
+                      - name: uint16
+                        xml_path: /data/item/uint16
+                        data_type: UInt16
+                      - name: int16
+                        xml_path: /data/item/int16
+                        data_type: Int16
+                      - name: uint32
+                        xml_path: /data/item/uint32
+                        data_type: UInt32
+                      - name: int32
+                        xml_path: /data/item/int32
+                        data_type: Int32
+                      - name: uint64
+                        xml_path: /data/item/uint64
+                        data_type: UInt64
+                      - name: int64
+                        xml_path: /data/item/int64
+                        data_type: Int64
+                      - name: utf8
+                        xml_path: /data/item/utf8
+                        data_type: Utf8
+            "#
+        );
         let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let items_batch = record_batches.get("items").unwrap();
 
@@ -1359,21 +1217,19 @@ mod tests {
     #[test]
     fn test_parse_xml_with_special_characters() -> Result<()> {
         let xml_content = r#"<data><item><text>&lt; &gt; &amp; &quot; &apos;</text></item></data>"#;
-        let config = Config {
-            tables: vec![TableConfig {
-                name: "items".to_string(),
-                xml_path: "/data".to_string(),
-                levels: vec![],
-                fields: vec![FieldConfig {
-                    name: "text".to_string(),
-                    xml_path: "/data/item/text".to_string(),
-                    data_type: DType::Utf8,
-                    nullable: true,
-                    scale: None,
-                    offset: None,
-                }],
-            }],
-        };
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: text
+                        xml_path: /data/item/text
+                        data_type: Utf8
+                        nullable: true
+            "#
+        );
         let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let items_batch = record_batches.get("items").unwrap();
         let text_array = items_batch
@@ -1399,21 +1255,21 @@ mod tests {
     fn test_parse_xml_with_scale_and_offset() -> Result<()> {
         let xml_content =
             r#"<data><item><value>123.45</value></item><item><value>67.89</value></item></data>"#;
-        let config = Config {
-            tables: vec![TableConfig {
-                name: "items".to_string(),
-                xml_path: "/data".to_string(),
-                levels: vec![],
-                fields: vec![FieldConfig {
-                    name: "value".to_string(),
-                    xml_path: "/data/item/value".to_string(),
-                    data_type: DType::Float64, // Or DType::Float32
-                    nullable: true,
-                    scale: Some(0.01),  // Example scale: multiply by 0.01
-                    offset: Some(10.0), // Example offset: add 10.0
-                }],
-            }],
-        };
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /data/item/value
+                        data_type: Float64
+                        nullable: true
+                        scale: 0.01
+                        offset: 10.0
+            "#
+        );
 
         let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let items_batch = record_batches.get("items").unwrap();
@@ -1421,7 +1277,7 @@ mod tests {
             .column_by_name("value")
             .unwrap()
             .as_any()
-            .downcast_ref::<Float64Array>() // Or Float32Array if using DType::Float32
+            .downcast_ref::<Float64Array>()
             .unwrap();
 
         // Expected values: (raw_value * scale) + offset
@@ -1443,21 +1299,21 @@ mod tests {
     fn test_parse_xml_with_scale_and_offset_float32() -> Result<()> {
         let xml_content =
             r#"<data><item><value>123.45</value></item><item><value>67.89</value></item></data>"#;
-        let config = Config {
-            tables: vec![TableConfig {
-                name: "items".to_string(),
-                xml_path: "/data".to_string(),
-                levels: vec![],
-                fields: vec![FieldConfig {
-                    name: "value".to_string(),
-                    xml_path: "/data/item/value".to_string(),
-                    data_type: DType::Float32,
-                    nullable: true,
-                    scale: Some(0.01),  // Example scale: multiply by 0.01
-                    offset: Some(10.0), // Example offset: add 10.0
-                }],
-            }],
-        };
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /data/item/value
+                        data_type: Float32
+                        nullable: true
+                        scale: 0.01
+                        offset: 10.0
+            "#
+        );
 
         let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let items_batch = record_batches.get("items").unwrap();
@@ -1498,55 +1354,35 @@ mod tests {
             </data>
         "#;
 
-        let config = Config {
-            tables: vec![TableConfig {
-                name: "items".to_string(),
-                xml_path: "/data/items".to_string(),
-                levels: vec![],
-                fields: vec![
-                    FieldConfig {
-                        name: "id".to_string(),
-                        xml_path: "/data/items/item/@id".to_string(),
-                        data_type: DType::Utf8,
-                        nullable: false,
-                        scale: None,
-                        offset: None,
-                    },
-                    FieldConfig {
-                        name: "value".to_string(),
-                        xml_path: "/data/items/item/@value".to_string(),
-                        data_type: DType::Int32,
-                        nullable: false,
-                        scale: None,
-                        offset: None,
-                    },
-                    FieldConfig {
-                        name: "type".to_string(),
-                        xml_path: "/data/items/item/@type".to_string(),
-                        data_type: DType::Utf8,
-                        nullable: true,
-                        scale: None,
-                        offset: None,
-                    },
-                    FieldConfig {
-                        name: "valid".to_string(),
-                        xml_path: "/data/items/item/@valid".to_string(),
-                        data_type: DType::Boolean,
-                        nullable: false,
-                        scale: None,
-                        offset: None,
-                    },
-                    FieldConfig {
-                        name: "name".to_string(),
-                        xml_path: "/data/items/item/name".to_string(),
-                        data_type: DType::Utf8,
-                        nullable: false,
-                        scale: None,
-                        offset: None,
-                    },
-                ],
-            }],
-        };
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data/items
+                    levels: []
+                    fields:
+                      - name: id
+                        xml_path: /data/items/item/@id
+                        data_type: Utf8
+                        nullable: false
+                      - name: value
+                        xml_path: /data/items/item/@value
+                        data_type: Int32
+                        nullable: false
+                      - name: type
+                        xml_path: /data/items/item/@type
+                        data_type: Utf8
+                        nullable: true
+                      - name: valid
+                        xml_path: /data/items/item/@valid
+                        data_type: Boolean
+                        nullable: false
+                      - name: name
+                        xml_path: /data/items/item/name
+                        data_type: Utf8
+                        nullable: false
+            "#
+        );
 
         let record_batches = parse_xml(xml_data.as_bytes(), &config)?;
 
@@ -1620,29 +1456,23 @@ mod tests {
             </data>
         "#;
 
-        let config = Config {
-            tables: vec![
-                TableConfig {
-                    name: "groups".to_string(),
-                    xml_path: "/data/dataset/table".to_string(),
-                    levels: vec!["table".to_string()],
-                    fields: vec![],
-                },
-                TableConfig {
-                    name: "items".to_string(),
-                    xml_path: "/data/dataset/table/group".to_string(),
-                    levels: vec!["table".to_string(), "group".to_string()], // Two levels
-                    fields: vec![FieldConfig {
-                        name: "id".to_string(),
-                        xml_path: "/data/dataset/table/group/item/@id".to_string(),
-                        data_type: DType::UInt32,
-                        nullable: false,
-                        scale: None,
-                        offset: None,
-                    }],
-                },
-            ],
-        };
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: groups
+                    xml_path: /data/dataset/table
+                    levels: ["table"]
+                    fields: []
+                  - name: items
+                    xml_path: /data/dataset/table/group
+                    levels: ["table", "group"]
+                    fields:
+                      - name: id
+                        xml_path: /data/dataset/table/group/item/@id
+                        data_type: UInt32
+                        nullable: false
+            "#
+        );
 
         let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let items_batch = record_batches.get("items").unwrap();
@@ -1696,31 +1526,23 @@ mod tests {
             </data>
         "#;
 
-        let config = Config {
-            tables: vec![TableConfig {
-                name: "items".to_string(),
-                xml_path: "/data/dataset/table".to_string(),
-                levels: vec!["table".to_string()],
-                fields: vec![
-                    FieldConfig {
-                        name: "id".to_string(),
-                        xml_path: "/data/dataset/table/item/@id".to_string(),
-                        data_type: DType::UInt8,
-                        nullable: false,
-                        scale: None,
-                        offset: None,
-                    },
-                    FieldConfig {
-                        name: "name".to_string(),
-                        xml_path: "/data/dataset/table/item/@name".to_string(),
-                        data_type: DType::Utf8,
-                        nullable: true, // Name is nullable because of the empty tag
-                        scale: None,
-                        offset: None,
-                    },
-                ],
-            }],
-        };
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data/dataset/table
+                    levels: ["table"]
+                    fields:
+                      - name: id
+                        xml_path: /data/dataset/table/item/@id
+                        data_type: UInt8
+                        nullable: false
+                      - name: name
+                        xml_path: /data/dataset/table/item/@name
+                        data_type: Utf8
+                        nullable: true
+            "#
+        );
 
         let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let items_batch = record_batches.get("items").unwrap();
@@ -1771,21 +1593,19 @@ mod tests {
 
         for (input, expected) in test_cases {
             // Test with nullable fields
-            let config = Config {
-                tables: vec![TableConfig {
-                    name: "test_table".to_string(),
-                    xml_path: "/root".to_string(),
-                    levels: vec![],
-                    fields: vec![FieldConfig {
-                        name: "bool_field".to_string(),
-                        xml_path: "/root/value".to_string(),
-                        data_type: DType::Boolean,
-                        nullable: true,
-                        scale: None,
-                        offset: None,
-                    }],
-                }],
-            };
+            let config = config_from_yaml!(
+                r#"
+                tables:
+                  - name: test_table
+                    xml_path: /root
+                    levels: []
+                    fields:
+                      - name: bool_field
+                        xml_path: /root/value
+                        data_type: Boolean
+                        nullable: true
+            "#
+            );
             let xml_content = format!("<root><value>{}</value></root>", input);
             let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
             let record_batch = record_batches.get("test_table").unwrap();
@@ -1804,21 +1624,19 @@ mod tests {
             );
 
             // Test with non-nullable fields
-            let config = Config {
-                tables: vec![TableConfig {
-                    name: "test_table".to_string(),
-                    xml_path: "/root".to_string(),
-                    levels: vec![],
-                    fields: vec![FieldConfig {
-                        name: "bool_field".to_string(),
-                        xml_path: "/root/value".to_string(),
-                        data_type: DType::Boolean,
-                        nullable: false,
-                        scale: None,
-                        offset: None,
-                    }],
-                }],
-            };
+            let config = config_from_yaml!(
+                r#"
+                    tables:
+                      - name: test_table
+                        xml_path: /root
+                        levels: []
+                        fields:
+                          - name: bool_field
+                            xml_path: /root/value
+                            data_type: Boolean
+                            nullable: false
+                "#
+            );
             let xml_content = format!("<root><value>{}</value></root>", input);
             let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
             let record_batch = record_batches.get("test_table").unwrap();
@@ -1852,21 +1670,19 @@ mod tests {
 
         for input in test_cases {
             // Test with nullable fields
-            let config = Config {
-                tables: vec![TableConfig {
-                    name: "test_table".to_string(),
-                    xml_path: "/root".to_string(),
-                    levels: vec![],
-                    fields: vec![FieldConfig {
-                        name: "bool_field".to_string(),
-                        xml_path: "/root/value".to_string(),
-                        data_type: DType::Boolean,
-                        nullable: true,
-                        scale: None,
-                        offset: None,
-                    }],
-                }],
-            };
+            let config = config_from_yaml!(
+                r#"
+                    tables:
+                      - name: test_table
+                        xml_path: /root
+                        levels: []
+                        fields:
+                          - name: bool_field
+                            xml_path: /root/value
+                            data_type: Boolean
+                            nullable: true
+                "#
+            );
             let xml_content = format!("<root><value>{}</value></root>", input);
             let result = parse_xml(xml_content.as_bytes(), &config);
             assert!(
@@ -1876,21 +1692,19 @@ mod tests {
             );
 
             // Test with non-nullable fields
-            let config = Config {
-                tables: vec![TableConfig {
-                    name: "test_table".to_string(),
-                    xml_path: "/root".to_string(),
-                    levels: vec![],
-                    fields: vec![FieldConfig {
-                        name: "bool_field".to_string(),
-                        xml_path: "/root/value".to_string(),
-                        data_type: DType::Boolean,
-                        nullable: false,
-                        scale: None,
-                        offset: None,
-                    }],
-                }],
-            };
+            let config = config_from_yaml!(
+                r#"
+                    tables:
+                      - name: test_table
+                        xml_path: /root
+                        levels: []
+                        fields:
+                          - name: bool_field
+                            xml_path: /root/value
+                            data_type: Boolean
+                            nullable: false
+                "#
+            );
             let xml_content = format!("<root><value>{}</value></root>", input);
             let result = parse_xml(xml_content.as_bytes(), &config);
             assert!(
@@ -1905,36 +1719,33 @@ mod tests {
 
     #[test]
     fn test_boolean_parsing_no_value() -> Result<()> {
-        let config_nullable = Config {
-            tables: vec![TableConfig {
-                name: "test_table".to_string(),
-                xml_path: "/root".to_string(),
-                levels: vec![],
-                fields: vec![FieldConfig {
-                    name: "bool_field".to_string(),
-                    xml_path: "/root/value".to_string(),
-                    data_type: DType::Boolean,
-                    nullable: true,
-                    scale: None,
-                    offset: None,
-                }],
-            }],
-        };
-        let config_not_nullable = Config {
-            tables: vec![TableConfig {
-                name: "test_table".to_string(),
-                xml_path: "/root".to_string(),
-                levels: vec![],
-                fields: vec![FieldConfig {
-                    name: "bool_field".to_string(),
-                    xml_path: "/root/value".to_string(),
-                    data_type: DType::Boolean,
-                    nullable: false,
-                    scale: None,
-                    offset: None,
-                }],
-            }],
-        };
+        let config_nullable = config_from_yaml!(
+            r#"
+                tables:
+                  - name: test_table
+                    xml_path: /root
+                    levels: []
+                    fields:
+                      - name: bool_field
+                        xml_path: /root/value
+                        data_type: Boolean
+                        nullable: true
+            "#
+        );
+
+        let config_not_nullable = config_from_yaml!(
+            r#"
+                tables:
+                  - name: test_table
+                    xml_path: /root
+                    levels: []
+                    fields:
+                      - name: bool_field
+                        xml_path: /root/value
+                        data_type: Boolean
+                        nullable: false
+            "#
+        );
         let xml_content_empty = "<root><value></value></root>";
 
         // Empty value, nullable: should be null
