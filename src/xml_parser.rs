@@ -289,11 +289,11 @@ impl FieldBuilder {
                     .expect("BooleanBuilder");
                 if self.has_value {
                     match value.as_str() {
-                        "true" => builder.append_value(true),
-                        "false" => builder.append_value(false),
+                        "false" | "0" => builder.append_value(false),
+                        "true" | "1" => builder.append_value(true),
                         _ => {
                             return Err(Error::ParseError(format!(
-                                "Failed to parse value '{}' as boolean, expected 'true' or 'false'",
+                                "Failed to parse value '{}' as boolean, expected 'true', 'false', '1' or '0'",
                                 value
                             )));
                         }
@@ -1756,6 +1756,201 @@ mod tests {
         assert_eq!(name_array.value(0), "Item 1");
         assert!(name_array.is_null(1)); // Check for null value
         assert_eq!(name_array.value(2), "Item 3");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_boolean_parsing() -> Result<()> {
+        let test_cases = [
+            ("true", Some(true)),
+            ("false", Some(false)),
+            ("1", Some(true)),
+            ("0", Some(false)),
+        ];
+
+        for (input, expected) in test_cases {
+            // Test with nullable fields
+            let config = Config {
+                tables: vec![TableConfig {
+                    name: "test_table".to_string(),
+                    xml_path: "/root".to_string(),
+                    levels: vec![],
+                    fields: vec![FieldConfig {
+                        name: "bool_field".to_string(),
+                        xml_path: "/root/value".to_string(),
+                        data_type: DType::Boolean,
+                        nullable: true,
+                        scale: None,
+                        offset: None,
+                    }],
+                }],
+            };
+            let xml_content = format!("<root><value>{}</value></root>", input);
+            let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+            let record_batch = record_batches.get("test_table").unwrap();
+
+            let expected_array = match expected {
+                Some(value) => Arc::new(BooleanArray::from(vec![Some(value)])) as Arc<dyn Array>,
+                None => Arc::new(BooleanArray::from(vec![None])) as Arc<dyn Array>,
+            };
+            let schema = Schema::new(vec![Field::new("bool_field", DataType::Boolean, true)]);
+            let expected_record_batch =
+                RecordBatch::try_new(Arc::new(schema), vec![expected_array])?;
+            assert_eq!(
+                record_batch, &expected_record_batch,
+                "Input: '{}' (nullable)",
+                input
+            );
+
+            // Test with non-nullable fields
+            let config = Config {
+                tables: vec![TableConfig {
+                    name: "test_table".to_string(),
+                    xml_path: "/root".to_string(),
+                    levels: vec![],
+                    fields: vec![FieldConfig {
+                        name: "bool_field".to_string(),
+                        xml_path: "/root/value".to_string(),
+                        data_type: DType::Boolean,
+                        nullable: false,
+                        scale: None,
+                        offset: None,
+                    }],
+                }],
+            };
+            let xml_content = format!("<root><value>{}</value></root>", input);
+            let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+            let record_batch = record_batches.get("test_table").unwrap();
+
+            let expected_array = match expected {
+                Some(value) => Arc::new(BooleanArray::from(vec![Some(value)])) as Arc<dyn Array>,
+                None => Arc::new(BooleanArray::from(vec![None])) as Arc<dyn Array>,
+            };
+            let schema = Schema::new(vec![Field::new("bool_field", DataType::Boolean, false)]);
+            let expected_record_batch =
+                RecordBatch::try_new(Arc::new(schema), vec![expected_array])?;
+            assert_eq!(
+                record_batch, &expected_record_batch,
+                "Input: '{}' (non-nullable)",
+                input
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_boolean_parsing_invalid_input() -> Result<()> {
+        let test_cases = [
+            ("TRUE"),  // Case-sensitive - should be error
+            ("FALSE"), // Case-sensitive - should be error
+            ("2"),     // Invalid - should be error
+            ("-1"),    // Invalid - should be error
+            ("abc"),   // Invalid - should be error
+        ];
+
+        for input in test_cases {
+            // Test with nullable fields
+            let config = Config {
+                tables: vec![TableConfig {
+                    name: "test_table".to_string(),
+                    xml_path: "/root".to_string(),
+                    levels: vec![],
+                    fields: vec![FieldConfig {
+                        name: "bool_field".to_string(),
+                        xml_path: "/root/value".to_string(),
+                        data_type: DType::Boolean,
+                        nullable: true,
+                        scale: None,
+                        offset: None,
+                    }],
+                }],
+            };
+            let xml_content = format!("<root><value>{}</value></root>", input);
+            let result = parse_xml(xml_content.as_bytes(), &config);
+            assert!(
+                result.is_err(),
+                "Input '{}' (nullable) should have resulted in an error",
+                input
+            );
+
+            // Test with non-nullable fields
+            let config = Config {
+                tables: vec![TableConfig {
+                    name: "test_table".to_string(),
+                    xml_path: "/root".to_string(),
+                    levels: vec![],
+                    fields: vec![FieldConfig {
+                        name: "bool_field".to_string(),
+                        xml_path: "/root/value".to_string(),
+                        data_type: DType::Boolean,
+                        nullable: false,
+                        scale: None,
+                        offset: None,
+                    }],
+                }],
+            };
+            let xml_content = format!("<root><value>{}</value></root>", input);
+            let result = parse_xml(xml_content.as_bytes(), &config);
+            assert!(
+                result.is_err(),
+                "Input '{}' (non-nullable) should have resulted in an error",
+                input
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_boolean_parsing_no_value() -> Result<()> {
+        let config_nullable = Config {
+            tables: vec![TableConfig {
+                name: "test_table".to_string(),
+                xml_path: "/root".to_string(),
+                levels: vec![],
+                fields: vec![FieldConfig {
+                    name: "bool_field".to_string(),
+                    xml_path: "/root/value".to_string(),
+                    data_type: DType::Boolean,
+                    nullable: true,
+                    scale: None,
+                    offset: None,
+                }],
+            }],
+        };
+        let config_not_nullable = Config {
+            tables: vec![TableConfig {
+                name: "test_table".to_string(),
+                xml_path: "/root".to_string(),
+                levels: vec![],
+                fields: vec![FieldConfig {
+                    name: "bool_field".to_string(),
+                    xml_path: "/root/value".to_string(),
+                    data_type: DType::Boolean,
+                    nullable: false,
+                    scale: None,
+                    offset: None,
+                }],
+            }],
+        };
+        let xml_content_empty = "<root><value></value></root>";
+
+        // Empty value, nullable: should be null
+        let record_batches = parse_xml(xml_content_empty.as_bytes(), &config_nullable)?;
+        let record_batch = record_batches.get("test_table").unwrap();
+        let expected_array = Arc::new(BooleanArray::from(vec![None])) as Arc<dyn Array>;
+        let schema = Schema::new(vec![Field::new("bool_field", DataType::Boolean, true)]);
+        let expected_record_batch = RecordBatch::try_new(Arc::new(schema), vec![expected_array])?;
+        assert_eq!(
+            record_batch, &expected_record_batch,
+            "Empty value, nullable"
+        );
+
+        // Empty value, non-nullable: should be error
+        let result = parse_xml(xml_content_empty.as_bytes(), &config_not_nullable);
+        assert!(result.is_err(), "Empty value, non-nullable should error");
 
         Ok(())
     }
