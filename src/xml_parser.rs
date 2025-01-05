@@ -733,7 +733,6 @@ mod tests {
             assert_eq!(array.len(), $expected_values.len());
             for (i, expected) in $expected_values.iter().enumerate() {
                 assert!(
-                    // approx_equal(array.value(i), *expected, $tolerance),
                     abs_diff_eq!(array.value(i), *expected, epsilon = $tolerance),
                     "Value at index {} mismatch: Expected {}, got {}",
                     i,
