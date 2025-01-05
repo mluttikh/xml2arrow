@@ -364,10 +364,10 @@ mod tests {
     #[test]
     fn test_field_config_default_nullable_from_yaml() {
         let yaml_string = r#"
-    name: test_field
-    xml_path: /path/to/field
-    data_type: Utf8
-    "#;
+            name: test_field
+            xml_path: /path/to/field
+            data_type: Utf8
+            "#;
 
         let field_config: FieldConfig = serde_yaml::from_str(yaml_string).unwrap();
         assert!(!field_config.nullable);

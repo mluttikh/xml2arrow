@@ -683,14 +683,89 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::config_from_yaml;
+    use approx::abs_diff_eq;
     use arrow::array::{
         BooleanArray, Int16Array, Int32Array, Int64Array, Int8Array, StringArray, UInt16Array,
         UInt32Array, UInt64Array, UInt8Array,
     };
 
-    fn approx_equal(a: f64, b: f64, abs: f64) -> bool {
-        let abs_difference = (a - b).abs();
-        abs_difference < abs
+    macro_rules! assert_array_values {
+        ($batch:expr, $column_name:expr, $expected_values:expr, $array_type:ty) => {
+            let array = $batch
+                .column_by_name($column_name)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<$array_type>()
+                .unwrap();
+            assert_eq!(array.len(), $expected_values.len());
+            for (i, expected) in $expected_values.iter().enumerate() {
+                assert_eq!(array.value(i), *expected, "Value at index {} mismatch", i);
+            }
+        };
+    }
+
+    macro_rules! assert_array_values_option {
+        ($batch:expr, $column_name:expr, $expected_values:expr, $array_type:ty) => {
+            let array = $batch
+                .column_by_name($column_name)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<$array_type>()
+                .unwrap();
+            assert_eq!(array.len(), $expected_values.len());
+            for (i, expected) in $expected_values.iter().enumerate() {
+                match expected {
+                    Some(val) => assert_eq!(array.value(i), *val, "Value at index {} mismatch", i),
+                    None => assert!(array.is_null(i), "Expected null at index {}", i),
+                }
+            }
+        };
+    }
+
+    macro_rules! assert_array_approx_values {
+        ($batch:expr, $column_name:expr, $expected_values:expr, $array_type:ty, $tolerance:expr) => {
+            let array = $batch
+                .column_by_name($column_name)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<$array_type>()
+                .unwrap();
+            assert_eq!(array.len(), $expected_values.len());
+            for (i, expected) in $expected_values.iter().enumerate() {
+                assert!(
+                    // approx_equal(array.value(i), *expected, $tolerance),
+                    abs_diff_eq!(array.value(i), *expected, epsilon = $tolerance),
+                    "Value at index {} mismatch: Expected {}, got {}",
+                    i,
+                    expected,
+                    array.value(i)
+                );
+            }
+        };
+    }
+
+    macro_rules! assert_array_approx_values_option {
+        ($batch:expr, $column_name:expr, $expected_values:expr, $array_type:ty, $tolerance:expr) => {
+            let array = $batch
+                .column_by_name($column_name)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<$array_type>()
+                .unwrap();
+            assert_eq!(array.len(), $expected_values.len());
+            for (i, expected) in $expected_values.iter().enumerate() {
+                match expected {
+                    Some(val) => assert!(
+                        abs_diff_eq!(array.value(i), *val, epsilon = $tolerance),
+                        "Value at index {} mismatch: Expected {}, got {}",
+                        i,
+                        val,
+                        array.value(i)
+                    ),
+                    None => assert!(array.is_null(i), "Expected null at index {}", i),
+                }
+            }
+        };
     }
 
     #[test]
@@ -810,104 +885,39 @@ mod tests {
         // Assertions for "items" table
         let items_batch = record_batches.get("items").unwrap();
         assert_eq!(items_batch.num_rows(), 2);
-
-        let id_array = items_batch
-            .column_by_name("id")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<UInt32Array>()
-            .unwrap();
-        assert_eq!(id_array.value(0), 1);
-        assert_eq!(id_array.value(1), 2);
-
-        let name_array = items_batch
-            .column_by_name("name")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(name_array.value(0), "Laptop");
-        assert_eq!(name_array.value(1), "Book");
-
-        let price_array = items_batch
-            .column_by_name("price")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-        assert!(approx_equal(price_array.value(0), 1200.50, 1e-10));
-        assert!(approx_equal(price_array.value(1), 25.99, 1e-10));
-
-        let in_stock_array = items_batch
-            .column_by_name("in_stock")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .unwrap();
-        assert!(in_stock_array.value(0));
-        assert!(!in_stock_array.value(1));
-
-        let count_array = items_batch
-            .column_by_name("count")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<UInt32Array>()
-            .unwrap();
-        assert_eq!(count_array.value(0), 4294967290);
-        assert_eq!(count_array.value(1), 12345);
-
-        let big_count_array = items_batch
-            .column_by_name("big_count")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap();
-        assert_eq!(big_count_array.value(0), 18446744073709551610);
-        assert_eq!(big_count_array.value(1), 67890);
-
-        let big_int_array = items_batch
-            .column_by_name("big_int")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        assert_eq!(big_int_array.value(0), 9223372036854775807);
-        assert_eq!(big_int_array.value(1), -9223372036854775808);
+        assert_array_values!(items_batch, "id", &[1, 2], UInt32Array);
+        assert_array_values!(items_batch, "name", &["Laptop", "Book"], StringArray);
+        assert_array_approx_values!(items_batch, "price", &[1200.50, 25.99], Float64Array, 1e-10);
+        assert_array_values!(items_batch, "in_stock", &[true, false], BooleanArray);
+        assert_array_values!(items_batch, "count", &[4294967290u32, 12345], UInt32Array);
+        assert_array_values!(
+            items_batch,
+            "big_count",
+            &[18446744073709551610u64, 67890],
+            UInt64Array
+        );
+        assert_array_values!(
+            items_batch,
+            "big_int",
+            &[9223372036854775807i64, -9223372036854775808],
+            Int64Array
+        );
 
         // Assertions for "properties" table
         let properties_batch = record_batches.get("properties").unwrap();
         assert_eq!(properties_batch.num_rows(), 2);
-
-        let key_array = properties_batch
-            .column_by_name("key")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(key_array.value(0), "CPU");
-        assert_eq!(key_array.value(1), "RAM");
-
-        let value_array = properties_batch
-            .column_by_name("value")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(value_array.value(0), "Intel i7");
-        assert_eq!(value_array.value(1), "16GB");
+        assert_array_values!(properties_batch, "key", &["CPU", "RAM"], StringArray);
+        assert_array_values!(
+            properties_batch,
+            "value",
+            &["Intel i7", "16GB"],
+            StringArray
+        );
 
         // Assertions for "other_items" table
         let other_items_batch = record_batches.get("other_items").unwrap();
         assert_eq!(other_items_batch.num_rows(), 2);
-
-        let other_value_array = other_items_batch
-            .column_by_name("value")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int16Array>()
-            .unwrap();
-        assert_eq!(other_value_array.value(0), 123);
-        assert_eq!(other_value_array.value(1), 456);
+        assert_array_values!(other_items_batch, "value", &[123, 456], Int16Array);
 
         Ok(())
     }
@@ -988,62 +998,31 @@ mod tests {
         // Assertions for "products" table
         let products_batch = record_batches.get("products").unwrap();
         assert_eq!(products_batch.num_rows(), 3);
-
-        let id_array = products_batch
-            .column_by_name("id")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int16Array>()
-            .unwrap();
-        assert_eq!(id_array.value(0), 1);
-        assert_eq!(id_array.value(1), 2);
-        assert_eq!(id_array.value(2), 3);
-
-        let name_array = products_batch
-            .column_by_name("name")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(name_array.value(0), "Laptop");
-        assert_eq!(name_array.value(1), "Mouse");
-        assert!(name_array.is_null(2)); // Check for null value
-
-        let price_array = products_batch
-            .column_by_name("price")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-        assert_eq!(price_array.value(0), 1.1);
-        assert!(price_array.is_null(1));
-        assert!(approx_equal(price_array.value(2), 31.503, 1e-12));
+        assert_array_values!(products_batch, "id", &[1, 2, 3], Int16Array);
+        assert_array_values_option!(
+            products_batch,
+            "name",
+            &[Some("Laptop"), Some("Mouse"), None],
+            StringArray
+        );
+        assert_array_approx_values_option!(
+            products_batch,
+            "price",
+            &[Some(1.1), None, Some(31.503)],
+            Float64Array,
+            1e-12
+        );
 
         // Assertions for "items" table
         let items_batch = record_batches.get("items").unwrap();
         assert_eq!(items_batch.num_rows(), 4);
-
-        let product_index_array = items_batch
-            .column_by_name("<product>")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<UInt32Array>()
-            .unwrap();
-        assert_eq!(product_index_array.value(0), 0);
-        assert_eq!(product_index_array.value(1), 0);
-        assert_eq!(product_index_array.value(2), 0);
-        assert_eq!(product_index_array.value(3), 1);
-
-        let item_array = items_batch
-            .column_by_name("item")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(item_array.value(0), "Item1");
-        assert_eq!(item_array.value(1), "Item2");
-        assert_eq!(item_array.value(2), "Item4");
-        assert_eq!(item_array.value(3), "Item5");
+        assert_array_values!(items_batch, "<product>", &[0, 0, 0, 1], UInt32Array);
+        assert_array_values!(
+            items_batch,
+            "item",
+            &["Item1", "Item2", "Item4", "Item5"],
+            StringArray
+        );
 
         Ok(())
     }
@@ -1115,101 +1094,23 @@ mod tests {
         let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let items_batch = record_batches.get("items").unwrap();
 
-        let float32_array = items_batch
-            .column_by_name("float32")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Float32Array>()
-            .unwrap();
-        assert_eq!(float32_array.value(0), 3.17);
-
-        let float64_array = items_batch
-            .column_by_name("float64")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-        assert_eq!(float64_array.value(0), 0.123456789);
-
-        let bool_array = items_batch
-            .column_by_name("bool")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .unwrap();
-        assert!(bool_array.value(0));
-
-        let uint8_array = items_batch
-            .column_by_name("uint8")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<UInt8Array>()
-            .unwrap();
-        assert_eq!(uint8_array.value(0), 252);
-
-        let int8_array = items_batch
-            .column_by_name("int8")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int8Array>()
-            .unwrap();
-        assert_eq!(int8_array.value(0), -124);
-
-        let uint16_array = items_batch
-            .column_by_name("uint16")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<UInt16Array>()
-            .unwrap();
-        assert_eq!(uint16_array.value(0), 62535);
-
-        let int16_array = items_batch
-            .column_by_name("int16")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int16Array>()
-            .unwrap();
-        assert_eq!(int16_array.value(0), -23452);
-
-        let uint32_array = items_batch
-            .column_by_name("uint32")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<UInt32Array>()
-            .unwrap();
-        assert_eq!(uint32_array.value(0), 4294967290);
-
-        let int32_array = items_batch
-            .column_by_name("int32")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
-        assert_eq!(int32_array.value(0), -55769);
-
-        let uint64_array = items_batch
-            .column_by_name("uint64")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap();
-        assert_eq!(uint64_array.value(0), 18446744073709551610);
-
-        let int64_array = items_batch
-            .column_by_name("int64")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        assert_eq!(int64_array.value(0), 9223372036854775807);
-
-        let utf8_array = items_batch
-            .column_by_name("utf8")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(utf8_array.value(0), "Héllo你😊");
+        assert_array_values!(items_batch, "float32", &[3.17], Float32Array);
+        assert_array_values!(items_batch, "float64", &[0.123456789], Float64Array);
+        assert_array_values!(items_batch, "bool", &[true], BooleanArray);
+        assert_array_values!(items_batch, "uint8", &[252], UInt8Array);
+        assert_array_values!(items_batch, "int8", &[-124], Int8Array);
+        assert_array_values!(items_batch, "uint16", &[62535], UInt16Array);
+        assert_array_values!(items_batch, "int16", &[-23452], Int16Array);
+        assert_array_values!(items_batch, "uint32", &[4294967290u32], UInt32Array);
+        assert_array_values!(items_batch, "int32", &[-55769], Int32Array);
+        assert_array_values!(
+            items_batch,
+            "uint64",
+            &[18446744073709551610u64],
+            UInt64Array
+        );
+        assert_array_values!(items_batch, "int64", &[9223372036854775807i64], Int64Array);
+        assert_array_values!(items_batch, "utf8", &["Héllo你😊"], StringArray);
 
         Ok(())
     }
@@ -1232,13 +1133,7 @@ mod tests {
         );
         let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let items_batch = record_batches.get("items").unwrap();
-        let text_array = items_batch
-            .column_by_name("text")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(text_array.value(0), "< > & \" '");
+        assert_array_values!(items_batch, "text", &["< > & \" '"], StringArray);
         Ok(())
     }
 
@@ -1273,25 +1168,14 @@ mod tests {
 
         let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let items_batch = record_batches.get("items").unwrap();
-        let value_array = items_batch
-            .column_by_name("value")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-
         // Expected values: (raw_value * scale) + offset
-        assert!(approx_equal(
-            value_array.value(0),
-            (123.45 * 0.01) + 10.0,
+        assert_array_approx_values!(
+            items_batch,
+            "value",
+            &[(123.45 * 0.01) + 10.0, (67.89 * 0.01) + 10.0],
+            Float64Array,
             1e-10
-        )); // 11.2345
-        assert!(approx_equal(
-            value_array.value(1),
-            (67.89 * 0.01) + 10.0,
-            1e-10
-        )); // 10.6789
-
+        );
         Ok(())
     }
 
@@ -1317,24 +1201,14 @@ mod tests {
 
         let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let items_batch = record_batches.get("items").unwrap();
-        let value_array = items_batch
-            .column_by_name("value")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Float32Array>()
-            .unwrap();
-
         // Expected values: (raw_value * scale) + offset
-        assert!(approx_equal(
-            value_array.value(0) as f64,
-            (123.45 * 0.01) + 10.0,
-            1e-6
-        )); // 11.2345
-        assert!(approx_equal(
-            value_array.value(1) as f64,
-            (67.89 * 0.01) + 10.0,
-            1e-6
-        )); // 10.6789
+        assert_array_approx_values!(
+            items_batch,
+            "value",
+            &[(123.45 * 0.01) + 10.0, (67.89 * 0.01) + 10.0],
+            Float32Array,
+            1e-10
+        );
 
         Ok(())
     }
@@ -1389,51 +1263,11 @@ mod tests {
         assert!(record_batches.contains_key("items"));
         let batch = record_batches.get("items").unwrap();
         assert_eq!(batch.num_rows(), 2);
-
-        let id_array = batch
-            .column_by_name("id")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(id_array.value(0), "1");
-        assert_eq!(id_array.value(1), "2");
-
-        let value_array = batch
-            .column_by_name("value")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
-        assert_eq!(value_array.value(0), 10);
-        assert_eq!(value_array.value(1), 20);
-
-        let type_array = batch
-            .column_by_name("type")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(type_array.value(0), "A");
-        assert!(type_array.is_null(1));
-
-        let valid_array = batch
-            .column_by_name("valid")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .unwrap();
-        assert!(valid_array.value(0));
-        assert!(!valid_array.value(1));
-
-        let name_array = batch
-            .column_by_name("name")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(name_array.value(0), "Item One");
-        assert_eq!(name_array.value(1), "Item Two");
+        assert_array_values!(batch, "id", &["1", "2"], StringArray);
+        assert_array_values!(batch, "value", &[10, 20], Int32Array);
+        assert_array_values_option!(batch, "type", &[Some("A"), None], StringArray);
+        assert_array_values!(batch, "valid", &[true, false], BooleanArray);
+        assert_array_values!(batch, "name", &["Item One", "Item Two"], StringArray);
 
         Ok(())
     }
@@ -1476,38 +1310,10 @@ mod tests {
 
         let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let items_batch = record_batches.get("items").unwrap();
-
         assert_eq!(items_batch.num_rows(), 3);
-
-        let table_index_array = items_batch
-            .column_by_name("<table>")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<UInt32Array>()
-            .unwrap();
-        assert_eq!(table_index_array.value(0), 0);
-        assert_eq!(table_index_array.value(1), 0);
-        assert_eq!(table_index_array.value(2), 1);
-
-        let group_index_array = items_batch
-            .column_by_name("<group>")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<UInt32Array>()
-            .unwrap();
-        assert_eq!(group_index_array.value(0), 0);
-        assert_eq!(group_index_array.value(1), 1);
-        assert_eq!(group_index_array.value(2), 0);
-
-        let id_array = items_batch
-            .column_by_name("id")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<UInt32Array>()
-            .unwrap();
-        assert_eq!(id_array.value(0), 1);
-        assert_eq!(id_array.value(1), 2);
-        assert_eq!(id_array.value(2), 3);
+        assert_array_values!(items_batch, "<table>", &[0, 0, 1], UInt32Array);
+        assert_array_values!(items_batch, "<group>", &[0, 1, 0], UInt32Array);
+        assert_array_values!(items_batch, "id", &[1, 2, 3], UInt32Array);
 
         Ok(())
     }
@@ -1548,36 +1354,14 @@ mod tests {
         let items_batch = record_batches.get("items").unwrap();
 
         assert_eq!(items_batch.num_rows(), 3);
-
-        let table_index_array = items_batch
-            .column_by_name("<table>")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<UInt32Array>()
-            .unwrap();
-        assert_eq!(table_index_array.value(0), 0);
-        assert_eq!(table_index_array.value(1), 1);
-        assert_eq!(table_index_array.value(2), 2);
-
-        let id_array = items_batch
-            .column_by_name("id")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<UInt8Array>()
-            .unwrap();
-        assert_eq!(id_array.value(0), 1);
-        assert_eq!(id_array.value(1), 2);
-        assert_eq!(id_array.value(2), 3);
-
-        let name_array = items_batch
-            .column_by_name("name")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(name_array.value(0), "Item 1");
-        assert!(name_array.is_null(1)); // Check for null value
-        assert_eq!(name_array.value(2), "Item 3");
+        assert_array_values!(items_batch, "<table>", &[0, 1, 2], UInt32Array);
+        assert_array_values!(items_batch, "id", &[1, 2, 3], UInt8Array);
+        assert_array_values_option!(
+            items_batch,
+            "name",
+            &[Some("Item 1"), None, Some("Item 3")],
+            StringArray
+        );
 
         Ok(())
     }
@@ -1609,19 +1393,7 @@ mod tests {
             let xml_content = format!("<root><value>{}</value></root>", input);
             let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
             let record_batch = record_batches.get("test_table").unwrap();
-
-            let expected_array = match expected {
-                Some(value) => Arc::new(BooleanArray::from(vec![Some(value)])) as Arc<dyn Array>,
-                None => Arc::new(BooleanArray::from(vec![None])) as Arc<dyn Array>,
-            };
-            let schema = Schema::new(vec![Field::new("bool_field", DataType::Boolean, true)]);
-            let expected_record_batch =
-                RecordBatch::try_new(Arc::new(schema), vec![expected_array])?;
-            assert_eq!(
-                record_batch, &expected_record_batch,
-                "Input: '{}' (nullable)",
-                input
-            );
+            assert_array_values_option!(record_batch, "bool_field", &[expected], BooleanArray);
 
             // Test with non-nullable fields
             let config = config_from_yaml!(
@@ -1640,19 +1412,7 @@ mod tests {
             let xml_content = format!("<root><value>{}</value></root>", input);
             let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
             let record_batch = record_batches.get("test_table").unwrap();
-
-            let expected_array = match expected {
-                Some(value) => Arc::new(BooleanArray::from(vec![Some(value)])) as Arc<dyn Array>,
-                None => Arc::new(BooleanArray::from(vec![None])) as Arc<dyn Array>,
-            };
-            let schema = Schema::new(vec![Field::new("bool_field", DataType::Boolean, false)]);
-            let expected_record_batch =
-                RecordBatch::try_new(Arc::new(schema), vec![expected_array])?;
-            assert_eq!(
-                record_batch, &expected_record_batch,
-                "Input: '{}' (non-nullable)",
-                input
-            );
+            assert_array_values_option!(record_batch, "bool_field", &[expected], BooleanArray);
         }
 
         Ok(())
@@ -1751,13 +1511,8 @@ mod tests {
         // Empty value, nullable: should be null
         let record_batches = parse_xml(xml_content_empty.as_bytes(), &config_nullable)?;
         let record_batch = record_batches.get("test_table").unwrap();
-        let expected_array = Arc::new(BooleanArray::from(vec![None])) as Arc<dyn Array>;
-        let schema = Schema::new(vec![Field::new("bool_field", DataType::Boolean, true)]);
-        let expected_record_batch = RecordBatch::try_new(Arc::new(schema), vec![expected_array])?;
-        assert_eq!(
-            record_batch, &expected_record_batch,
-            "Empty value, nullable"
-        );
+        let expected: Vec<Option<bool>> = vec![None];
+        assert_array_values_option!(record_batch, "bool_field", &expected, BooleanArray);
 
         // Empty value, non-nullable: should be error
         let result = parse_xml(xml_content_empty.as_bytes(), &config_not_nullable);
