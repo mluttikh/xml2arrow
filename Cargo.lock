@@ -1384,7 +1384,7 @@ dependencies = [
 
 [[package]]
 name = "xml2arrow"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "approx",
  "arrow",

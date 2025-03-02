@@ -1,6 +1,6 @@
 [package]
 name = "xml2arrow"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 description = "Efficiently convert XML data to Apache Arrow format for high-performance data processing"
 license = "MIT"

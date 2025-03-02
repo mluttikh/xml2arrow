@@ -5,22 +5,22 @@ use std::sync::Arc;
 
 use arrow::array::{
     Array, ArrayBuilder, AsArray, BooleanBuilder, Float32Array, Float32Builder, Float64Array,
-    Float64Builder, Int16Builder, Int32Builder, Int64Builder, Int8Builder, RecordBatch,
-    StringBuilder, UInt16Builder, UInt32Builder, UInt64Builder, UInt8Builder,
+    Float64Builder, Int8Builder, Int16Builder, Int32Builder, Int64Builder, RecordBatch,
+    StringBuilder, UInt8Builder, UInt16Builder, UInt32Builder, UInt64Builder,
 };
 use arrow::compute::kernels::numeric;
 use arrow::datatypes::{DataType, Field, Float32Type, Float64Type, Schema};
 use fxhash::FxBuildHasher;
 use indexmap::IndexMap;
-use quick_xml::events::attributes::Attributes;
-use quick_xml::events::Event;
 use quick_xml::Reader;
+use quick_xml::events::Event;
+use quick_xml::events::attributes::Attributes;
 
+use crate::Config;
 use crate::config::{DType, FieldConfig, TableConfig};
 use crate::errors::Error;
 use crate::errors::Result;
 use crate::xml_path::XmlPath;
-use crate::Config;
 
 /// Builds Arrow arrays for a single field based on parsed XML data.
 ///
@@ -306,7 +306,7 @@ impl FieldBuilder {
                 return Err(Error::UnsupportedDataType(format!(
                     "Data type {:?} is not supported",
                     self.field.data_type()
-                )))
+                )));
             }
         }
         Ok(())
@@ -324,7 +324,12 @@ impl FieldBuilder {
                     array.as_primitive::<Float64Type>(),
                     &Float64Array::new_scalar(scale),
                 )?,
-                _ => unimplemented!(),
+                _ => {
+                    return Err(Error::UnsupportedConversion(format!(
+                        "Scaling is only supported for Float32 and Float64, but found {:?}",
+                        self.field.data_type()
+                    )));
+                }
             };
         }
         if let Some(offset) = self.field_config.offset {
@@ -337,7 +342,12 @@ impl FieldBuilder {
                     array.as_primitive::<Float64Type>(),
                     &Float64Array::new_scalar(offset),
                 )?,
-                _ => unimplemented!(),
+                _ => {
+                    return Err(Error::UnsupportedConversion(format!(
+                        "Offset is only supported for Float32 and Float64, but found {:?}",
+                        self.field.data_type()
+                    )));
+                }
             };
         }
         Ok(array)
@@ -681,12 +691,12 @@ fn parse_attributes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
+    use crate::config::{Config, FieldConfigBuilder};
     use crate::config_from_yaml;
     use approx::abs_diff_eq;
     use arrow::array::{
-        BooleanArray, Int16Array, Int32Array, Int64Array, Int8Array, StringArray, UInt16Array,
-        UInt32Array, UInt64Array, UInt8Array,
+        BooleanArray, Int8Array, Int16Array, Int32Array, Int64Array, StringArray, UInt8Array,
+        UInt16Array, UInt32Array, UInt64Array,
     };
 
     macro_rules! assert_array_values {
@@ -1518,5 +1528,41 @@ mod tests {
         assert!(result.is_err(), "Empty value, non-nullable should error");
 
         Ok(())
+    }
+
+    #[test]
+    fn test_unsupported_conversion_scale() {
+        let field_config = FieldConfigBuilder::new("test_field", "/test/field", DType::Int32)
+            .scale(2.0)
+            .build();
+
+        let mut field_builder = FieldBuilder::new(&field_config).unwrap();
+        let result = field_builder.finish();
+
+        assert!(result.is_err());
+        if let Err(Error::UnsupportedConversion(msg)) = result {
+            assert!(msg.contains("Scaling is only supported for Float32 and Float64"));
+            assert!(msg.contains("Int32"));
+        } else {
+            panic!("Expected UnsupportedConversion error");
+        }
+    }
+
+    #[test]
+    fn test_unsupported_conversion_offset() {
+        let field_config = FieldConfigBuilder::new("test_field", "/test/field", DType::Int16)
+            .offset(1.0)
+            .build();
+
+        let mut field_builder = FieldBuilder::new(&field_config).unwrap();
+        let result = field_builder.finish();
+
+        assert!(result.is_err());
+        if let Err(Error::UnsupportedConversion(msg)) = result {
+            assert!(msg.contains("Offset is only supported for Float32 and Float64"));
+            assert!(msg.contains("Int16"));
+        } else {
+            panic!("Expected UnsupportedConversion error");
+        }
     }
 }
