@@ -4,9 +4,9 @@ use std::str::Utf8Error;
 use arrow::pyarrow::PyArrowException;
 use derive_more::From;
 #[cfg(feature = "python")]
-use pyo3::create_exception;
-#[cfg(feature = "python")]
 use pyo3::PyErr;
+#[cfg(feature = "python")]
+use pyo3::create_exception;
 
 pub type Result<T> = core::result::Result<T, Error>;
 
@@ -39,6 +39,8 @@ pub enum Error {
     TableNotFound(String),
     /// Error indicating that there is no table on the stack.
     NoTableOnStack,
+    /// Error when applying a scaling or an offset is attempted on unsupported data types.
+    UnsupportedConversion(String),
 }
 
 #[cfg(feature = "python")]
@@ -98,6 +100,14 @@ create_exception!(
 );
 
 #[cfg(feature = "python")]
+create_exception!(
+    xml2arrow,
+    UnsupportedConversionError,
+    Xml2ArrowError,
+    "Raised when an unsupported conversion (scale or offset) is attempted."
+);
+
+#[cfg(feature = "python")]
 impl From<Error> for PyErr {
     fn from(value: Error) -> Self {
         match value {
@@ -113,6 +123,7 @@ impl From<Error> for PyErr {
                 NoTableOnStackError::new_err("There is no table on the stack".to_string())
             }
             Error::ParseError(e) => ParseError::new_err(e.to_string()),
+            Error::UnsupportedConversion(e) => UnsupportedConversionError::new_err(e.to_string()),
         }
     }
 }
