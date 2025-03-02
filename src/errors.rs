@@ -39,7 +39,7 @@ pub enum Error {
     TableNotFound(String),
     /// Error indicating that there is no table on the stack.
     NoTableOnStack,
-    /// Error when applying scaling or an offset is attempted on unsupported data types.
+    /// Error when applying a scaling or an offset is attempted on unsupported data types.
     UnsupportedConversion(String),
 }
 
