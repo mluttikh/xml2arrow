@@ -643,9 +643,10 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                 }
             }
             Event::Text(e) => {
+                let text = e.unescape().unwrap_or_else(|_| String::from_utf8_lossy(&e));
                 xml_to_arrow_converter
                     .current_table_builder_mut()?
-                    .set_field_value(xml_path, &e.unescape()?);
+                    .set_field_value(xml_path, &text);
             }
             Event::End(_) => {
                 if xml_to_arrow_converter.is_table_path(xml_path) {
@@ -690,6 +691,7 @@ fn parse_attributes(
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::config::{Config, FieldConfigBuilder};
     use crate::config_from_yaml;
@@ -1564,5 +1566,21 @@ mod tests {
         } else {
             panic!("Expected UnsupportedConversion error");
         }
+    }
+
+    #[test]
+    fn test_non_utf8_characters() -> Result<()> {
+        let xml_bytes = b"<data><item><value>\xC2\xC2\xFE</value></item></data>";
+        let fields =
+            vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Utf8).build()];
+        let tables = vec![TableConfig::new("items", "/data", vec![], fields)];
+        let config = Config { tables };
+
+        let record_batches = parse_xml(&xml_bytes[..], &config)?;
+        assert_eq!(record_batches.len(), 1);
+        let record_batch = record_batches.get("items").unwrap();
+        assert_eq!(record_batch.num_rows(), 1);
+        assert_array_values!(record_batch, "value", &["���"], StringArray);
+        Ok(())
     }
 }
