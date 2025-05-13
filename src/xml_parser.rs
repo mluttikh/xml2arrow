@@ -40,6 +40,51 @@ struct FieldBuilder {
     current_value: String,
 }
 
+/// A macro to append a numeric value to an array builder, handling parsing and null values.
+///
+/// # Parameters
+///
+/// * `$self`: The instance containing the `array_builder` field, which is used to append values.
+/// * `$value`: A string slice representing the numeric value to be parsed and appended.
+/// * `$builder_type`: The specific builder type (e.g., `Int32Builder`, `Float64Builder`) to which
+///   the value will be appended.
+/// * `$numeric_type`: The numeric type (e.g., `i32`, `f64`) that the value will be parsed into.
+/// * `$type_name`: A string slice representing the name of the numeric type, used for error messages.
+///
+/// # Behavior
+///
+/// * If `$self.has_value` is `true`, the macro attempts to parse `$value` into the specified
+///   `$numeric_type`. If parsing succeeds, the value is appended to the builder. If parsing fails,
+///   an error is returned with a detailed message.
+/// * If `$self.has_value` is `false`, a null value is appended to the builder.
+///
+/// # Errors
+///
+/// * Returns a `ParseError` if `$value` cannot be parsed into the specified `$numeric_type`.
+macro_rules! append_numeric_value {
+    ($self:ident, $value:expr, $builder_type:ty, $numeric_type:ty, $type_name:expr) => {
+        // ... (downcast logic) ...
+        let builder = $self
+            .array_builder
+            .as_any_mut()
+            .downcast_mut::<$builder_type>()
+            .expect(&format!("{}Builder", $type_name));
+        if $self.has_value {
+            match $value.parse::<$numeric_type>() {
+                Ok(val) => builder.append_value(val),
+                Err(e) => {
+                    return Err(Error::ParseError(format!(
+                        "Failed to parse value '{}' as {}: {}",
+                        $value, $type_name, e
+                    )));
+                }
+            }
+        } else {
+            builder.append_null();
+        }
+    };
+}
+
 impl FieldBuilder {
     fn new(field_config: &FieldConfig) -> Result<Self> {
         let array_builder = create_array_builder(field_config.data_type)?;
@@ -82,204 +127,34 @@ impl FieldBuilder {
                 }
             }
             DataType::Int8 => {
-                let builder = self
-                    .array_builder
-                    .as_any_mut()
-                    .downcast_mut::<Int8Builder>()
-                    .expect("Int8Builder");
-                if self.has_value {
-                    match value.parse::<i8>() {
-                        Ok(val) => builder.append_value(val),
-                        Err(e) => {
-                            return Err(Error::ParseError(format!(
-                                "Failed to parse value '{}' as Int8: {}",
-                                value, e
-                            )));
-                        }
-                    }
-                } else {
-                    builder.append_null();
-                }
+                append_numeric_value!(self, value, Int8Builder, i8, "Int8");
             }
             DataType::UInt8 => {
-                let builder = self
-                    .array_builder
-                    .as_any_mut()
-                    .downcast_mut::<UInt8Builder>()
-                    .expect("UInt8Builder");
-                if self.has_value {
-                    match value.parse::<u8>() {
-                        Ok(val) => builder.append_value(val),
-                        Err(e) => {
-                            return Err(Error::ParseError(format!(
-                                "Failed to parse value '{}' as UInt8: {}",
-                                value, e
-                            )));
-                        }
-                    }
-                } else {
-                    builder.append_null();
-                }
+                append_numeric_value!(self, value, UInt8Builder, u8, "UInt8");
             }
             DataType::Int16 => {
-                let builder = self
-                    .array_builder
-                    .as_any_mut()
-                    .downcast_mut::<Int16Builder>()
-                    .expect("Int16Builder");
-                if self.has_value {
-                    match value.parse::<i16>() {
-                        Ok(val) => builder.append_value(val),
-                        Err(e) => {
-                            return Err(Error::ParseError(format!(
-                                "Failed to parse value '{}' as Int16: {}",
-                                value, e
-                            )));
-                        }
-                    }
-                } else {
-                    builder.append_null();
-                }
+                append_numeric_value!(self, value, Int16Builder, i16, "Int16");
             }
             DataType::UInt16 => {
-                let builder = self
-                    .array_builder
-                    .as_any_mut()
-                    .downcast_mut::<UInt16Builder>()
-                    .expect("UInt16Builder");
-                if self.has_value {
-                    match value.parse::<u16>() {
-                        Ok(val) => builder.append_value(val),
-                        Err(e) => {
-                            return Err(Error::ParseError(format!(
-                                "Failed to parse value '{}' as UInt16: {}",
-                                value, e
-                            )));
-                        }
-                    }
-                } else {
-                    builder.append_null();
-                }
+                append_numeric_value!(self, value, UInt16Builder, u16, "UInt16");
             }
             DataType::Int32 => {
-                let builder = self
-                    .array_builder
-                    .as_any_mut()
-                    .downcast_mut::<Int32Builder>()
-                    .expect("Int32Builder");
-                if self.has_value {
-                    match value.parse::<i32>() {
-                        Ok(val) => builder.append_value(val),
-                        Err(e) => {
-                            return Err(Error::ParseError(format!(
-                                "Failed to parse value '{}' as Int32: {}",
-                                value, e
-                            )));
-                        }
-                    }
-                } else {
-                    builder.append_null();
-                }
+                append_numeric_value!(self, value, Int32Builder, i32, "Int32");
             }
             DataType::UInt32 => {
-                let builder = self
-                    .array_builder
-                    .as_any_mut()
-                    .downcast_mut::<UInt32Builder>()
-                    .expect("UInt32Builder");
-                if self.has_value {
-                    match value.parse::<u32>() {
-                        Ok(val) => builder.append_value(val),
-                        Err(e) => {
-                            return Err(Error::ParseError(format!(
-                                "Failed to parse value '{}' as UInt32: {}",
-                                value, e
-                            )));
-                        }
-                    }
-                } else {
-                    builder.append_null();
-                }
+                append_numeric_value!(self, value, UInt32Builder, u32, "UInt32");
             }
             DataType::Int64 => {
-                let builder = self
-                    .array_builder
-                    .as_any_mut()
-                    .downcast_mut::<Int64Builder>()
-                    .expect("Int64Builder");
-                if self.has_value {
-                    match value.parse::<i64>() {
-                        Ok(val) => builder.append_value(val),
-                        Err(e) => {
-                            return Err(Error::ParseError(format!(
-                                "Failed to parse value '{}' as Int64: {}",
-                                value, e
-                            )));
-                        }
-                    }
-                } else {
-                    builder.append_null();
-                }
+                append_numeric_value!(self, value, Int64Builder, i64, "Int64");
             }
             DataType::UInt64 => {
-                let builder = self
-                    .array_builder
-                    .as_any_mut()
-                    .downcast_mut::<UInt64Builder>()
-                    .expect("UInt64Builder");
-                if self.has_value {
-                    match value.parse::<u64>() {
-                        Ok(val) => builder.append_value(val),
-                        Err(e) => {
-                            return Err(Error::ParseError(format!(
-                                "Failed to parse value '{}' as UInt64: {}",
-                                value, e
-                            )));
-                        }
-                    }
-                } else {
-                    builder.append_null();
-                }
+                append_numeric_value!(self, value, UInt64Builder, u64, "UInt64");
             }
             DataType::Float32 => {
-                let builder = self
-                    .array_builder
-                    .as_any_mut()
-                    .downcast_mut::<Float32Builder>()
-                    .expect("Float32Builder");
-                if self.has_value {
-                    match value.parse::<f32>() {
-                        Ok(val) => builder.append_value(val),
-                        Err(e) => {
-                            return Err(Error::ParseError(format!(
-                                "Failed to parse value '{}' as Float32: {}",
-                                value, e
-                            )));
-                        }
-                    }
-                } else {
-                    builder.append_null();
-                }
+                append_numeric_value!(self, value, Float32Builder, f32, "Float32");
             }
             DataType::Float64 => {
-                let builder = self
-                    .array_builder
-                    .as_any_mut()
-                    .downcast_mut::<Float64Builder>()
-                    .expect("Float64Builder");
-                if self.has_value {
-                    match value.parse::<f64>() {
-                        Ok(val) => builder.append_value(val),
-                        Err(e) => {
-                            return Err(Error::ParseError(format!(
-                                "Failed to parse value '{}' as Float64: {}",
-                                value, e
-                            )));
-                        }
-                    }
-                } else {
-                    builder.append_null();
-                }
+                append_numeric_value!(self, value, Float64Builder, f64, "Float64");
             }
             DataType::Boolean => {
                 let builder = self
