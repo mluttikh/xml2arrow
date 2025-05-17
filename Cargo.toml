@@ -10,24 +10,24 @@ categories = ["data-structures", "encoding"]
 readme = "README.md"
 
 [dependencies]
-arrow = "54.3.0"
+arrow = "55.1.0"
 derive_more = { version = "2.0.1", features = ["from"] }
-indexmap = "2.7.0"
-quick-xml = "0.37.2"
-serde = { version = "1.0.218", features = ["derive"] }
+indexmap = "2.9.0"
+quick-xml = "0.37.5"
+serde = { version = "1.0.219", features = ["derive"] }
 serde_yaml = "0.9.34"
-string_cache = "0.8.8"
+string_cache = "0.8.9"
 fxhash = "0.2.1"
 
 [dev-dependencies]
-rstest = "0.18"
-tempfile = "3.17"
+rstest = "0.25"
+tempfile = "3.20"
 approx = "0.5.1"
 
 [features]
 python = ["pyo3"]
 
 [dependencies.pyo3]
-version = "0.23.4"
+version = "0.24.2"
 default-features = false
 optional = true
