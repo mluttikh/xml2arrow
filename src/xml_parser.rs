@@ -336,7 +336,12 @@ impl TableBuilder {
             fields.push(field_builder.field.clone())
         }
         let schema = Schema::new(fields);
-        Ok(RecordBatch::try_new(Arc::new(schema), arrays)?)
+        Ok(RecordBatch::try_new(Arc::new(schema), arrays).map_err(|e| {
+            arrow::error::ArrowError::InvalidArgumentError(format!(
+                "Failed to create RecordBatch for table with name {} and XML path {}: {}",
+                self.table_config.name, self.table_config.xml_path, e
+            ))
+        })?)
     }
 }
 
@@ -437,7 +442,7 @@ impl XmlToArrowConverter {
 /// A `Result` containing:
 ///
 /// *   `Ok(IndexMap<String, RecordBatch>)`: An `IndexMap` where keys are the XML names of the tables (as defined in the config)
-///       and values are the corresponding Arrow `RecordBatch` objects.
+///     and values are the corresponding Arrow `RecordBatch` objects.
 /// *   `Err(Error)`: An `Error` value if any error occurs during parsing, configuration, or Arrow table creation.
 ///
 /// # Example
