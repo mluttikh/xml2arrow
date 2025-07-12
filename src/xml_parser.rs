@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::io::BufRead;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::{thread, time};
 
 use arrow::array::{
     Array, ArrayBuilder, AsArray, BooleanBuilder, Float32Array, Float32Builder, Float64Array,
@@ -455,7 +456,7 @@ impl XmlToArrowConverter {
 /// let xml_content = r#"<data><item><value>123</value></item></data>"#;
 /// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build()];
 /// let tables = vec![TableConfig::new("items", "/data", vec![], fields)];
-/// let config = Config { tables };
+/// let config = Config { tables, end_xml_path: None };
 /// let record_batches = parse_xml(xml_content.as_bytes(), &config).unwrap();
 /// // ... use record_batches
 /// ```
@@ -464,6 +465,10 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
     reader.config_mut().trim_text(true);
     let mut xml_path = XmlPath::new("/");
     let mut xml_to_arrow_converter = XmlToArrowConverter::from_config(config)?;
+    println!("config={:?}", config);
+
+    let end_xml_path = config.end_xml_path.as_ref().map(|s| XmlPath::new(s));
+    println!("end_xml_path={:?}", end_xml_path);
 
     // Use specialized parsing logic based on whether attribute parsing is required.
     // This avoids unnecessary attribute processing and Empty event handling
@@ -474,6 +479,7 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
             &mut xml_path,
             &mut xml_to_arrow_converter,
             PhantomData,
+            end_xml_path.as_ref(),
         )?;
     } else {
         process_xml_events::<_, false>(
@@ -481,6 +487,7 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
             &mut xml_path,
             &mut xml_to_arrow_converter,
             PhantomData,
+            end_xml_path.as_ref(),
         )?;
     }
 
@@ -493,11 +500,16 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
     xml_path: &mut XmlPath,
     xml_to_arrow_converter: &mut XmlToArrowConverter,
     _marker: PhantomData<bool>,
+    end_xml_path: Option<&XmlPath>,
 ) -> Result<()> {
     let mut buf = Vec::with_capacity(256);
+    println!("[DEBUG] Starting XML parsing with path: {}", xml_path);
     loop {
         match reader.read_event_into(&mut buf)? {
             Event::Start(e) => {
+                //println!("[DEBUG] START: Current XML path: {}", xml_path);
+                // let ten_millis = time::Duration::from_millis(10);
+                // thread::sleep(ten_millis);
                 let node = std::str::from_utf8(e.local_name().into_inner())?;
                 xml_path.append_node(node);
                 if xml_to_arrow_converter.is_table_path(xml_path) {
@@ -508,6 +520,7 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                 }
             }
             Event::Empty(e) => {
+                //println!("[DEBUG] EMPTY: Current XML path: {}", xml_path);
                 if PARSE_ATTRIBUTES {
                     let node = std::str::from_utf8(e.local_name().into_inner())?;
                     xml_path.append_node(node);
@@ -523,16 +536,45 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                 }
             }
             Event::Text(e) => {
+                // println!("[DEBUG] TEXT: Current XML path: {}", xml_path);
                 let text = e.unescape().unwrap_or_else(|_| String::from_utf8_lossy(&e));
                 xml_to_arrow_converter
                     .current_table_builder_mut()?
                     .set_field_value(xml_path, &text);
             }
             Event::End(_) => {
+                // Early stop if end_xml_path matches
                 if xml_to_arrow_converter.is_table_path(xml_path) {
                     xml_to_arrow_converter.end_table()?;
+                    if let Some(end_path) = end_xml_path {
+                        if xml_path == end_path {
+                            break;
+                        }
+                    }
+                }
+                //println!("[DEBUG] END: Current XML path: {}", xml_path);
+                if let Some(end_path) = end_xml_path {
+                    if xml_path == end_path {
+                        // This is the root element of the table
+                        let indices = xml_to_arrow_converter.parent_row_indices()?;
+                        xml_to_arrow_converter
+                            .current_table_builder_mut()?
+                            .end_row(&indices)?;
+                        break;
+                    }
                 }
                 xml_path.remove_node();
+                //println!("[DEBUG] END: Current XML path: {}", xml_path);
+                // if let Some(end_path) = end_xml_path {
+                //     if xml_path == end_path {
+                //         // This is the root element of the table
+                //         let indices = xml_to_arrow_converter.parent_row_indices()?;
+                //         xml_to_arrow_converter
+                //             .current_table_builder_mut()?
+                //             .end_row(&indices)?;
+                //         break;
+                //     }
+                // }
                 if xml_to_arrow_converter.is_table_path(xml_path) {
                     // This is the root element of the table
                     let indices = xml_to_arrow_converter.parent_row_indices()?;
@@ -1031,7 +1073,10 @@ mod tests {
     #[test]
     fn test_parse_xml_empty() -> Result<()> {
         let xml_content = "";
-        let config = Config { tables: vec![] };
+        let config = Config {
+            tables: vec![],
+            end_xml_path: None,
+        };
         let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         assert!(record_batches.is_empty());
         Ok(())
@@ -1454,13 +1499,55 @@ mod tests {
         let fields =
             vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Utf8).build()];
         let tables = vec![TableConfig::new("items", "/data", vec![], fields)];
-        let config = Config { tables };
+        let config = Config {
+            tables,
+            end_xml_path: None,
+        };
 
         let record_batches = parse_xml(&xml_bytes[..], &config)?;
         assert_eq!(record_batches.len(), 1);
         let record_batch = record_batches.get("items").unwrap();
         assert_eq!(record_batch.num_rows(), 1);
         assert_array_values!(record_batch, "value", &["���"], StringArray);
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_xml_with_end_xml_path() -> Result<()> {
+        let xml_content = r#"
+        <root>
+            <header>
+                <meta>foo</meta>
+                <meta>bar</meta>
+            </header>
+            <body>
+                <data>should not be parsed</data>
+            </body>
+        </root>
+    "#;
+
+        let config = config_from_yaml!(
+            r#"
+            tables:
+              - name: header
+                xml_path: /root/header
+                levels: []
+                fields:
+                  - name: meta
+                    xml_path: /root/header/meta
+                    data_type: Utf8
+                    nullable: false
+            end_xml_path: /root/header
+        "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        // Only the header table should be present
+        assert_eq!(record_batches.len(), 1);
+        let header_batch = record_batches.get("header").unwrap();
+        assert_eq!(header_batch.num_rows(), 2);
+        assert_array_values!(header_batch, "meta", &["foo", "bar"], StringArray);
+
         Ok(())
     }
 }

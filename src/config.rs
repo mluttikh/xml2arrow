@@ -16,6 +16,9 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     /// A vector of `TableConfig` structs, each defining a table to be extracted from the XML.
     pub tables: Vec<TableConfig>,
+    /// Optional XML path at which parsing should stop early.
+    #[serde(default)]
+    pub end_xml_path: Option<String>,
 }
 
 impl Config {
@@ -318,8 +321,9 @@ mod tests {
                         ]
                     ),
                 ],
+                end_xml_path: None,
             },
-            Config { tables: vec![] }
+            Config { tables: vec![], end_xml_path: None }
         )]
         config: Config,
     ) {
@@ -355,7 +359,10 @@ mod tests {
 
     #[test]
     fn test_to_yaml_file_not_existing_path() {
-        let config = Config { tables: vec![] };
+        let config = Config {
+            tables: vec![],
+            end_xml_path: None,
+        };
         let result = config.to_yaml_file(PathBuf::from("/not/existing/path/config.yaml"));
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::Io(_)));
