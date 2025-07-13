@@ -465,10 +465,10 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
     reader.config_mut().trim_text(true);
     let mut xml_path = XmlPath::new("/");
     let mut xml_to_arrow_converter = XmlToArrowConverter::from_config(config)?;
-    println!("config={:?}", config);
+    // println!("config={:?}", config);
 
     let end_xml_path = config.end_xml_path.as_ref().map(|s| XmlPath::new(s));
-    println!("end_xml_path={:?}", end_xml_path);
+    // println!("end_xml_path={:?}", end_xml_path);
 
     // Use specialized parsing logic based on whether attribute parsing is required.
     // This avoids unnecessary attribute processing and Empty event handling
@@ -503,7 +503,7 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
     end_xml_path: Option<&XmlPath>,
 ) -> Result<()> {
     let mut buf = Vec::with_capacity(256);
-    println!("[DEBUG] Starting XML parsing with path: {}", xml_path);
+    // println!("[DEBUG] Starting XML parsing with path: {}", xml_path);
     loop {
         match reader.read_event_into(&mut buf)? {
             Event::Start(e) => {
@@ -548,6 +548,18 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                     xml_to_arrow_converter.end_table()?;
                     if let Some(end_path) = end_xml_path {
                         if xml_path == end_path {
+                            // loop {
+                            //     match xml_to_arrow_converter.current_table_builder_mut() {
+                            //         Ok(table_builder) => {
+                            //             // End the current row and table
+                            //             let indices =
+                            //                 xml_to_arrow_converter.parent_row_indices()?;
+                            //             table_builder.end_row(&indices)?;
+                            //             xml_to_arrow_converter.end_table()?;
+                            //         }
+                            //         Err(_) => break,
+                            //     }
+                            // }
                             break;
                         }
                     }
