@@ -2,7 +2,6 @@ use std::collections::VecDeque;
 use std::io::BufRead;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::{thread, time};
 
 use arrow::array::{
     Array, ArrayBuilder, AsArray, BooleanBuilder, Float32Array, Float32Builder, Float64Array,
@@ -482,10 +481,8 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
     reader.config_mut().trim_text(true);
     let mut xml_path = XmlPath::new("/");
     let mut xml_to_arrow_converter = XmlToArrowConverter::from_config(config)?;
-    // println!("config={:?}", config);
 
     let end_xml_path = config.end_xml_path.as_ref().map(|s| XmlPath::new(s));
-    // println!("end_xml_path={:?}", end_xml_path);
 
     // Use specialized parsing logic based on whether attribute parsing is required.
     // This avoids unnecessary attribute processing and Empty event handling
@@ -520,13 +517,9 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
     end_xml_path: Option<&XmlPath>,
 ) -> Result<()> {
     let mut buf = Vec::with_capacity(256);
-    // println!("[DEBUG] Starting XML parsing with path: {}", xml_path);
     loop {
         match reader.read_event_into(&mut buf)? {
             Event::Start(e) => {
-                //println!("[DEBUG] START: Current XML path: {}", xml_path);
-                // let ten_millis = time::Duration::from_millis(10);
-                // thread::sleep(ten_millis);
                 let node = std::str::from_utf8(e.local_name().into_inner())?;
                 xml_path.append_node(node);
                 if xml_to_arrow_converter.is_table_path(xml_path) {
@@ -537,7 +530,6 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                 }
             }
             Event::Empty(e) => {
-                //println!("[DEBUG] EMPTY: Current XML path: {}", xml_path);
                 if PARSE_ATTRIBUTES {
                     let node = std::str::from_utf8(e.local_name().into_inner())?;
                     xml_path.append_node(node);
@@ -550,7 +542,6 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                 }
             }
             Event::Text(e) => {
-                // println!("[DEBUG] TEXT: Current XML path: {}", xml_path);
                 let text = e.unescape().unwrap_or_else(|_| String::from_utf8_lossy(&e));
                 xml_to_arrow_converter.set_field_value_for_current_table(xml_path, &text)?
             }
@@ -576,7 +567,6 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                         }
                     }
                 }
-                //println!("[DEBUG] END: Current XML path: {}", xml_path);
                 if let Some(end_path) = end_xml_path {
                     if xml_path == end_path {
                         // This is the root element of the table
@@ -588,7 +578,6 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                     }
                 }
                 xml_path.remove_node();
-                //println!("[DEBUG] END: Current XML path: {}", xml_path);
                 // if let Some(end_path) = end_xml_path {
                 //     if xml_path == end_path {
                 //         // This is the root element of the table
