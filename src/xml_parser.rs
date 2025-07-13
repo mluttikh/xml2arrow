@@ -388,6 +388,23 @@ impl XmlToArrowConverter {
             .ok_or_else(|| Error::TableNotFound(table_path.to_string()))
     }
 
+    /// Sets the field value for the current table builder.
+    pub fn set_field_value_for_current_table(
+        &mut self,
+        field_path: &XmlPath,
+        value: &str,
+    ) -> Result<()> {
+        let table_builder = self.current_table_builder_mut()?;
+        table_builder.set_field_value(field_path, value);
+        Ok(())
+    }
+
+    fn end_current_row(&mut self) -> Result<()> {
+        let indices = self.parent_row_indices()?;
+        self.current_table_builder_mut()?.end_row(&indices)?;
+        Ok(())
+    }
+
     fn parent_row_indices(&self) -> Result<Vec<u32>> {
         let mut indices = Vec::with_capacity(self.builder_stack.len() - 1);
         for table_path in self.builder_stack.iter().skip(1) {
@@ -528,19 +545,14 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                     xml_path.remove_node();
                     if xml_to_arrow_converter.is_table_path(xml_path) {
                         // This is the root element of the table
-                        let indices = xml_to_arrow_converter.parent_row_indices()?;
-                        xml_to_arrow_converter
-                            .current_table_builder_mut()?
-                            .end_row(&indices)?;
+                        xml_to_arrow_converter.end_current_row()?
                     }
                 }
             }
             Event::Text(e) => {
                 // println!("[DEBUG] TEXT: Current XML path: {}", xml_path);
                 let text = e.unescape().unwrap_or_else(|_| String::from_utf8_lossy(&e));
-                xml_to_arrow_converter
-                    .current_table_builder_mut()?
-                    .set_field_value(xml_path, &text);
+                xml_to_arrow_converter.set_field_value_for_current_table(xml_path, &text)?
             }
             Event::End(_) => {
                 // Early stop if end_xml_path matches
@@ -589,10 +601,7 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                 // }
                 if xml_to_arrow_converter.is_table_path(xml_path) {
                     // This is the root element of the table
-                    let indices = xml_to_arrow_converter.parent_row_indices()?;
-                    xml_to_arrow_converter
-                        .current_table_builder_mut()?
-                        .end_row(&indices)?;
+                    xml_to_arrow_converter.end_current_row()?
                 }
             }
             Event::Eof => {
@@ -615,9 +624,11 @@ fn parse_attributes(
         let attribute = attribute?;
         let key = std::str::from_utf8(attribute.key.local_name().into_inner())?;
         let node = "@".to_string() + key;
-        let table_builder = xml_to_arrow_converter.current_table_builder_mut()?;
         xml_path.append_node(&node);
-        table_builder.set_field_value(xml_path, std::str::from_utf8(attribute.value.as_ref())?);
+        xml_to_arrow_converter.set_field_value_for_current_table(
+            xml_path,
+            std::str::from_utf8(attribute.value.as_ref())?,
+        )?;
         xml_path.remove_node();
     }
     Ok(())
