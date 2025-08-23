@@ -110,7 +110,7 @@ impl FieldBuilder {
     /// Appends the currently accumulated value to the appropriate Arrow array builder,
     /// performing type conversion and handling nulls.
     fn append_current_value(&mut self) -> Result<()> {
-        let value = &self.current_value;
+        let value = self.current_value.as_str();
         match self.field.data_type() {
             DataType::Utf8 => {
                 let builder = self
@@ -163,7 +163,7 @@ impl FieldBuilder {
                     .downcast_mut::<BooleanBuilder>()
                     .expect("BooleanBuilder");
                 if self.has_value {
-                    match value.as_str() {
+                    match value {
                         "false" | "0" => builder.append_value(false),
                         "true" | "1" => builder.append_value(true),
                         _ => {
@@ -393,7 +393,17 @@ impl XmlToArrowConverter {
         field_path: &XmlPath,
         value: &str,
     ) -> Result<()> {
-        let table_builder = self.current_table_builder_mut()?;
+        let table_builder = match self.current_table_builder_mut() {
+            Ok(builder) => builder,
+            Err(e) => {
+                if value.trim() == "" {
+                    // When we can not find a table builder and the value is empty there
+                    // was probably no start event, so ignore.
+                    return Ok(());
+                }
+                return Err(e);
+            }
+        };
         table_builder.set_field_value(field_path, value);
         Ok(())
     }
@@ -478,7 +488,7 @@ impl XmlToArrowConverter {
 /// ```
 pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<String, RecordBatch>> {
     let mut reader = Reader::from_reader(reader);
-    reader.config_mut().trim_text(true);
+    reader.config_mut().expand_empty_elements = true;
     let mut xml_path = XmlPath::new("/");
     let mut xml_to_arrow_converter = XmlToArrowConverter::from_config(config)?;
 
@@ -536,8 +546,13 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                     }
                 }
             }
+            Event::GeneralRef(e) => {
+                let text = e.xml_content()?;
+                let text = quick_xml::escape::resolve_predefined_entity(&text).unwrap_or_default();
+                xml_to_arrow_converter.set_field_value_for_current_table(xml_path, &text)?
+            }
             Event::Text(e) => {
-                let text = e.unescape().unwrap_or_else(|_| String::from_utf8_lossy(&e));
+                let text = e.decode().unwrap_or_else(|_| String::from_utf8_lossy(&e));
                 xml_to_arrow_converter.set_field_value_for_current_table(xml_path, &text)?
             }
             Event::End(_) => {
@@ -1472,6 +1487,102 @@ mod tests {
         let record_batch = record_batches.get("items").unwrap();
         assert_eq!(record_batch.num_rows(), 1);
         assert_array_values!(record_batch, "value", &["���"], StringArray);
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_xml_with_attributes_and_empty_events() -> Result<()> {
+        let xml_content = r#"<library><book id="1" isbn="978-0-321-76572-3" /><book id="2" title="The Rust Programming Language" /></library>"#;
+        let fields = vec![
+            FieldConfigBuilder::new("book_id", "/library/book/@id", DType::Int32).build(),
+            FieldConfigBuilder::new("book_isbn", "/library/book/@isbn", DType::Utf8)
+                .nullable(true)
+                .build(),
+            FieldConfigBuilder::new("book_title", "/library/book/@title", DType::Utf8)
+                .nullable(true)
+                .build(),
+        ];
+        let tables = vec![TableConfig::new("books", "/library", vec![], fields)];
+        let config = Config { tables };
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("books").unwrap();
+
+        assert_array_values_option!(batch, "book_id", &[Some(1), Some(2)], Int32Array);
+        assert_array_values_option!(
+            batch,
+            "book_isbn",
+            &[Some("978-0-321-76572-3"), None],
+            StringArray
+        );
+        assert_array_values_option!(
+            batch,
+            "book_title",
+            &[None, Some("The Rust Programming Language")],
+            StringArray
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_xml_malformed_input_error_handling() -> Result<()> {
+        let config = config_from_yaml!(
+            r#"
+            tables:
+              - name: items
+                xml_path: /data
+                levels: []
+                fields:
+                  - name: value
+                    xml_path: /data/item/value
+                    data_type: Int32
+                    nullable: false
+            "#
+        );
+
+        // Test cases for various malformed XML scenarios
+        let malformed_cases = vec![
+            // Unclosed tag
+            (
+                "<data><item><value>123</item></data>",
+                "unclosed tag 'value'",
+            ),
+            // Mismatched closing tag
+            (
+                "<data><item><value>123</wrong></item></data>",
+                "mismatched closing tag",
+            ),
+            // Incomplete attribute
+            (
+                "<data><item id=\"><value>123</value></item></data>",
+                "incomplete attribute value",
+            ),
+        ];
+
+        for (malformed_xml, description) in malformed_cases {
+            let result = parse_xml(malformed_xml.as_bytes(), &config);
+
+            // Verify that parsing fails
+            assert!(
+                result.is_err(),
+                "Expected parsing to fail for case: {}, but it succeeded",
+                description
+            );
+
+            // Verify it's the right type of error
+            match result.unwrap_err() {
+                Error::XmlParsing(_) => {
+                    // This is the expected error type for malformed XML
+                }
+                other_error => {
+                    panic!(
+                        "Expected XmlParsing or XmlParseAttr error for case '{}', but got: {:?}",
+                        description, other_error
+                    );
+                }
+            }
+        }
+
         Ok(())
     }
 }

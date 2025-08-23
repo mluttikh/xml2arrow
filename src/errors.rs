@@ -18,6 +18,9 @@ pub enum Error {
     /// Errors from the QuickXML crate that can be raised during parsing attributes.
     #[from]
     XmlParseAttr(quick_xml::events::attributes::AttrError),
+    // Errors from the QuickXML crate that can be raised when decoding or encoding.
+    #[from]
+    XmlParseEncoding(quick_xml::encoding::EncodingError),
     /// Errors from the Serde YAML crate during configuration parsing
     #[from]
     Yaml(serde_yaml::Error),
