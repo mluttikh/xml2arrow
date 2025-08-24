@@ -393,17 +393,7 @@ impl XmlToArrowConverter {
         field_path: &XmlPath,
         value: &str,
     ) -> Result<()> {
-        let table_builder = match self.current_table_builder_mut() {
-            Ok(builder) => builder,
-            Err(e) => {
-                if value.trim() == "" {
-                    // When we can not find a table builder and the value is empty there
-                    // was probably no start event, so ignore.
-                    return Ok(());
-                }
-                return Err(e);
-            }
-        };
+        let table_builder = self.current_table_builder_mut()?;
         table_builder.set_field_value(field_path, value);
         Ok(())
     }
@@ -488,7 +478,8 @@ impl XmlToArrowConverter {
 /// ```
 pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<String, RecordBatch>> {
     let mut reader = Reader::from_reader(reader);
-    reader.config_mut().expand_empty_elements = true;
+    // reader.config_mut().expand_empty_elements = true;
+    // reader.config_mut().trim_text(true);
     let mut xml_path = XmlPath::new("/");
     let mut xml_to_arrow_converter = XmlToArrowConverter::from_config(config)?;
 
@@ -552,8 +543,29 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                 xml_to_arrow_converter.set_field_value_for_current_table(xml_path, &text)?
             }
             Event::Text(e) => {
-                let text = e.decode().unwrap_or_else(|_| String::from_utf8_lossy(&e));
+                // let text = e.xml_content()?;
+                let text = e.into_inner();
+                let text = std::str::from_utf8(&text)?;
                 xml_to_arrow_converter.set_field_value_for_current_table(xml_path, &text)?
+                //let text_ref = e.trim_ascii();
+                // let raw_bytes = e.into_inner();
+                // xml_to_arrow_converter
+                //     .set_field_value_for_current_table(xml_path, std::str::from_utf8(&raw_bytes)?)?
+                // if !text_ref.is_empty() {
+                //     // Only process the text if it's not empty after trimming
+                //     xml_to_arrow_converter.set_field_value_for_current_table(
+                //         xml_path,
+                //         std::str::from_utf8(text_ref)?,
+                //     )?
+                // }
+                // let text = e
+                //     .xml_content()
+                //     .unwrap_or_else(|_| String::from_utf8_lossy(&e));
+                // let trimmed_text = text.trim();
+                // // Only process the text if it's not empty after trimming
+                // if !trimmed_text.is_empty() {
+                //     xml_to_arrow_converter.set_field_value_for_current_table(xml_path, &text)?
+                // }
             }
             Event::End(_) => {
                 if xml_to_arrow_converter.is_table_path(xml_path) {
@@ -738,6 +750,10 @@ mod tests {
         let config = config_from_yaml!(
             r#"
                 tables:
+                  - name: root
+                    xml_path: /
+                    levels: []
+                    fields: []
                   - name: items
                     xml_path: /data/dataset/table
                     levels: ["table"]
@@ -966,9 +982,13 @@ mod tests {
         let config = config_from_yaml!(
             r#"
                 tables:
+                  - name: root
+                    xml_path: /
+                    levels: []
+                    fields: []
                   - name: items
                     xml_path: /data
-                    levels: []
+                    levels: ["item"]
                     fields:
                       - name: float32
                         xml_path: /data/item/float32
@@ -1148,6 +1168,10 @@ mod tests {
         let config = config_from_yaml!(
             r#"
                 tables:
+                  - name: root
+                    xml_path: /
+                    levels: []
+                    fields: []
                   - name: items
                     xml_path: /data/items
                     levels: []
@@ -1210,6 +1234,10 @@ mod tests {
         let config = config_from_yaml!(
             r#"
                 tables:
+                  - name: root
+                    xml_path: /
+                    levels: []
+                    fields: []
                   - name: groups
                     xml_path: /data/dataset/table
                     levels: ["table"]
@@ -1252,6 +1280,10 @@ mod tests {
         let config = config_from_yaml!(
             r#"
                 tables:
+                  - name: root
+                    xml_path: /
+                    levels: []
+                    fields: []
                   - name: items
                     xml_path: /data/dataset/table
                     levels: ["table"]

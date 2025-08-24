@@ -119,6 +119,7 @@ impl From<Error> for PyErr {
             Error::Arrow(e) => PyArrowException::new_err(e.to_string()),
             Error::XmlParsing(e) => XmlParsingError::new_err(e.to_string()),
             Error::XmlParseAttr(e) => XmlParsingError::new_err(e.to_string()),
+            Error::XmlParseEncoding(e) => XmlParsingError::new_err(e.to_string()),
             Error::Yaml(e) => YamlParsingError::new_err(e.to_string()),
             Error::UnsupportedDataType(e) => UnsupportedDataTypeError::new_err(e.to_string()),
             Error::TableNotFound(e) => TableNotFoundError::new_err(e.to_string()),
