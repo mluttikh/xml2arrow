@@ -13,6 +13,7 @@ use arrow::datatypes::{DataType, Field, Float32Type, Float64Type, Schema};
 use fxhash::FxBuildHasher;
 use indexmap::IndexMap;
 use quick_xml::Reader;
+use quick_xml::escape;
 use quick_xml::events::Event;
 use quick_xml::events::attributes::Attributes;
 
@@ -21,6 +22,8 @@ use crate::config::{DType, FieldConfig, TableConfig};
 use crate::errors::Error;
 use crate::errors::Result;
 use crate::xml_path::XmlPath;
+
+use lexical_core::parse;
 
 /// Builds Arrow arrays for a single field based on parsed XML data.
 ///
@@ -70,7 +73,7 @@ macro_rules! append_numeric_value {
             .downcast_mut::<$builder_type>()
             .expect(&format!("{}Builder", $type_name));
         if $self.has_value {
-            match $value.parse::<$numeric_type>() {
+            match parse::<$numeric_type>($value.as_bytes()) {
                 Ok(val) => builder.append_value(val),
                 Err(e) => {
                     return Err(Error::ParseError(format!(
@@ -472,7 +475,7 @@ impl XmlToArrowConverter {
 /// let xml_content = r#"<data><item><value>123</value></item></data>"#;
 /// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build()];
 /// let tables = vec![TableConfig::new("items", "/data", vec![], fields)];
-/// let config = Config { tables };
+/// let config = Config { tables, parser_options: Default::default() };
 /// let record_batches = parse_xml(xml_content.as_bytes(), &config).unwrap();
 /// // ... use record_batches
 /// ```
@@ -481,6 +484,9 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
     // Expand empty elements (e.g., <tag/>) into <tag></tag>.
     // This simplifies the event loop, handling Event::Empty is no longer needed.
     reader.config_mut().expand_empty_elements = true;
+    if config.parser_options.trim_text {
+        reader.config_mut().trim_text(true);
+    }
     let mut xml_path = XmlPath::new("/");
     let mut xml_to_arrow_converter = XmlToArrowConverter::from_config(config)?;
 
@@ -529,7 +535,7 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
             Event::GeneralRef(e) => {
                 let text = e.into_inner();
                 let text = String::from_utf8_lossy(&text);
-                let text = quick_xml::escape::resolve_predefined_entity(&text).unwrap_or_default();
+                let text = escape::resolve_predefined_entity(&text).unwrap_or_default();
                 xml_to_arrow_converter.set_field_value_for_current_table(xml_path, &text)?
             }
             Event::Text(e) => {
@@ -1047,7 +1053,10 @@ mod tests {
     #[test]
     fn test_parse_xml_empty() -> Result<()> {
         let xml_content = "";
-        let config = Config { tables: vec![] };
+        let config = Config {
+            parser_options: Default::default(),
+            tables: vec![],
+        };
         let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         assert!(record_batches.is_empty());
         Ok(())
@@ -1482,7 +1491,10 @@ mod tests {
         let fields =
             vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Utf8).build()];
         let tables = vec![TableConfig::new("items", "/data", vec![], fields)];
-        let config = Config { tables };
+        let config = Config {
+            parser_options: Default::default(),
+            tables,
+        };
 
         let record_batches = parse_xml(&xml_bytes[..], &config)?;
         assert_eq!(record_batches.len(), 1);
@@ -1505,7 +1517,10 @@ mod tests {
                 .build(),
         ];
         let tables = vec![TableConfig::new("books", "/library", vec![], fields)];
-        let config = Config { tables };
+        let config = Config {
+            parser_options: Default::default(),
+            tables,
+        };
 
         let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("books").unwrap();
@@ -1584,6 +1599,100 @@ mod tests {
                 }
             }
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_trim_text_option() -> Result<()> {
+        let xml_content_with_whitespace = r#"
+            <data>
+                <item>
+                    <value>  123  </value>
+                </item>
+                <item>
+                    <value>
+                        456
+                    </value>
+                </item>
+                <item>
+                    <value>789</value>
+                </item>
+            </data>
+        "#;
+
+        let yaml_config_no_trim = r#"
+            tables:
+            - name: /
+              xml_path: /
+              levels: []
+              fields: []
+            - name: items
+              xml_path: /data/
+              levels:
+              - item
+              fields:
+                - name: value
+                  xml_path: /data/item/value
+                  data_type: Utf8
+        "#;
+
+        let yaml_config_with_trim = r#"
+            parser_options:
+              trim_text: true
+            tables:
+            - name: /
+              xml_path: /
+              levels: []
+              fields: []
+            - name: items
+              xml_path: /data/
+              levels:
+              - item
+              fields:
+                - name: value
+                  xml_path: /data/item/value
+                  data_type: Utf8
+        "#;
+
+        // --- Test 1: No trim (default) ---
+        let config_no_trim: Config = serde_yaml::from_str(yaml_config_no_trim).unwrap();
+        assert!(!config_no_trim.parser_options.trim_text); // Verify default
+
+        let record_batches_no_trim =
+            parse_xml(xml_content_with_whitespace.as_bytes(), &config_no_trim)?;
+        let batch_no_trim = record_batches_no_trim.get("items").unwrap();
+
+        // When not trimming, text nodes are concatenated.
+        // <value>  123  </value> becomes "  123  "
+        // <value>\n    456\n    </value> becomes "\n                        456\n                    "
+        println!("{:?}", batch_no_trim);
+        assert_array_values!(
+            batch_no_trim,
+            "value",
+            &[
+                "  123  ",
+                "\n                        456\n                    ",
+                "789"
+            ],
+            StringArray
+        );
+
+        // --- Test 2: With trim ---
+        let config_with_trim: Config = serde_yaml::from_str(yaml_config_with_trim).unwrap();
+        assert!(config_with_trim.parser_options.trim_text); // Verify explicit set
+
+        let record_batches_with_trim =
+            parse_xml(xml_content_with_whitespace.as_bytes(), &config_with_trim)?;
+        let batch_with_trim = record_batches_with_trim.get("items").unwrap();
+
+        // With trim_text=true, quick_xml trims whitespace and skips whitespace-only nodes.
+        assert_array_values!(
+            batch_with_trim,
+            "value",
+            &["123", "456", "789"],
+            StringArray
+        );
 
         Ok(())
     }

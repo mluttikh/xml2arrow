@@ -8,6 +8,20 @@ use crate::errors::{Error, Result};
 use arrow::datatypes::DataType;
 use serde::{Deserialize, Serialize};
 
+/// Configuration for the XML parser.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct ParserOptions {
+    /// Whether to trim whitespace from text nodes. Defaults to false.
+    #[serde(default)]
+    pub trim_text: bool,
+}
+
+impl Default for ParserOptions {
+    fn default() -> Self {
+        Self { trim_text: false }
+    }
+}
+
 /// Top-level configuration for XML to Arrow conversion.
 ///
 /// This struct holds a collection of `TableConfig` structs, each defining how a specific
@@ -16,6 +30,9 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     /// A vector of `TableConfig` structs, each defining a table to be extracted from the XML.
     pub tables: Vec<TableConfig>,
+    /// Parser options.
+    #[serde(default)]
+    pub parser_options: ParserOptions,
 }
 
 impl Config {
@@ -310,6 +327,7 @@ mod tests {
     fn test_yaml_rw(
         #[values(
             Config {
+                parser_options: Default::default(),
                 tables: vec![
                     TableConfig::new("table1", "/path/to", vec![], vec![
                         FieldConfigBuilder::new("string_field", "/path/to/string_field", DType::Utf8).nullable(true).build(),
@@ -319,7 +337,10 @@ mod tests {
                     ),
                 ],
             },
-            Config { tables: vec![] }
+            Config {
+                parser_options: Default::default(),
+                tables: vec![]
+            }
         )]
         config: Config,
     ) {
@@ -355,7 +376,10 @@ mod tests {
 
     #[test]
     fn test_to_yaml_file_not_existing_path() {
-        let config = Config { tables: vec![] };
+        let config = Config {
+            tables: vec![],
+            parser_options: Default::default(),
+        };
         let result = config.to_yaml_file(PathBuf::from("/not/existing/path/config.yaml"));
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::Io(_)));
@@ -371,5 +395,55 @@ mod tests {
 
         let field_config: FieldConfig = serde_yaml::from_str(yaml_string).unwrap();
         assert!(!field_config.nullable);
+    }
+
+    #[test]
+    fn test_config_trim_text_default_from_yaml() {
+        let yaml_string = r#"
+            tables:
+              - name: test_table
+                xml_path: /root
+                levels: []
+                fields:
+                  - name: bool_field
+                    xml_path: /root/value
+                    data_type: Boolean
+                    nullable: true
+            "#;
+
+        let config: Config = serde_yaml::from_str(yaml_string).unwrap();
+        assert!(
+            !config.parser_options.trim_text,
+            "trim_text should default to false"
+        );
+    }
+
+    #[test]
+    fn test_config_trim_text_explicit_from_yaml() {
+        let yaml_string = r#"
+            parser_options:
+              trim_text: true
+            tables: []
+            "#;
+
+        let config: Config = serde_yaml::from_str(yaml_string).unwrap();
+        assert!(
+            config.parser_options.trim_text,
+            "trim_text should be true when explicitly set"
+        );
+    }
+
+    #[test]
+    fn test_config_parser_options_empty_from_yaml() {
+        let yaml_string = r#"
+            parser_options: {}
+            tables: []
+            "#;
+
+        let config: Config = serde_yaml::from_str(yaml_string).unwrap();
+        assert!(
+            !config.parser_options.trim_text,
+            "trim_text should default to false when parser_options is empty"
+        );
     }
 }
