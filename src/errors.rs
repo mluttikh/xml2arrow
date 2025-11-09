@@ -18,6 +18,9 @@ pub enum Error {
     /// Errors from the QuickXML crate that can be raised during parsing attributes.
     #[from]
     XmlParseAttr(quick_xml::events::attributes::AttrError),
+    // Errors from the QuickXML crate that can be raised when decoding or encoding.
+    #[from]
+    XmlParseEncoding(quick_xml::encoding::EncodingError),
     /// Errors from the Serde YAML crate during configuration parsing
     #[from]
     Yaml(serde_yaml::Error),
@@ -116,6 +119,7 @@ impl From<Error> for PyErr {
             Error::Arrow(e) => PyArrowException::new_err(e.to_string()),
             Error::XmlParsing(e) => XmlParsingError::new_err(e.to_string()),
             Error::XmlParseAttr(e) => XmlParsingError::new_err(e.to_string()),
+            Error::XmlParseEncoding(e) => XmlParsingError::new_err(e.to_string()),
             Error::Yaml(e) => YamlParsingError::new_err(e.to_string()),
             Error::UnsupportedDataType(e) => UnsupportedDataTypeError::new_err(e.to_string()),
             Error::TableNotFound(e) => TableNotFoundError::new_err(e.to_string()),

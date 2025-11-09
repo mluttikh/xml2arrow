@@ -13,6 +13,7 @@ use arrow::datatypes::{DataType, Field, Float32Type, Float64Type, Schema};
 use fxhash::FxBuildHasher;
 use indexmap::IndexMap;
 use quick_xml::Reader;
+use quick_xml::escape;
 use quick_xml::events::Event;
 use quick_xml::events::attributes::Attributes;
 
@@ -110,7 +111,7 @@ impl FieldBuilder {
     /// Appends the currently accumulated value to the appropriate Arrow array builder,
     /// performing type conversion and handling nulls.
     fn append_current_value(&mut self) -> Result<()> {
-        let value = &self.current_value;
+        let value = self.current_value.as_str();
         match self.field.data_type() {
             DataType::Utf8 => {
                 let builder = self
@@ -163,7 +164,7 @@ impl FieldBuilder {
                     .downcast_mut::<BooleanBuilder>()
                     .expect("BooleanBuilder");
                 if self.has_value {
-                    match value.as_str() {
+                    match value {
                         "false" | "0" => builder.append_value(false),
                         "true" | "1" => builder.append_value(true),
                         _ => {
@@ -472,13 +473,18 @@ impl XmlToArrowConverter {
 /// let xml_content = r#"<data><item><value>123</value></item></data>"#;
 /// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build()];
 /// let tables = vec![TableConfig::new("items", "/data", vec![], fields)];
-/// let config = Config { tables };
+/// let config = Config { tables, parser_options: Default::default() };
 /// let record_batches = parse_xml(xml_content.as_bytes(), &config).unwrap();
 /// // ... use record_batches
 /// ```
 pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<String, RecordBatch>> {
     let mut reader = Reader::from_reader(reader);
-    reader.config_mut().trim_text(true);
+    // Expand empty elements (e.g., <tag/>) into <tag></tag>.
+    // This simplifies the event loop, handling Event::Empty is no longer needed.
+    reader.config_mut().expand_empty_elements = true;
+    if config.parser_options.trim_text {
+        reader.config_mut().trim_text(true);
+    }
     let mut xml_path = XmlPath::new("/");
     let mut xml_to_arrow_converter = XmlToArrowConverter::from_config(config)?;
 
@@ -524,20 +530,15 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                     parse_attributes(e.attributes(), xml_path, xml_to_arrow_converter)?;
                 }
             }
-            Event::Empty(e) => {
-                if PARSE_ATTRIBUTES {
-                    let node = std::str::from_utf8(e.local_name().into_inner())?;
-                    xml_path.append_node(node);
-                    parse_attributes(e.attributes(), xml_path, xml_to_arrow_converter)?;
-                    xml_path.remove_node();
-                    if xml_to_arrow_converter.is_table_path(xml_path) {
-                        // This is the root element of the table
-                        xml_to_arrow_converter.end_current_row()?
-                    }
-                }
+            Event::GeneralRef(e) => {
+                let text = e.into_inner();
+                let text = String::from_utf8_lossy(&text);
+                let text = escape::resolve_predefined_entity(&text).unwrap_or_default();
+                xml_to_arrow_converter.set_field_value_for_current_table(xml_path, &text)?
             }
             Event::Text(e) => {
-                let text = e.unescape().unwrap_or_else(|_| String::from_utf8_lossy(&e));
+                let text = e.into_inner();
+                let text = String::from_utf8_lossy(&text);
                 xml_to_arrow_converter.set_field_value_for_current_table(xml_path, &text)?
             }
             Event::End(_) => {
@@ -723,6 +724,10 @@ mod tests {
         let config = config_from_yaml!(
             r#"
                 tables:
+                  - name: root
+                    xml_path: /
+                    levels: []
+                    fields: []
                   - name: items
                     xml_path: /data/dataset/table
                     levels: ["table"]
@@ -951,9 +956,13 @@ mod tests {
         let config = config_from_yaml!(
             r#"
                 tables:
+                  - name: root
+                    xml_path: /
+                    levels: []
+                    fields: []
                   - name: items
                     xml_path: /data
-                    levels: []
+                    levels: ["item"]
                     fields:
                       - name: float32
                         xml_path: /data/item/float32
@@ -1042,7 +1051,10 @@ mod tests {
     #[test]
     fn test_parse_xml_empty() -> Result<()> {
         let xml_content = "";
-        let config = Config { tables: vec![] };
+        let config = Config {
+            parser_options: Default::default(),
+            tables: vec![],
+        };
         let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         assert!(record_batches.is_empty());
         Ok(())
@@ -1133,6 +1145,10 @@ mod tests {
         let config = config_from_yaml!(
             r#"
                 tables:
+                  - name: root
+                    xml_path: /
+                    levels: []
+                    fields: []
                   - name: items
                     xml_path: /data/items
                     levels: []
@@ -1195,6 +1211,10 @@ mod tests {
         let config = config_from_yaml!(
             r#"
                 tables:
+                  - name: root
+                    xml_path: /
+                    levels: []
+                    fields: []
                   - name: groups
                     xml_path: /data/dataset/table
                     levels: ["table"]
@@ -1237,6 +1257,10 @@ mod tests {
         let config = config_from_yaml!(
             r#"
                 tables:
+                  - name: root
+                    xml_path: /
+                    levels: []
+                    fields: []
                   - name: items
                     xml_path: /data/dataset/table
                     levels: ["table"]
@@ -1465,13 +1489,209 @@ mod tests {
         let fields =
             vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Utf8).build()];
         let tables = vec![TableConfig::new("items", "/data", vec![], fields)];
-        let config = Config { tables };
+        let config = Config {
+            parser_options: Default::default(),
+            tables,
+        };
 
         let record_batches = parse_xml(&xml_bytes[..], &config)?;
         assert_eq!(record_batches.len(), 1);
         let record_batch = record_batches.get("items").unwrap();
         assert_eq!(record_batch.num_rows(), 1);
         assert_array_values!(record_batch, "value", &["���"], StringArray);
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_xml_with_attributes_and_empty_events() -> Result<()> {
+        let xml_content = r#"<library><book id="1" isbn="978-0-321-76572-3" /><book id="2" title="The Rust Programming Language" /></library>"#;
+        let fields = vec![
+            FieldConfigBuilder::new("book_id", "/library/book/@id", DType::Int32).build(),
+            FieldConfigBuilder::new("book_isbn", "/library/book/@isbn", DType::Utf8)
+                .nullable(true)
+                .build(),
+            FieldConfigBuilder::new("book_title", "/library/book/@title", DType::Utf8)
+                .nullable(true)
+                .build(),
+        ];
+        let tables = vec![TableConfig::new("books", "/library", vec![], fields)];
+        let config = Config {
+            parser_options: Default::default(),
+            tables,
+        };
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("books").unwrap();
+
+        assert_array_values_option!(batch, "book_id", &[Some(1), Some(2)], Int32Array);
+        assert_array_values_option!(
+            batch,
+            "book_isbn",
+            &[Some("978-0-321-76572-3"), None],
+            StringArray
+        );
+        assert_array_values_option!(
+            batch,
+            "book_title",
+            &[None, Some("The Rust Programming Language")],
+            StringArray
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_xml_malformed_input_error_handling() -> Result<()> {
+        let config = config_from_yaml!(
+            r#"
+            tables:
+              - name: items
+                xml_path: /data
+                levels: []
+                fields:
+                  - name: value
+                    xml_path: /data/item/value
+                    data_type: Int32
+                    nullable: false
+            "#
+        );
+
+        // Test cases for various malformed XML scenarios
+        let malformed_cases = vec![
+            // Unclosed tag
+            (
+                "<data><item><value>123</item></data>",
+                "unclosed tag 'value'",
+            ),
+            // Mismatched closing tag
+            (
+                "<data><item><value>123</wrong></item></data>",
+                "mismatched closing tag",
+            ),
+            // Incomplete attribute
+            (
+                "<data><item id=\"><value>123</value></item></data>",
+                "incomplete attribute value",
+            ),
+        ];
+
+        for (malformed_xml, description) in malformed_cases {
+            let result = parse_xml(malformed_xml.as_bytes(), &config);
+
+            // Verify that parsing fails
+            assert!(
+                result.is_err(),
+                "Expected parsing to fail for case: {}, but it succeeded",
+                description
+            );
+
+            // Verify it's the right type of error
+            match result.unwrap_err() {
+                Error::XmlParsing(_) => {
+                    // This is the expected error type for malformed XML
+                }
+                other_error => {
+                    panic!(
+                        "Expected XmlParsing or XmlParseAttr error for case '{}', but got: {:?}",
+                        description, other_error
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_trim_text_option() -> Result<()> {
+        let xml_content_with_whitespace = r#"
+            <data>
+                <item>
+                    <value>  123  </value>
+                </item>
+                <item>
+                    <value>
+                        456
+                    </value>
+                </item>
+                <item>
+                    <value>789</value>
+                </item>
+            </data>
+        "#;
+
+        let yaml_config_no_trim = r#"
+            tables:
+            - name: /
+              xml_path: /
+              levels: []
+              fields: []
+            - name: items
+              xml_path: /data/
+              levels:
+              - item
+              fields:
+                - name: value
+                  xml_path: /data/item/value
+                  data_type: Utf8
+        "#;
+
+        let yaml_config_with_trim = r#"
+            parser_options:
+              trim_text: true
+            tables:
+            - name: /
+              xml_path: /
+              levels: []
+              fields: []
+            - name: items
+              xml_path: /data/
+              levels:
+              - item
+              fields:
+                - name: value
+                  xml_path: /data/item/value
+                  data_type: Utf8
+        "#;
+
+        // --- Test 1: No trim (default) ---
+        let config_no_trim: Config = serde_yaml::from_str(yaml_config_no_trim).unwrap();
+        assert!(!config_no_trim.parser_options.trim_text); // Verify default
+
+        let record_batches_no_trim =
+            parse_xml(xml_content_with_whitespace.as_bytes(), &config_no_trim)?;
+        let batch_no_trim = record_batches_no_trim.get("items").unwrap();
+
+        // When not trimming, text nodes are concatenated.
+        // <value>  123  </value> becomes "  123  "
+        // <value>\n    456\n    </value> becomes "\n                        456\n                    "
+        println!("{:?}", batch_no_trim);
+        assert_array_values!(
+            batch_no_trim,
+            "value",
+            &[
+                "  123  ",
+                "\n                        456\n                    ",
+                "789"
+            ],
+            StringArray
+        );
+
+        // --- Test 2: With trim ---
+        let config_with_trim: Config = serde_yaml::from_str(yaml_config_with_trim).unwrap();
+        assert!(config_with_trim.parser_options.trim_text); // Verify explicit set
+
+        let record_batches_with_trim =
+            parse_xml(xml_content_with_whitespace.as_bytes(), &config_with_trim)?;
+        let batch_with_trim = record_batches_with_trim.get("items").unwrap();
+
+        // With trim_text=true, quick_xml trims whitespace and skips whitespace-only nodes.
+        assert_array_values!(
+            batch_with_trim,
+            "value",
+            &["123", "456", "789"],
+            StringArray
+        );
+
         Ok(())
     }
 }
