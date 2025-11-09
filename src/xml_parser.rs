@@ -23,8 +23,6 @@ use crate::errors::Error;
 use crate::errors::Result;
 use crate::xml_path::XmlPath;
 
-use lexical_core::parse;
-
 /// Builds Arrow arrays for a single field based on parsed XML data.
 ///
 /// This struct manages the accumulation of values from the XML and their conversion
@@ -73,7 +71,7 @@ macro_rules! append_numeric_value {
             .downcast_mut::<$builder_type>()
             .expect(&format!("{}Builder", $type_name));
         if $self.has_value {
-            match parse::<$numeric_type>($value.as_bytes()) {
+            match $value.parse::<$numeric_type>() {
                 Ok(val) => builder.append_value(val),
                 Err(e) => {
                     return Err(Error::ParseError(format!(

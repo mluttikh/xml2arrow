@@ -1341,7 +1341,6 @@ dependencies = [
  "derive_more",
  "fxhash",
  "indexmap",
- "lexical-core",
  "pyo3",
  "quick-xml",
  "rstest",
