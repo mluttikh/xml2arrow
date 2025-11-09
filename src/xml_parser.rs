@@ -478,8 +478,9 @@ impl XmlToArrowConverter {
 /// ```
 pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<String, RecordBatch>> {
     let mut reader = Reader::from_reader(reader);
-    // reader.config_mut().expand_empty_elements = true;
-    // reader.config_mut().trim_text(true);
+    // Expand empty elements (e.g., <tag/>) into <tag></tag>.
+    // This simplifies the event loop, handling Event::Empty is no longer needed.
+    reader.config_mut().expand_empty_elements = true;
     let mut xml_path = XmlPath::new("/");
     let mut xml_to_arrow_converter = XmlToArrowConverter::from_config(config)?;
 
@@ -525,47 +526,16 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                     parse_attributes(e.attributes(), xml_path, xml_to_arrow_converter)?;
                 }
             }
-            Event::Empty(e) => {
-                if PARSE_ATTRIBUTES {
-                    let node = std::str::from_utf8(e.local_name().into_inner())?;
-                    xml_path.append_node(node);
-                    parse_attributes(e.attributes(), xml_path, xml_to_arrow_converter)?;
-                    xml_path.remove_node();
-                    if xml_to_arrow_converter.is_table_path(xml_path) {
-                        // This is the root element of the table
-                        xml_to_arrow_converter.end_current_row()?
-                    }
-                }
-            }
             Event::GeneralRef(e) => {
-                let text = e.xml_content()?;
+                let text = e.into_inner();
+                let text = String::from_utf8_lossy(&text);
                 let text = quick_xml::escape::resolve_predefined_entity(&text).unwrap_or_default();
                 xml_to_arrow_converter.set_field_value_for_current_table(xml_path, &text)?
             }
             Event::Text(e) => {
-                // let text = e.xml_content()?;
                 let text = e.into_inner();
-                let text = std::str::from_utf8(&text)?;
+                let text = String::from_utf8_lossy(&text);
                 xml_to_arrow_converter.set_field_value_for_current_table(xml_path, &text)?
-                //let text_ref = e.trim_ascii();
-                // let raw_bytes = e.into_inner();
-                // xml_to_arrow_converter
-                //     .set_field_value_for_current_table(xml_path, std::str::from_utf8(&raw_bytes)?)?
-                // if !text_ref.is_empty() {
-                //     // Only process the text if it's not empty after trimming
-                //     xml_to_arrow_converter.set_field_value_for_current_table(
-                //         xml_path,
-                //         std::str::from_utf8(text_ref)?,
-                //     )?
-                // }
-                // let text = e
-                //     .xml_content()
-                //     .unwrap_or_else(|_| String::from_utf8_lossy(&e));
-                // let trimmed_text = text.trim();
-                // // Only process the text if it's not empty after trimming
-                // if !trimmed_text.is_empty() {
-                //     xml_to_arrow_converter.set_field_value_for_current_table(xml_path, &text)?
-                // }
             }
             Event::End(_) => {
                 if xml_to_arrow_converter.is_table_path(xml_path) {
