@@ -264,8 +264,8 @@ fn create_array_builder(data_type: DType) -> Result<Box<dyn ArrayBuilder>> {
         DType::UInt32 => Ok(Box::new(UInt32Builder::default())),
         DType::Int64 => Ok(Box::new(Int64Builder::default())),
         DType::UInt64 => Ok(Box::new(UInt64Builder::default())),
-        DType::Float32 => Ok(Box::new(Float32Builder::new())),
-        DType::Float64 => Ok(Box::new(Float64Builder::new())),
+        DType::Float32 => Ok(Box::new(Float32Builder::default())),
+        DType::Float64 => Ok(Box::new(Float64Builder::default())),
         DType::Utf8 => Ok(Box::new(StringBuilder::default())),
     }
 }
