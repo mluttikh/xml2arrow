@@ -22,6 +22,38 @@ A Python version of this library is also available on GitHub: [https://github.co
 - 🎯 **Customizable Type Conversion:** Automatically convert data types and apply unit conversion.
 - 💡 **Attribute & Element Extraction:** Seamlessly extract XML attributes or elements
 
+## Performance
+
+`xml2arrow` is optimized for high-volume data processing:
+
+- **Throughput**: 130-150 MiB/s on typical workloads
+- **Scalability**: Handles files from KB to 500+ MB efficiently
+- **Consistency**: 15-18% improvement over baseline with recent optimizations
+
+### Benchmark Results
+
+| File Size | Parse Time | Throughput | Floats/Second |
+|-----------|------------|------------|---------------|
+| 413 KB    | ~2.8 ms    | 145 MiB/s  | 1.4M          |
+| 10 MB     | ~74 ms     | 136 MiB/s  | 950K          |
+| 200 MB    | ~1.5 s     | 138 MiB/s  | 1.1M          |
+
+*Results from rigorous benchmarks with Criterion.rs on realistic industrial time-series data with millions of floats. See [BENCHMARKING.md](BENCHMARKING.md) for details.*
+
+### Running Benchmarks
+
+```bash
+# Run all benchmarks
+cargo bench
+
+# Compare against a baseline
+cargo bench -- --save-baseline my_baseline
+# ... make changes ...
+cargo bench -- --baseline my_baseline
+```
+
+For detailed benchmarking instructions, see [BENCHMARKING.md](BENCHMARKING.md).
+
 ## Usage
 
 `xml2arrow` converts XML data to Apache Arrow format using a YAML configuration file.
