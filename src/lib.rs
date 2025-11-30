@@ -12,4 +12,4 @@ mod xml_parser;
 pub use xml_parser::parse_xml;
 mod xml_path;
 
-pub use config::Config;
+pub use config::{Config, DType, FieldConfig, FieldConfigBuilder, ParserOptions, TableConfig};

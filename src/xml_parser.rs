@@ -1,12 +1,13 @@
 use std::collections::VecDeque;
 use std::io::BufRead;
 use std::marker::PhantomData;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayBuilder, AsArray, BooleanBuilder, Float32Array, Float32Builder, Float64Array,
-    Float64Builder, Int8Builder, Int16Builder, Int32Builder, Int64Builder, RecordBatch,
-    StringBuilder, UInt8Builder, UInt16Builder, UInt32Builder, UInt64Builder,
+    Array, ArrayBuilder, ArrowNumericType, AsArray, BooleanBuilder, Float32Array, Float32Builder,
+    Float64Array, Float64Builder, Int8Builder, Int16Builder, Int32Builder, Int64Builder,
+    RecordBatch, StringBuilder, UInt8Builder, UInt16Builder, UInt32Builder, UInt64Builder,
 };
 use arrow::compute::kernels::numeric;
 use arrow::datatypes::{DataType, Field, Float32Type, Float64Type, Schema};
@@ -41,49 +42,41 @@ struct FieldBuilder {
     current_value: String,
 }
 
-/// A macro to append a numeric value to an array builder, handling parsing and null values.
-///
-/// # Parameters
-///
-/// * `$self`: The instance containing the `array_builder` field, which is used to append values.
-/// * `$value`: A string slice representing the numeric value to be parsed and appended.
-/// * `$builder_type`: The specific builder type (e.g., `Int32Builder`, `Float64Builder`) to which
-///   the value will be appended.
-/// * `$numeric_type`: The numeric type (e.g., `i32`, `f64`) that the value will be parsed into.
-/// * `$type_name`: A string slice representing the name of the numeric type, used for error messages.
-///
-/// # Behavior
-///
-/// * If `$self.has_value` is `true`, the macro attempts to parse `$value` into the specified
-///   `$numeric_type`. If parsing succeeds, the value is appended to the builder. If parsing fails,
-///   an error is returned with a detailed message.
-/// * If `$self.has_value` is `false`, a null value is appended to the builder.
-///
-/// # Errors
-///
-/// * Returns a `ParseError` if `$value` cannot be parsed into the specified `$numeric_type`.
-macro_rules! append_numeric_value {
-    ($self:ident, $value:expr, $builder_type:ty, $numeric_type:ty, $type_name:expr) => {
-        // ... (downcast logic) ...
-        let builder = $self
-            .array_builder
-            .as_any_mut()
-            .downcast_mut::<$builder_type>()
-            .expect(&format!("{}Builder", $type_name));
-        if $self.has_value {
-            match $value.parse::<$numeric_type>() {
-                Ok(val) => builder.append_value(val),
-                Err(e) => {
-                    return Err(Error::ParseError(format!(
-                        "Failed to parse value '{}' as {}: {}",
-                        $value, $type_name, e
-                    )));
-                }
+/// Helper function to parse a string and append it to a numeric builder.
+fn append_numeric<T>(
+    builder: &mut Box<dyn ArrayBuilder>,
+    value: &str,
+    has_value: bool,
+    field_config: &FieldConfig,
+) -> Result<()>
+where
+    T: ArrowNumericType,
+    T::Native: FromStr,
+    <T::Native as FromStr>::Err: std::fmt::Display,
+{
+    let builder = builder
+        .as_any_mut()
+        .downcast_mut::<arrow::array::PrimitiveBuilder<T>>()
+        .expect("Builder type mismatch. This is a bug in create_array_builder.");
+
+    if has_value {
+        match value.parse::<T::Native>() {
+            Ok(val) => builder.append_value(val),
+            Err(e) => {
+                return Err(Error::ParseError(format!(
+                    "Failed to parse value '{}' as {} for field '{}' at path {}: {}",
+                    value,
+                    std::any::type_name::<T::Native>(),
+                    field_config.name,
+                    field_config.xml_path,
+                    e
+                )));
             }
-        } else {
-            builder.append_null();
         }
-    };
+    } else {
+        builder.append_null();
+    }
+    Ok(())
 }
 
 impl FieldBuilder {
@@ -127,36 +120,66 @@ impl FieldBuilder {
                     builder.append_value("")
                 }
             }
-            DataType::Int8 => {
-                append_numeric_value!(self, value, Int8Builder, i8, "Int8");
-            }
-            DataType::UInt8 => {
-                append_numeric_value!(self, value, UInt8Builder, u8, "UInt8");
-            }
-            DataType::Int16 => {
-                append_numeric_value!(self, value, Int16Builder, i16, "Int16");
-            }
-            DataType::UInt16 => {
-                append_numeric_value!(self, value, UInt16Builder, u16, "UInt16");
-            }
-            DataType::Int32 => {
-                append_numeric_value!(self, value, Int32Builder, i32, "Int32");
-            }
-            DataType::UInt32 => {
-                append_numeric_value!(self, value, UInt32Builder, u32, "UInt32");
-            }
-            DataType::Int64 => {
-                append_numeric_value!(self, value, Int64Builder, i64, "Int64");
-            }
-            DataType::UInt64 => {
-                append_numeric_value!(self, value, UInt64Builder, u64, "UInt64");
-            }
-            DataType::Float32 => {
-                append_numeric_value!(self, value, Float32Builder, f32, "Float32");
-            }
-            DataType::Float64 => {
-                append_numeric_value!(self, value, Float64Builder, f64, "Float64");
-            }
+            DataType::Int8 => append_numeric::<arrow::datatypes::Int8Type>(
+                &mut self.array_builder,
+                value,
+                self.has_value,
+                &self.field_config,
+            )?,
+            DataType::UInt8 => append_numeric::<arrow::datatypes::UInt8Type>(
+                &mut self.array_builder,
+                value,
+                self.has_value,
+                &self.field_config,
+            )?,
+            DataType::Int16 => append_numeric::<arrow::datatypes::Int16Type>(
+                &mut self.array_builder,
+                value,
+                self.has_value,
+                &self.field_config,
+            )?,
+            DataType::UInt16 => append_numeric::<arrow::datatypes::UInt16Type>(
+                &mut self.array_builder,
+                value,
+                self.has_value,
+                &self.field_config,
+            )?,
+            DataType::Int32 => append_numeric::<arrow::datatypes::Int32Type>(
+                &mut self.array_builder,
+                value,
+                self.has_value,
+                &self.field_config,
+            )?,
+            DataType::UInt32 => append_numeric::<arrow::datatypes::UInt32Type>(
+                &mut self.array_builder,
+                value,
+                self.has_value,
+                &self.field_config,
+            )?,
+            DataType::Int64 => append_numeric::<arrow::datatypes::Int64Type>(
+                &mut self.array_builder,
+                value,
+                self.has_value,
+                &self.field_config,
+            )?,
+            DataType::UInt64 => append_numeric::<arrow::datatypes::UInt64Type>(
+                &mut self.array_builder,
+                value,
+                self.has_value,
+                &self.field_config,
+            )?,
+            DataType::Float32 => append_numeric::<arrow::datatypes::Float32Type>(
+                &mut self.array_builder,
+                value,
+                self.has_value,
+                &self.field_config,
+            )?,
+            DataType::Float64 => append_numeric::<arrow::datatypes::Float64Type>(
+                &mut self.array_builder,
+                value,
+                self.has_value,
+                &self.field_config,
+            )?,
             DataType::Boolean => {
                 let builder = self
                     .array_builder
@@ -169,8 +192,8 @@ impl FieldBuilder {
                         "true" | "1" => builder.append_value(true),
                         _ => {
                             return Err(Error::ParseError(format!(
-                                "Failed to parse value '{}' as boolean, expected 'true', 'false', '1' or '0'",
-                                value
+                                "Failed to parse value '{}' as boolean for field '{}' at path {}: expected 'true', 'false', '1' or '0'",
+                                value, self.field_config.name, self.field_config.xml_path
                             )));
                         }
                     }
@@ -241,8 +264,8 @@ fn create_array_builder(data_type: DType) -> Result<Box<dyn ArrayBuilder>> {
         DType::UInt32 => Ok(Box::new(UInt32Builder::default())),
         DType::Int64 => Ok(Box::new(Int64Builder::default())),
         DType::UInt64 => Ok(Box::new(UInt64Builder::default())),
-        DType::Float32 => Ok(Box::new(Float32Builder::new())),
-        DType::Float64 => Ok(Box::new(Float64Builder::new())),
+        DType::Float32 => Ok(Box::new(Float32Builder::default())),
+        DType::Float64 => Ok(Box::new(Float64Builder::default())),
         DType::Utf8 => Ok(Box::new(StringBuilder::default())),
     }
 }
