@@ -1,0 +1,44 @@
+warning: unused import: `std::marker::PhantomData`
+ --> src\xml_parser_trie.rs:8:5
+  |
+8 | use std::marker::PhantomData;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused variable: `attr_name_buffer`
+   --> src\xml_parser_trie.rs:542:5
+    |
+542 |     attr_name_buffer: &mut String,
+    |     ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_attr_name_buffer`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: associated items `new`, `append_node`, and `remove_node` are never used
+  --> src\xml_path.rs:10:12
+   |
+9  | impl XmlPath {
+   | ------------ associated items in this implementation
+10 |     pub fn new(path_str: &str) -> Self {
+   |            ^^^
+...
+21 |     pub fn append_node(&mut self, node: &str) {
+   |            ^^^^^^^^^^^
+...
+25 |     pub fn remove_node(&mut self) -> Option<Atom> {
+   |            ^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: `xml2arrow` (lib) generated 3 warnings (run `cargo fix --lib -p xml2arrow` to apply 1 suggestion)
+    Finished `bench` profile [optimized] target(s) in 0.36s
+     Running benches\parse_benchmark.rs (target\release\deps\parse_benchmark-27ce5cb849cc264e.exe)
+Gnuplot not found, using plotters backend
+Benchmarking parse_small/1K_measurements_2_sensors/413KB
+Benchmarking parse_small/1K_measurements_2_sensors/413KB: Warming up for 3.0000 s
+
+thread 'main' panicked at benches\parse_benchmark.rs:261:24:
+called `Result::unwrap()` on an `Err` value: Arrow(InvalidArgumentError("Failed to create RecordBatch for table with name comments and XML path /document/header/comments: Invalid argument error: all columns in a record batch must have the same length"))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+error: bench failed, to rerun pass `--bench parse_benchmark`

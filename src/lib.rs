@@ -11,8 +11,16 @@ pub use errors::{Error, Result};
 mod path_trie;
 pub use path_trie::{PathTrie, PathTrieBuilder};
 
+#[cfg(not(feature = "trie_parser"))]
 mod xml_parser;
+#[cfg(not(feature = "trie_parser"))]
 pub use xml_parser::parse_xml;
+
+#[cfg(feature = "trie_parser")]
+mod xml_parser_trie;
+#[cfg(feature = "trie_parser")]
+pub use xml_parser_trie::parse_xml;
+
 mod xml_path;
 
 pub use config::{Config, DType, FieldConfig, FieldConfigBuilder, ParserOptions, TableConfig};

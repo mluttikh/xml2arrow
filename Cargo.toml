@@ -27,6 +27,8 @@ approx = "0.5.1"
 criterion = "0.5"
 
 [features]
+default = ["trie_parser"]
+trie_parser = []
 python = ["pyo3"]
 
 [dependencies.pyo3]

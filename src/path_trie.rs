@@ -93,6 +93,7 @@ impl NodeFlags {
     const IS_TABLE_ROOT: u8 = 0b0000_0001;
     const HAS_FIELD: u8 = 0b0000_0010;
     const HAS_ATTRIBUTES: u8 = 0b0000_0100;
+    const IS_LEVEL_ELEMENT: u8 = 0b0000_1000;
 
     #[inline]
     fn is_table_root(&self) -> bool {
@@ -111,6 +112,11 @@ impl NodeFlags {
     }
 
     #[inline]
+    fn is_level_element(&self) -> bool {
+        self.bits & Self::IS_LEVEL_ELEMENT != 0
+    }
+
+    #[inline]
     fn set_table_root(&mut self) {
         self.bits |= Self::IS_TABLE_ROOT;
     }
@@ -123,6 +129,11 @@ impl NodeFlags {
     #[inline]
     fn set_has_attributes(&mut self) {
         self.bits |= Self::HAS_ATTRIBUTES;
+    }
+
+    #[inline]
+    fn set_level_element(&mut self) {
+        self.bits |= Self::IS_LEVEL_ELEMENT;
     }
 }
 
@@ -235,6 +246,8 @@ pub struct PathTrie {
     pub field_configs: Vec<FieldConfig>,
     /// Mapping from TableId to original table config.
     pub table_configs: Vec<TableConfig>,
+    /// Mapping from FieldId to TableId (which table owns which field).
+    pub field_to_table: Vec<TableId>,
     /// Maximum depth of any path in the trie.
     max_depth: u16,
 }
@@ -300,6 +313,20 @@ impl PathTrie {
             .unwrap_or(false)
     }
 
+    /// Check if a state is a level element (used for row end detection).
+    #[inline]
+    pub fn is_level_element(&self, state_id: StateId) -> bool {
+        self.get_node(state_id)
+            .map(|n| n.flags.is_level_element())
+            .unwrap_or(false)
+    }
+
+    /// Get the table ID that owns a given field.
+    #[inline]
+    pub fn get_field_table(&self, field_id: FieldId) -> Option<TableId> {
+        self.field_to_table.get(field_id as usize).copied()
+    }
+
     /// Get the maximum depth.
     pub fn max_depth(&self) -> u16 {
         self.max_depth
@@ -317,7 +344,10 @@ pub struct PathTrieBuilder {
     /// Field configurations in order.
     field_configs: Vec<FieldConfig>,
     /// Table configurations in order.
+    /// Mapping from TableId to original table config.
     table_configs: Vec<TableConfig>,
+    /// Mapping from FieldId to TableId.
+    field_to_table: Vec<TableId>,
     /// Track maximum depth.
     max_depth: u16,
     /// Temporary storage for element children before finalizing.
@@ -339,6 +369,7 @@ impl PathTrieBuilder {
             next_state: 1, // 0 is reserved for root
             field_configs: Vec::new(),
             table_configs: Vec::new(),
+            field_to_table: Vec::new(),
             max_depth: 0,
             element_children_temp: HashMap::new(),
             attribute_children_temp: HashMap::new(),
@@ -355,9 +386,35 @@ impl PathTrieBuilder {
         }
 
         // Insert all fields
-        for table_config in &config.tables {
+        for (table_idx, table_config) in config.tables.iter().enumerate() {
             for field_config in &table_config.fields {
-                builder.insert_field_path(field_config)?;
+                builder.insert_field_path(field_config, table_idx as TableId)?;
+            }
+        }
+
+        // Second pass: mark level elements now that all paths are inserted
+        for table_config in &config.tables {
+            let table_segments = parse_path(&table_config.xml_path);
+            let mut table_state = 0; // root
+            for segment in &table_segments {
+                let key = (table_state, segment.clone());
+                table_state = *builder.transitions.get(&key).ok_or_else(|| {
+                    Error::UnsupportedDataType(format!(
+                        "Failed to find table path: {}",
+                        table_config.xml_path
+                    ))
+                })?;
+            }
+
+            // Now mark level elements as children of the table root
+            for level_name in &table_config.levels {
+                let level_atom = Atom::from(level_name.as_str());
+                let key = (table_state, level_atom);
+                if let Some(&level_state) = builder.transitions.get(&key) {
+                    builder.nodes[level_state as usize]
+                        .flags
+                        .set_level_element();
+                }
             }
         }
 
@@ -379,10 +436,11 @@ impl PathTrieBuilder {
     }
 
     /// Insert a field path.
-    fn insert_field_path(&mut self, field_config: &FieldConfig) -> Result<()> {
+    fn insert_field_path(&mut self, field_config: &FieldConfig, table_id: TableId) -> Result<()> {
         let (segments, is_attribute) = parse_field_path(&field_config.xml_path);
         let field_id = self.field_configs.len() as FieldId;
         self.field_configs.push(field_config.clone());
+        self.field_to_table.push(table_id);
 
         if is_attribute {
             // Last segment is an attribute
@@ -491,6 +549,7 @@ impl PathTrieBuilder {
             root_id: 0,
             field_configs: self.field_configs,
             table_configs: self.table_configs,
+            field_to_table: self.field_to_table,
             max_depth: self.max_depth,
         })
     }
@@ -933,7 +992,7 @@ mod tests {
             ("str", DType::Utf8),
         ];
 
-        for (i, (name, dtype)) in types.iter().enumerate() {
+        for (_i, (name, dtype)) in types.iter().enumerate() {
             let field_state = trie.transition_element(state, &Atom::from(*name));
             assert_ne!(field_state, UNMATCHED_STATE);
             let field_id = trie.get_field_id(field_state).unwrap();
