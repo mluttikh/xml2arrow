@@ -391,8 +391,7 @@ impl XmlToArrowConverter {
             let table_builder = TableBuilder::new(table_config)?;
             table_builders.insert(table_path, table_builder);
         }
-        let mut builder_stack = VecDeque::new();
-        builder_stack.push_back(XmlPath::new("/"));
+        let builder_stack = VecDeque::new();
 
         Ok(Self {
             table_builders,
@@ -404,33 +403,40 @@ impl XmlToArrowConverter {
         self.table_builders.contains_key(xml_path)
     }
 
-    fn current_table_builder_mut(&mut self) -> Result<&mut TableBuilder> {
-        let table_path = self.builder_stack.back().ok_or(Error::NoTableOnStack)?;
-        self.table_builders
-            .get_mut(table_path)
-            .ok_or_else(|| Error::TableNotFound(table_path.to_string()))
+    fn current_table_builder_mut(&mut self) -> Result<Option<&mut TableBuilder>> {
+        if let Some(table_path) = self.builder_stack.back() {
+            let builder = self
+                .table_builders
+                .get_mut(table_path)
+                .ok_or_else(|| Error::TableNotFound(table_path.to_string()))?;
+            Ok(Some(builder))
+        } else {
+            Ok(None)
+        }
     }
 
-    /// Sets the field value for the current table builder.
     pub fn set_field_value_for_current_table(
         &mut self,
         field_path: &XmlPath,
         value: &str,
     ) -> Result<()> {
-        let table_builder = self.current_table_builder_mut()?;
-        table_builder.set_field_value(field_path, value);
+        if let Some(table_builder) = self.current_table_builder_mut()? {
+            table_builder.set_field_value(field_path, value);
+        }
         Ok(())
     }
 
     fn end_current_row(&mut self) -> Result<()> {
         let indices = self.parent_row_indices()?;
-        self.current_table_builder_mut()?.end_row(&indices)?;
+        if let Some(table_builder) = self.current_table_builder_mut()? {
+            table_builder.end_row(&indices)?;
+        }
         Ok(())
     }
 
     fn parent_row_indices(&self) -> Result<Vec<u32>> {
-        let mut indices = Vec::with_capacity(self.builder_stack.len() - 1);
-        for table_path in self.builder_stack.iter().skip(1) {
+        let mut indices = Vec::with_capacity(self.builder_stack.len());
+        for table_path in self.builder_stack.iter() {
             let table_builder = self
                 .table_builders
                 .get(table_path)
