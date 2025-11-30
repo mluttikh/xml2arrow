@@ -92,7 +92,7 @@ impl FieldBuilder {
             field,
             array_builder,
             has_value: false,
-            current_value: String::with_capacity(32),
+            current_value: String::with_capacity(128),
         })
     }
 
@@ -391,8 +391,7 @@ impl XmlToArrowConverter {
             let table_builder = TableBuilder::new(table_config)?;
             table_builders.insert(table_path, table_builder);
         }
-        let mut builder_stack = VecDeque::new();
-        builder_stack.push_back(XmlPath::new("/"));
+        let builder_stack = VecDeque::new();
 
         Ok(Self {
             table_builders,
@@ -404,33 +403,40 @@ impl XmlToArrowConverter {
         self.table_builders.contains_key(xml_path)
     }
 
-    fn current_table_builder_mut(&mut self) -> Result<&mut TableBuilder> {
-        let table_path = self.builder_stack.back().ok_or(Error::NoTableOnStack)?;
-        self.table_builders
-            .get_mut(table_path)
-            .ok_or_else(|| Error::TableNotFound(table_path.to_string()))
+    fn current_table_builder_mut(&mut self) -> Result<Option<&mut TableBuilder>> {
+        if let Some(table_path) = self.builder_stack.back() {
+            let builder = self
+                .table_builders
+                .get_mut(table_path)
+                .ok_or_else(|| Error::TableNotFound(table_path.to_string()))?;
+            Ok(Some(builder))
+        } else {
+            Ok(None)
+        }
     }
 
-    /// Sets the field value for the current table builder.
     pub fn set_field_value_for_current_table(
         &mut self,
         field_path: &XmlPath,
         value: &str,
     ) -> Result<()> {
-        let table_builder = self.current_table_builder_mut()?;
-        table_builder.set_field_value(field_path, value);
+        if let Some(table_builder) = self.current_table_builder_mut()? {
+            table_builder.set_field_value(field_path, value);
+        }
         Ok(())
     }
 
     fn end_current_row(&mut self) -> Result<()> {
         let indices = self.parent_row_indices()?;
-        self.current_table_builder_mut()?.end_row(&indices)?;
+        if let Some(table_builder) = self.current_table_builder_mut()? {
+            table_builder.end_row(&indices)?;
+        }
         Ok(())
     }
 
     fn parent_row_indices(&self) -> Result<Vec<u32>> {
-        let mut indices = Vec::with_capacity(self.builder_stack.len() - 1);
-        for table_path in self.builder_stack.iter().skip(1) {
+        let mut indices = Vec::with_capacity(self.builder_stack.len());
+        for table_path in self.builder_stack.iter() {
             let table_builder = self
                 .table_builders
                 .get(table_path)
@@ -540,7 +546,8 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
     xml_to_arrow_converter: &mut XmlToArrowConverter,
     _marker: PhantomData<bool>,
 ) -> Result<()> {
-    let mut buf = Vec::with_capacity(256);
+    let mut buf = Vec::with_capacity(4096);
+    let mut attr_name_buffer = String::with_capacity(64);
     loop {
         match reader.read_event_into(&mut buf)? {
             Event::Start(e) => {
@@ -550,7 +557,12 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                     xml_to_arrow_converter.start_table(xml_path)?;
                 }
                 if PARSE_ATTRIBUTES {
-                    parse_attributes(e.attributes(), xml_path, xml_to_arrow_converter)?;
+                    parse_attributes(
+                        e.attributes(),
+                        xml_path,
+                        xml_to_arrow_converter,
+                        &mut attr_name_buffer,
+                    )?;
                 }
             }
             Event::GeneralRef(e) => {
@@ -589,12 +601,19 @@ fn parse_attributes(
     attributes: Attributes,
     xml_path: &mut XmlPath,
     xml_to_arrow_converter: &mut XmlToArrowConverter,
+    attr_name_buffer: &mut String,
 ) -> Result<()> {
     for attribute in attributes {
         let attribute = attribute?;
         let key = std::str::from_utf8(attribute.key.local_name().into_inner())?;
-        let node = "@".to_string() + key;
-        xml_path.append_node(&node);
+
+        // Reuse buffer to avoid allocation
+        attr_name_buffer.clear();
+        attr_name_buffer.push('@');
+        attr_name_buffer.push_str(key);
+
+        xml_path.append_node(attr_name_buffer);
+
         xml_to_arrow_converter.set_field_value_for_current_table(
             xml_path,
             std::str::from_utf8(attribute.value.as_ref())?,

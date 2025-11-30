@@ -295,3 +295,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
  │ 1         ┆ 3             ┆ 2024-12-30T12:54:15Z ┆ 299.002921  ┆ 95376.27857   ┆ 42.620882 │
  └───────────┴───────────────┴──────────────────────┴─────────────┴───────────────┴───────────┘
 ```
+
+## ⚡ Performance
+
+`xml2arrow` is optimized for high-volume data processing. Benchmarks are managed using the **Criterion.rs** framework.
+
+### Running Benchmarks
+
+You can run all configured benchmarks with the following command:
+
+```bash
+cargo bench
+```
+
+### Benchmark Comparison and Baselines
+
+Criterion.rs allows you to save performance data (a **baseline**) and compare future runs against it to track optimizations or regressions.
+
+| Task | Command | Description |
+| :--- | :--- | :--- |
+| **Save a Baseline** | `cargo bench --bench parse_benchmark -- --save-baseline <name>` | Runs the benchmark and saves the results in the `target/criterion/<name>` directory. |
+| **Compare to Baseline** | `cargo bench --bench parse_benchmark -- --baseline <name>` | Runs the benchmark again and compares the new results against the saved baseline `<name>`. |
+| **View Reports** | `open target/criterion/report/index.html` | After any run, a detailed interactive HTML report is generated for analysis.  |
+
+### Example Comparison Workflow
+
+1.  **Establish Initial Baseline:**
+
+    ```bash
+    cargo bench --bench parse_benchmark -- --save-baseline v1.0.0
+    ```
+
+2.  *...Make changes/optimizations to the code...*
+
+3.  **Compare New Code against Baseline:**
+
+    ```bash
+    cargo bench --bench parse_benchmark -- --baseline v1.0.0
+    ```
+
+The output will clearly indicate the difference in performance (time, confidence intervals) between the two runs.
