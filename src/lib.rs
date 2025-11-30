@@ -8,6 +8,9 @@ pub mod config;
 pub mod errors;
 pub use errors::{Error, Result};
 
+mod path_trie;
+pub use path_trie::{PathTrie, PathTrieBuilder};
+
 mod xml_parser;
 pub use xml_parser::parse_xml;
 mod xml_path;
