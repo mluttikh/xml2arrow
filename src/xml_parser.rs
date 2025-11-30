@@ -99,11 +99,15 @@ impl FieldBuilder {
             field,
             array_builder,
             has_value: false,
-            current_value: String::with_capacity(32),
+            current_value: String::with_capacity(128),
         })
     }
 
     fn set_current_value(&mut self, value: &str) {
+        // Reserve space to reduce reallocations
+        if self.current_value.is_empty() {
+            self.current_value.reserve(value.len());
+        }
         self.current_value.push_str(value);
         self.has_value = true;
     }
@@ -517,7 +521,8 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
     xml_to_arrow_converter: &mut XmlToArrowConverter,
     _marker: PhantomData<bool>,
 ) -> Result<()> {
-    let mut buf = Vec::with_capacity(256);
+    let mut buf = Vec::with_capacity(4096);
+    let mut attr_name_buffer = String::with_capacity(64);
     loop {
         match reader.read_event_into(&mut buf)? {
             Event::Start(e) => {
@@ -527,19 +532,35 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                     xml_to_arrow_converter.start_table(xml_path)?;
                 }
                 if PARSE_ATTRIBUTES {
-                    parse_attributes(e.attributes(), xml_path, xml_to_arrow_converter)?;
+                    parse_attributes(
+                        e.attributes(),
+                        xml_path,
+                        xml_to_arrow_converter,
+                        &mut attr_name_buffer,
+                    )?;
                 }
             }
             Event::GeneralRef(e) => {
-                let text = e.into_inner();
-                let text = String::from_utf8_lossy(&text);
-                let text = escape::resolve_predefined_entity(&text).unwrap_or_default();
-                xml_to_arrow_converter.set_field_value_for_current_table(xml_path, &text)?
+                let bytes = e.into_inner();
+                // Try fast path: valid UTF-8 without allocation
+                let text = if let Ok(s) = std::str::from_utf8(&bytes) {
+                    std::borrow::Cow::Borrowed(s)
+                } else {
+                    String::from_utf8_lossy(&bytes)
+                };
+                let resolved = escape::resolve_predefined_entity(&text).unwrap_or_default();
+                xml_to_arrow_converter.set_field_value_for_current_table(xml_path, &resolved)?
             }
             Event::Text(e) => {
-                let text = e.into_inner();
-                let text = String::from_utf8_lossy(&text);
-                xml_to_arrow_converter.set_field_value_for_current_table(xml_path, &text)?
+                let bytes = e.into_inner();
+                // Try fast path: valid UTF-8 without allocation
+                let text = if let Ok(s) = std::str::from_utf8(&bytes) {
+                    s
+                } else {
+                    // Slow path: invalid UTF-8, need owned String
+                    &*String::from_utf8_lossy(&bytes)
+                };
+                xml_to_arrow_converter.set_field_value_for_current_table(xml_path, text)?
             }
             Event::End(_) => {
                 if xml_to_arrow_converter.is_table_path(xml_path) {
@@ -566,12 +587,18 @@ fn parse_attributes(
     attributes: Attributes,
     xml_path: &mut XmlPath,
     xml_to_arrow_converter: &mut XmlToArrowConverter,
+    attr_name_buffer: &mut String,
 ) -> Result<()> {
     for attribute in attributes {
         let attribute = attribute?;
         let key = std::str::from_utf8(attribute.key.local_name().into_inner())?;
-        let node = "@".to_string() + key;
-        xml_path.append_node(&node);
+
+        // Reuse buffer to avoid allocation
+        attr_name_buffer.clear();
+        attr_name_buffer.push('@');
+        attr_name_buffer.push_str(key);
+
+        xml_path.append_node(attr_name_buffer);
         xml_to_arrow_converter.set_field_value_for_current_table(
             xml_path,
             std::str::from_utf8(attribute.value.as_ref())?,
