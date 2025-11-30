@@ -10,7 +10,7 @@ categories = ["data-structures", "encoding"]
 readme = "README.md"
 
 [dependencies]
-arrow = "57.0.0"
+arrow = "57.1.0"
 derive_more = { version = "2.0.1", features = ["from"] }
 indexmap = "2.12.0"
 quick-xml = "0.38.4"
