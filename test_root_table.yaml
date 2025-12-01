@@ -1,0 +1,9 @@
+tables:
+  - name: report
+    xml_path: /
+    levels: []
+    fields:
+      - name: title
+        xml_path: /report/header/title
+        data_type: Utf8
+        nullable: false

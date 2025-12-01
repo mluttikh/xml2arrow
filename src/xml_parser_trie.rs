@@ -420,14 +420,20 @@ impl XmlToArrowConverter {
 
     fn end_row(&mut self) -> Result<()> {
         if let Some(ctx) = self.table_stack.last() {
+            let table_id = ctx.table_id;
+            let num_levels = self.trie.table_configs[table_id as usize].levels.len();
+
             // Reuse buffer for indices to avoid allocations
             self.indices_buffer.clear();
-            for table_ctx in &self.table_stack {
+
+            // Only use the last N table contexts, where N is the number of levels
+            let start_idx = self.table_stack.len().saturating_sub(num_levels);
+            for table_ctx in &self.table_stack[start_idx..] {
                 self.indices_buffer.push(table_ctx.row_index);
             }
 
             // End the current row
-            if let Some(table_builder) = self.table_builders.get_mut(ctx.table_id as usize) {
+            if let Some(table_builder) = self.table_builders.get_mut(table_id as usize) {
                 table_builder.end_row(&self.indices_buffer)?;
             }
 
@@ -446,8 +452,8 @@ impl XmlToArrowConverter {
     fn finish(mut self) -> Result<IndexMap<String, RecordBatch>> {
         let mut record_batches = IndexMap::new();
         for (idx, table_builder) in self.table_builders.iter_mut().enumerate() {
-            // Only create batch if there are fields AND rows
-            if !table_builder.field_builders.is_empty() && table_builder.row_index > 0 {
+            // Create batch if there are fields (even if no rows - empty table)
+            if !table_builder.field_builders.is_empty() {
                 let record_batch = table_builder.finish()?;
                 record_batches.insert(self.trie.table_configs[idx].name.clone(), record_batch);
             }
@@ -467,10 +473,31 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
     let mut converter = XmlToArrowConverter::from_config(config)?;
     let mut state_stack: Vec<StateId> = vec![converter.trie.root_id()];
 
+    // Handle root table (xml_path: /) - start it immediately
+    let root_state = converter.trie.root_id();
+    if converter.trie.is_table_root(root_state) {
+        if let Some(table_id) = converter.trie.get_table_id(root_state) {
+            converter.start_table(table_id);
+        }
+    }
+
     if config.requires_attribute_parsing() {
         process_xml_events::<_, true>(&mut reader, &mut state_stack, &mut converter)?;
     } else {
         process_xml_events::<_, false>(&mut reader, &mut state_stack, &mut converter)?;
+    }
+
+    // Handle root table (xml_path: /) - end its row if it has field values
+    if converter.trie.is_table_root(root_state) {
+        if let Some(table_id) = converter.trie.get_table_id(root_state) {
+            let table_config = &converter.trie.table_configs[table_id as usize];
+            if table_config.levels.is_empty()
+                && converter.table_builders[table_id as usize].has_any_field_value()
+            {
+                converter.end_row()?;
+            }
+            converter.end_table();
+        }
     }
 
     converter.finish()
@@ -553,12 +580,15 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
 
                             // End row if:
                             // - table has no levels AND at least one field has a value, OR
-                            // - table has levels AND the element we just closed is a level element
-                            if (table_config.levels.is_empty()
-                                && converter.table_builders[table_id as usize]
-                                    .has_any_field_value())
-                                || converter.trie.is_level_element(ending_state)
-                            {
+                            // - table has levels (any direct child of table root ends a row)
+                            // Note: The levels array is only for naming index columns, not filtering
+                            if table_config.levels.is_empty() {
+                                if converter.table_builders[table_id as usize].has_any_field_value()
+                                {
+                                    converter.end_row()?;
+                                }
+                            } else {
+                                // Table has levels - any child of table root ends a row
                                 converter.end_row()?;
                             }
                         }
@@ -727,7 +757,7 @@ mod tests {
 
         let config = Config {
             tables: vec![
-                TableConfig::new("root", "/document", vec![], vec![]),
+                TableConfig::new("/", "/", vec![], vec![]),
                 TableConfig::new(
                     "comments",
                     "/document/header/comments",
