@@ -900,4 +900,163 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_empty_tables_are_created() -> Result<()> {
+        // This test ensures that tables are created even when there are no matching XML elements
+        let xml_content = r#"
+            <report>
+                <header>
+                    <title>Test Report</title>
+                    <created_by>System</created_by>
+                </header>
+                <data>
+                    <items>
+                        <item id="1">Value 1</item>
+                        <item id="2">Value 2</item>
+                    </items>
+                </data>
+            </report>
+        "#;
+
+        let config = Config {
+            tables: vec![
+                // Root table with header fields
+                TableConfig::new(
+                    "metadata",
+                    "/report",
+                    vec![],
+                    vec![
+                        FieldConfigBuilder::new("title", "/report/header/title", DType::Utf8)
+                            .build(),
+                        FieldConfigBuilder::new(
+                            "created_by",
+                            "/report/header/created_by",
+                            DType::Utf8,
+                        )
+                        .build(),
+                    ],
+                ),
+                // Table for comments that don't exist in the XML - should be created as empty
+                TableConfig::new(
+                    "comments",
+                    "/report/header/comments",
+                    vec!["comment".to_string()],
+                    vec![
+                        FieldConfigBuilder::new(
+                            "text",
+                            "/report/header/comments/comment",
+                            DType::Utf8,
+                        )
+                        .build(),
+                    ],
+                ),
+                // Table for items that do exist
+                TableConfig::new(
+                    "items",
+                    "/report/data/items",
+                    vec!["item".to_string()],
+                    vec![
+                        FieldConfigBuilder::new("id", "/report/data/items/item/@id", DType::Utf8)
+                            .build(),
+                        FieldConfigBuilder::new("text", "/report/data/items/item", DType::Utf8)
+                            .build(),
+                    ],
+                ),
+                // Another table that doesn't exist in XML - should be created as empty
+                TableConfig::new(
+                    "categories",
+                    "/report/header/categories",
+                    vec!["category".to_string()],
+                    vec![
+                        FieldConfigBuilder::new(
+                            "name",
+                            "/report/header/categories/category",
+                            DType::Utf8,
+                        )
+                        .build(),
+                    ],
+                ),
+            ],
+            parser_options: Default::default(),
+        };
+
+        let batches = parse_xml(xml_content.as_bytes(), &config)?;
+
+        // All tables should be present, even those with no matching XML elements
+        assert_eq!(
+            batches.len(),
+            4,
+            "Expected 4 tables to be created (including empty ones)"
+        );
+
+        // Check that all table names are present
+        assert!(
+            batches.contains_key("metadata"),
+            "metadata table should exist"
+        );
+        assert!(
+            batches.contains_key("comments"),
+            "comments table should exist (even though empty)"
+        );
+        assert!(batches.contains_key("items"), "items table should exist");
+        assert!(
+            batches.contains_key("categories"),
+            "categories table should exist (even though empty)"
+        );
+
+        // Verify metadata table has 1 row
+        let metadata_batch = batches.get("metadata").unwrap();
+        assert_eq!(metadata_batch.num_rows(), 1);
+        assert_eq!(metadata_batch.num_columns(), 2); // title, created_by
+
+        // Verify comments table is empty but has correct schema
+        let comments_batch = batches.get("comments").unwrap();
+        assert_eq!(
+            comments_batch.num_rows(),
+            0,
+            "comments table should have 0 rows"
+        );
+        assert_eq!(
+            comments_batch.num_columns(),
+            2,
+            "comments table should have 2 columns (index + text)"
+        );
+        assert!(
+            comments_batch.column_by_name("<comment>").is_some(),
+            "comments table should have index column"
+        );
+        assert!(
+            comments_batch.column_by_name("text").is_some(),
+            "comments table should have text column"
+        );
+
+        // Verify items table has 2 rows
+        let items_batch = batches.get("items").unwrap();
+        assert_eq!(items_batch.num_rows(), 2);
+        assert_eq!(items_batch.num_columns(), 3); // index, id, text
+
+        // Verify categories table is empty but has correct schema
+        let categories_batch = batches.get("categories").unwrap();
+        assert_eq!(
+            categories_batch.num_rows(),
+            0,
+            "categories table should have 0 rows"
+        );
+        assert_eq!(
+            categories_batch.num_columns(),
+            2,
+            "categories table should have 2 columns (index + name)"
+        );
+        assert!(
+            categories_batch.column_by_name("<category>").is_some(),
+            "categories table should have index column"
+        );
+        assert!(
+            categories_batch.column_by_name("name").is_some(),
+            "categories table should have name column"
+        );
+
+        Ok(())
+    }
 }
