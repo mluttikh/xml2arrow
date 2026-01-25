@@ -383,6 +383,8 @@ struct XmlToArrowConverter {
 
 impl XmlToArrowConverter {
     fn from_config(config: &Config) -> Result<Self> {
+        // Validate field configurations early to catch unsupported scale/offset
+        config.validate()?;
         let mut table_builders =
             IndexMap::with_capacity_and_hasher(config.tables.len(), FxBuildHasher::default());
 
@@ -500,7 +502,7 @@ impl XmlToArrowConverter {
 /// use std::io::BufReader;
 ///
 /// let xml_content = r#"<data><item><value>123</value></item></data>"#;
-/// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build()];
+/// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build().unwrap()];
 /// let tables = vec![TableConfig::new("items", "/data", vec![], fields)];
 /// let config = Config { tables, parser_options: Default::default() };
 /// let record_batches = parse_xml(xml_content.as_bytes(), &config).unwrap();
@@ -1727,12 +1729,9 @@ mod tests {
 
     #[test]
     fn test_unsupported_conversion_scale() {
-        let field_config = FieldConfigBuilder::new("test_field", "/test/field", DType::Int32)
+        let result = FieldConfigBuilder::new("test_field", "/test/field", DType::Int32)
             .scale(2.0)
             .build();
-
-        let mut field_builder = FieldBuilder::new(&field_config).unwrap();
-        let result = field_builder.finish();
 
         assert!(result.is_err());
         if let Err(Error::UnsupportedConversion(msg)) = result {
@@ -1745,12 +1744,9 @@ mod tests {
 
     #[test]
     fn test_unsupported_conversion_offset() {
-        let field_config = FieldConfigBuilder::new("test_field", "/test/field", DType::Int16)
+        let result = FieldConfigBuilder::new("test_field", "/test/field", DType::Int16)
             .offset(1.0)
             .build();
-
-        let mut field_builder = FieldBuilder::new(&field_config).unwrap();
-        let result = field_builder.finish();
 
         assert!(result.is_err());
         if let Err(Error::UnsupportedConversion(msg)) = result {
@@ -1764,8 +1760,12 @@ mod tests {
     #[test]
     fn test_non_utf8_characters() -> Result<()> {
         let xml_bytes = b"<data><item><value>\xC2\xC2\xFE</value></item></data>";
-        let fields =
-            vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Utf8).build()];
+        let fields = vec![
+            match FieldConfigBuilder::new("value", "/data/item/value", DType::Utf8).build() {
+                Ok(f) => f,
+                Err(e) => panic!("Failed to build field config: {:?}", e),
+            },
+        ];
         let tables = vec![TableConfig::new("items", "/data", vec![], fields)];
         let config = Config {
             parser_options: Default::default(),
@@ -1784,13 +1784,24 @@ mod tests {
     fn test_parse_xml_with_attributes_and_empty_events() -> Result<()> {
         let xml_content = r#"<library><book id="1" isbn="978-0-321-76572-3" /><book id="2" title="The Rust Programming Language" /></library>"#;
         let fields = vec![
-            FieldConfigBuilder::new("book_id", "/library/book/@id", DType::Int32).build(),
-            FieldConfigBuilder::new("book_isbn", "/library/book/@isbn", DType::Utf8)
+            match FieldConfigBuilder::new("book_id", "/library/book/@id", DType::Int32).build() {
+                Ok(f) => f,
+                Err(e) => panic!("Failed to build field config: {:?}", e),
+            },
+            match FieldConfigBuilder::new("book_isbn", "/library/book/@isbn", DType::Utf8)
                 .nullable(true)
-                .build(),
-            FieldConfigBuilder::new("book_title", "/library/book/@title", DType::Utf8)
+                .build()
+            {
+                Ok(f) => f,
+                Err(e) => panic!("Failed to build field config: {:?}", e),
+            },
+            match FieldConfigBuilder::new("book_title", "/library/book/@title", DType::Utf8)
                 .nullable(true)
-                .build(),
+                .build()
+            {
+                Ok(f) => f,
+                Err(e) => panic!("Failed to build field config: {:?}", e),
+            },
         ];
         let tables = vec![TableConfig::new("books", "/library", vec![], fields)];
         let config = Config {
@@ -2307,5 +2318,128 @@ mod tests {
         assert!(array.is_null(1), "Missing element should be null");
 
         Ok(())
+    }
+
+    #[test]
+    fn test_table_not_found_on_end_current_row() -> Result<()> {
+        // Build a config with a single valid table path
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: table
+                    xml_path: /root
+                    levels: ["root"]
+                    fields: []
+            "#
+        );
+
+        // Initialize converter from config
+        let mut converter = XmlToArrowConverter::from_config(&config)?;
+
+        // Push a fake path not present in table_builders to the stack
+        let fake_path = crate::xml_path::XmlPath::new("/unknown/path");
+        converter.builder_stack.push_back(fake_path.clone());
+
+        // end_current_row should attempt to access a non-existent table and error with TableNotFound
+        let result = converter.end_current_row();
+        match result {
+            Err(Error::TableNotFound(path)) => {
+                assert!(path.contains("/unknown/path"));
+            }
+            other => panic!("Expected TableNotFound error, got: {:?}", other),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_table_not_found_on_parent_row_indices() -> Result<()> {
+        // Build a minimal config
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: table
+                    xml_path: /root
+                    levels: ["root"]
+                    fields: []
+            "#
+        );
+
+        let converter = XmlToArrowConverter::from_config(&config)?;
+        // Create a new converter with a forged stack entry not present in table_builders
+        let mut forged = converter;
+        let fake_path = crate::xml_path::XmlPath::new("/not/found");
+        forged.builder_stack.push_back(fake_path.clone());
+
+        let result = forged.parent_row_indices();
+        match result {
+            Err(Error::TableNotFound(path)) => {
+                assert!(path.contains("/not/found"));
+            }
+            other => panic!("Expected TableNotFound error, got: {:?}", other),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_invalid_attribute_parsing_error() {
+        // Malformed attribute (unclosed quote / broken pairs) should error
+        let xml_content = r#"
+            <data>
+                <items>
+                    <item id="1 value="10"></item>
+                </items>
+            </data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data/items
+                    levels: []
+                    fields:
+                      - name: id
+                        xml_path: /data/items/item/@id
+                        data_type: Utf8
+                        nullable: true
+            "#
+        );
+
+        let result = parse_xml(xml_content.as_bytes(), &config);
+        assert!(result.is_err(), "Malformed attribute should error");
+        match result.unwrap_err() {
+            Error::XmlParseAttr(_) => {}
+            Error::XmlParsing(_) => {}
+            other => panic!("Expected XmlParseAttr or XmlParsing, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_unsupported_conversion_scale_boolean() {
+        let result = FieldConfigBuilder::new("flag", "/root/flag", DType::Boolean)
+            .scale(2.0)
+            .build();
+        assert!(result.is_err());
+        if let Err(Error::UnsupportedConversion(msg)) = result {
+            assert!(msg.contains("Scaling is only supported for Float32 and Float64"));
+            assert!(msg.contains("Boolean"));
+        } else {
+            panic!("Expected UnsupportedConversion error for Boolean scale");
+        }
+    }
+
+    #[test]
+    fn test_unsupported_conversion_offset_utf8() {
+        let result = FieldConfigBuilder::new("text", "/root/text", DType::Utf8)
+            .offset(1.0)
+            .build();
+        assert!(result.is_err());
+        if let Err(Error::UnsupportedConversion(msg)) = result {
+            assert!(msg.contains("Offset is only supported for Float32 and Float64"));
+            assert!(msg.contains("Utf8"));
+        } else {
+            panic!("Expected UnsupportedConversion error for Utf8 offset");
+        }
     }
 }
