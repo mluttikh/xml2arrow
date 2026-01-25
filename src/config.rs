@@ -36,6 +36,18 @@ pub struct Config {
 }
 
 impl Config {
+    /// Validates the configuration by checking all field configurations.
+    ///
+    /// Returns an error if any field uses an unsupported combination (e.g., scale/offset on non-float types).
+    pub fn validate(&self) -> Result<()> {
+        for table in &self.tables {
+            for field in &table.fields {
+                field.validate()?;
+            }
+        }
+        Ok(())
+    }
+
     /// Creates a `Config` struct from a YAML configuration file.
     ///
     /// This function reads a YAML file at the given path and deserializes it into a `Config` struct.
@@ -60,7 +72,9 @@ impl Config {
     pub fn from_yaml_file(path: impl AsRef<Path>) -> Result<Self> {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
-        serde_yaml::from_reader(reader).map_err(Error::Yaml)
+        let config: Config = serde_yaml::from_reader(reader).map_err(Error::Yaml)?;
+        config.validate()?;
+        Ok(config)
     }
 
     /// Writes the `Config` struct to a YAML file.
@@ -161,6 +175,29 @@ pub struct FieldConfig {
     pub offset: Option<f64>,
 }
 
+impl FieldConfig {
+    /// Validates that scale/offset are only used with floating point data types.
+    pub fn validate(&self) -> Result<()> {
+        match self.data_type {
+            DType::Float32 | DType::Float64 => Ok(()),
+            _ => {
+                if self.scale.is_some() {
+                    return Err(Error::UnsupportedConversion(format!(
+                        "Scaling is only supported for Float32 and Float64, not {:?}",
+                        self.data_type
+                    )));
+                }
+                if self.offset.is_some() {
+                    return Err(Error::UnsupportedConversion(format!(
+                        "Offset is only supported for Float32 and Float64, not {:?}",
+                        self.data_type
+                    )));
+                }
+                Ok(())
+            }
+        }
+    }
+}
 /// A builder for configuring a `FieldConfig` struct.
 ///
 /// This builder allows you to set the various properties of a field
@@ -253,15 +290,17 @@ impl FieldConfigBuilder {
     /// # Returns
     ///
     /// A `FieldConfig` struct with the configured properties
-    pub fn build(self) -> FieldConfig {
-        FieldConfig {
+    pub fn build(self) -> Result<FieldConfig> {
+        let cfg = FieldConfig {
             name: self.name,
             xml_path: self.xml_path,
             data_type: self.data_type,
             nullable: self.nullable,
             scale: self.scale,
             offset: self.offset,
-        }
+        };
+        cfg.validate()?;
+        Ok(cfg)
     }
 }
 
@@ -309,8 +348,13 @@ impl DType {
 #[macro_export]
 macro_rules! config_from_yaml {
     ($yaml:expr) => {{
-        match serde_yaml::from_str($yaml) {
-            Ok(config) => config,
+        match serde_yaml::from_str::<$crate::config::Config>($yaml) {
+            Ok(config) => {
+                if let Err(e) = config.validate() {
+                    panic!("Invalid configuration: {:?}", e);
+                }
+                config
+            }
             Err(e) => panic!("Invalid YAML configuration: {}", e),
         }
     }};
@@ -330,9 +374,28 @@ mod tests {
                 parser_options: Default::default(),
                 tables: vec![
                     TableConfig::new("table1", "/path/to", vec![], vec![
-                        FieldConfigBuilder::new("string_field", "/path/to/string_field", DType::Utf8).nullable(true).build(),
-                        FieldConfigBuilder::new("int32_field", "/path/to/int32_field", DType::Int32).build(),
-                        FieldConfigBuilder::new("float64_field", "/path/to/float64_field", DType::Float64).nullable(true).scale(1.0e-9).offset(1.0e-3).build(),
+                        match FieldConfigBuilder::new("string_field", "/path/to/string_field", DType::Utf8)
+                            .nullable(true)
+                            .build()
+                        {
+                            Ok(f) => f,
+                            Err(e) => panic!("Failed to build field config: {:?}", e),
+                        },
+                        match FieldConfigBuilder::new("int32_field", "/path/to/int32_field", DType::Int32)
+                            .build()
+                        {
+                            Ok(f) => f,
+                            Err(e) => panic!("Failed to build field config: {:?}", e),
+                        },
+                        match FieldConfigBuilder::new("float64_field", "/path/to/float64_field", DType::Float64)
+                            .nullable(true)
+                            .scale(1.0e-9)
+                            .offset(1.0e-3)
+                            .build()
+                        {
+                            Ok(f) => f,
+                            Err(e) => panic!("Failed to build field config: {:?}", e),
+                        },
                         ]
                     ),
                 ],
@@ -456,7 +519,10 @@ mod tests {
                     "/root",
                     vec![],
                     vec![
-                        FieldConfigBuilder::new("id", "/root/item/@id", DType::Int32).build(),
+                        match FieldConfigBuilder::new("id", "/root/item/@id", DType::Int32).build() {
+                            Ok(f) => f,
+                            Err(e) => panic!("Failed to build field config: {:?}", e),
+                        },
                     ],
                 ),
             ],
@@ -475,7 +541,10 @@ mod tests {
                     "/root",
                     vec![],
                     vec![
-                        FieldConfigBuilder::new("id", "/root/item/id", DType::Int32).build(),
+                        match FieldConfigBuilder::new("id", "/root/item/id", DType::Int32).build() {
+                            Ok(f) => f,
+                            Err(e) => panic!("Failed to build field config: {:?}", e),
+                        },
                     ],
                 ),
             ],
@@ -494,8 +563,14 @@ mod tests {
                     "/root",
                     vec![],
                     vec![
-                        FieldConfigBuilder::new("id", "/root/item/id", DType::Int32).build(),
-                        FieldConfigBuilder::new("type", "/root/item/@type", DType::Utf8).build(),
+                        match FieldConfigBuilder::new("id", "/root/item/id", DType::Int32).build() {
+                            Ok(f) => f,
+                            Err(e) => panic!("Failed to build field config: {:?}", e),
+                        },
+                        match FieldConfigBuilder::new("type", "/root/item/@type", DType::Utf8).build() {
+                            Ok(f) => f,
+                            Err(e) => panic!("Failed to build field config: {:?}", e),
+                        },
                     ],
                 ),
             ],
@@ -529,7 +604,8 @@ mod tests {
             .nullable(true)
             .scale(0.001)
             .offset(100.0)
-            .build();
+            .build()
+            .unwrap();
 
         assert_eq!(field.name, "test_field");
         assert_eq!(field.xml_path, "/path/to/field");
@@ -543,7 +619,8 @@ mod tests {
     fn test_field_config_builder_scale_only() {
         let field = FieldConfigBuilder::new("test", "/path", DType::Float32)
             .scale(0.5)
-            .build();
+            .build()
+            .unwrap();
 
         assert_eq!(field.scale, Some(0.5));
         assert_eq!(field.offset, None);
@@ -553,7 +630,8 @@ mod tests {
     fn test_field_config_builder_offset_only() {
         let field = FieldConfigBuilder::new("test", "/path", DType::Float64)
             .offset(5.0)
-            .build();
+            .build()
+            .unwrap();
 
         assert_eq!(field.scale, None);
         assert_eq!(field.offset, Some(5.0));
