@@ -1233,6 +1233,242 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_xml_deeply_nested() -> Result<()> {
+        let xml_content = r#"
+            <root>
+                <container>
+                    <level1 id="L1A">
+                        <level2 id="L2A">
+                            <level3 id="L3A">
+                                <level4 id="L4A">
+                                    <items>
+                                        <item>1.1</item>
+                                        <item>1.2</item>
+                                    </items>
+                                </level4>
+                                <level4 id="L4B">
+                                    <items>
+                                        <item>2.1</item>
+                                    </items>
+                                </level4>
+                            </level3>
+                            <level3 id="L3B">
+                                <level4 id="L4A">
+                                    <items>
+                                        <item>3.1</item>
+                                        <item>3.2</item>
+                                        <item>3.3</item>
+                                    </items>
+                                </level4>
+                            </level3>
+                        </level2>
+                        <level2 id="L2B">
+                            <level3 id="L3A">
+                                <level4 id="L4A">
+                                    <items>
+                                        <item>4.1</item>
+                                    </items>
+                                </level4>
+                            </level3>
+                        </level2>
+                    </level1>
+                    <level1 id="L1B">
+                        <level2 id="L2A">
+                            <level3 id="L3A">
+                                <level4 id="L4A">
+                                    <items>
+                                        <item>5.1</item>
+                                        <item>5.2</item>
+                                    </items>
+                                </level4>
+                            </level3>
+                        </level2>
+                    </level1>
+                </container>
+            </root>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: level1s
+                    xml_path: /root/container
+                    levels: ["level1"]
+                    fields: []
+                  - name: level2s
+                    xml_path: /root/container/level1
+                    levels: ["level1", "level2"]
+                    fields: []
+                  - name: level3s
+                    xml_path: /root/container/level1/level2
+                    levels: ["level1", "level2", "level3"]
+                    fields: []
+                  - name: level4s
+                    xml_path: /root/container/level1/level2/level3
+                    levels: ["level1", "level2", "level3", "level4"]
+                    fields: []
+                  - name: items
+                    xml_path: /root/container/level1/level2/level3/level4/items
+                    levels: ["level1", "level2", "level3", "level4", "item"]
+                    fields:
+                      - name: item
+                        xml_path: /root/container/level1/level2/level3/level4/items/item
+                        data_type: Utf8
+                        nullable: false
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+
+        let items_batch = record_batches.get("items").unwrap();
+        assert_eq!(items_batch.num_rows(), 9);
+        assert_array_values!(
+            items_batch,
+            "<level1>",
+            &[0, 0, 0, 0, 0, 0, 0, 1, 1],
+            UInt32Array
+        );
+        assert_array_values!(
+            items_batch,
+            "<level2>",
+            &[0, 0, 0, 0, 0, 0, 1, 0, 0],
+            UInt32Array
+        );
+        assert_array_values!(
+            items_batch,
+            "<level3>",
+            &[0, 0, 0, 1, 1, 1, 0, 0, 0],
+            UInt32Array
+        );
+        assert_array_values!(
+            items_batch,
+            "<level4>",
+            &[0, 0, 1, 0, 0, 0, 0, 0, 0],
+            UInt32Array
+        );
+        assert_array_values!(
+            items_batch,
+            "<item>",
+            &[0, 1, 0, 0, 1, 2, 0, 0, 1],
+            UInt32Array
+        );
+        assert_array_values!(
+            items_batch,
+            "item",
+            &[
+                "1.1", "1.2", "2.1", "3.1", "3.2", "3.3", "4.1", "5.1", "5.2"
+            ],
+            StringArray
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_xml_deeply_nested_generic() -> Result<()> {
+        let xml_content = r#"
+            <document>
+                <collections>
+                    <collection>
+                        <record>
+                            <analysis>
+                                <series>
+                                    <item>
+                                        <values>
+                                            <group>
+                                                <value>1.5</value>
+                                                <value>2.5</value>
+                                            </group>
+                                            <group>
+                                                <value>3.5</value>
+                                            </group>
+                                        </values>
+                                    </item>
+                                    <item>
+                                        <values>
+                                            <group>
+                                                <value>4.5</value>
+                                            </group>
+                                        </values>
+                                    </item>
+                                </series>
+                            </analysis>
+                        </record>
+                        <record>
+                            <analysis>
+                                <series>
+                                    <item>
+                                        <values>
+                                            <group>
+                                                <value>5.5</value>
+                                            </group>
+                                        </values>
+                                    </item>
+                                </series>
+                            </analysis>
+                        </record>
+                    </collection>
+                </collections>
+            </document>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: collections
+                    xml_path: /document/collections
+                    levels: ["collection"]
+                    fields: []
+                  - name: records
+                    xml_path: /document/collections/collection
+                    levels: ["collection", "record"]
+                    fields: []
+                  - name: analyses
+                    xml_path: /document/collections/collection/record
+                    levels: ["collection", "record", "analysis"]
+                    fields: []
+                  - name: series
+                    xml_path: /document/collections/collection/record/analysis
+                    levels: ["collection", "record", "analysis", "series"]
+                    fields: []
+                  - name: items
+                    xml_path: /document/collections/collection/record/analysis/series
+                    levels: ["collection", "record", "analysis", "series", "item"]
+                    fields: []
+                  - name: values
+                    xml_path: /document/collections/collection/record/analysis/series/item/values/group
+                    levels: ["collection", "record", "analysis", "series", "item", "group"]
+                    fields:
+                      - name: value
+                        xml_path: /document/collections/collection/record/analysis/series/item/values/group/value
+                        data_type: Float64
+                        nullable: false
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+
+        let values_batch = record_batches.get("values").unwrap();
+        assert_eq!(values_batch.num_rows(), 5);
+        assert_array_values!(values_batch, "<collection>", &[0, 0, 0, 0, 0], UInt32Array);
+        assert_array_values!(values_batch, "<record>", &[0, 0, 0, 0, 1], UInt32Array);
+        assert_array_values!(values_batch, "<analysis>", &[0, 0, 0, 0, 0], UInt32Array);
+        assert_array_values!(values_batch, "<series>", &[0, 0, 0, 0, 0], UInt32Array);
+        assert_array_values!(values_batch, "<item>", &[0, 0, 0, 1, 0], UInt32Array);
+        assert_array_values!(values_batch, "<group>", &[0, 1, 0, 0, 0], UInt32Array);
+
+        assert_array_approx_values!(
+            values_batch,
+            "value",
+            &[1.5, 2.5, 3.5, 4.5, 5.5],
+            Float64Array,
+            1e-10
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn test_nested_row_index() -> Result<()> {
         let xml_content = r#"
             <data>
