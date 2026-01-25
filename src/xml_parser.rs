@@ -2320,8 +2320,6 @@ mod tests {
         Ok(())
     }
 
-    // Phase 1 Error Handling Tests
-
     #[test]
     fn test_table_not_found_on_end_current_row() -> Result<()> {
         // Build a config with a single valid table path
