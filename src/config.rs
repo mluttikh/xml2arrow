@@ -446,4 +446,116 @@ mod tests {
             "trim_text should default to false when parser_options is empty"
         );
     }
+
+    #[test]
+    fn test_requires_attribute_parsing_with_attributes() {
+        let config = Config {
+            tables: vec![
+                TableConfig::new(
+                    "test",
+                    "/root",
+                    vec![],
+                    vec![
+                        FieldConfigBuilder::new("id", "/root/item/@id", DType::Int32).build(),
+                    ],
+                ),
+            ],
+            parser_options: Default::default(),
+        };
+
+        assert!(config.requires_attribute_parsing());
+    }
+
+    #[test]
+    fn test_requires_attribute_parsing_without_attributes() {
+        let config = Config {
+            tables: vec![
+                TableConfig::new(
+                    "test",
+                    "/root",
+                    vec![],
+                    vec![
+                        FieldConfigBuilder::new("id", "/root/item/id", DType::Int32).build(),
+                    ],
+                ),
+            ],
+            parser_options: Default::default(),
+        };
+
+        assert!(!config.requires_attribute_parsing());
+    }
+
+    #[test]
+    fn test_requires_attribute_parsing_mixed() {
+        let config = Config {
+            tables: vec![
+                TableConfig::new(
+                    "test",
+                    "/root",
+                    vec![],
+                    vec![
+                        FieldConfigBuilder::new("id", "/root/item/id", DType::Int32).build(),
+                        FieldConfigBuilder::new("type", "/root/item/@type", DType::Utf8).build(),
+                    ],
+                ),
+            ],
+            parser_options: Default::default(),
+        };
+
+        assert!(config.requires_attribute_parsing());
+    }
+
+    #[test]
+    fn test_dtype_as_arrow_type_all_variants() {
+        use arrow::datatypes::DataType as ArrowDataType;
+        
+        assert_eq!(DType::Boolean.as_arrow_type(), ArrowDataType::Boolean);
+        assert_eq!(DType::Float32.as_arrow_type(), ArrowDataType::Float32);
+        assert_eq!(DType::Float64.as_arrow_type(), ArrowDataType::Float64);
+        assert_eq!(DType::Utf8.as_arrow_type(), ArrowDataType::Utf8);
+        assert_eq!(DType::Int8.as_arrow_type(), ArrowDataType::Int8);
+        assert_eq!(DType::UInt8.as_arrow_type(), ArrowDataType::UInt8);
+        assert_eq!(DType::Int16.as_arrow_type(), ArrowDataType::Int16);
+        assert_eq!(DType::UInt16.as_arrow_type(), ArrowDataType::UInt16);
+        assert_eq!(DType::Int32.as_arrow_type(), ArrowDataType::Int32);
+        assert_eq!(DType::UInt32.as_arrow_type(), ArrowDataType::UInt32);
+        assert_eq!(DType::Int64.as_arrow_type(), ArrowDataType::Int64);
+        assert_eq!(DType::UInt64.as_arrow_type(), ArrowDataType::UInt64);
+    }
+
+    #[test]
+    fn test_field_config_builder_chaining() {
+        let field = FieldConfigBuilder::new("test_field", "/path/to/field", DType::Float64)
+            .nullable(true)
+            .scale(0.001)
+            .offset(100.0)
+            .build();
+
+        assert_eq!(field.name, "test_field");
+        assert_eq!(field.xml_path, "/path/to/field");
+        assert_eq!(field.data_type, DType::Float64);
+        assert!(field.nullable);
+        assert_eq!(field.scale, Some(0.001));
+        assert_eq!(field.offset, Some(100.0));
+    }
+
+    #[test]
+    fn test_field_config_builder_scale_only() {
+        let field = FieldConfigBuilder::new("test", "/path", DType::Float32)
+            .scale(0.5)
+            .build();
+
+        assert_eq!(field.scale, Some(0.5));
+        assert_eq!(field.offset, None);
+    }
+
+    #[test]
+    fn test_field_config_builder_offset_only() {
+        let field = FieldConfigBuilder::new("test", "/path", DType::Float64)
+            .offset(5.0)
+            .build();
+
+        assert_eq!(field.scale, None);
+        assert_eq!(field.offset, Some(5.0));
+    }
 }
