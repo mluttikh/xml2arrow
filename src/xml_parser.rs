@@ -1972,4 +1972,340 @@ mod tests {
 
         Ok(())
     }
+
+    // Numeric overflow tests
+    #[test]
+    fn test_numeric_overflow_int8() {
+        let xml_content = "<root><value>128</value></root>";
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: test
+                    xml_path: /root
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /root/value
+                        data_type: Int8
+            "#
+        );
+        
+        let result = parse_xml(xml_content.as_bytes(), &config);
+        assert!(result.is_err(), "Int8 overflow (128) should fail");
+        match result.unwrap_err() {
+            Error::ParseError(msg) => {
+                assert!(msg.contains("Failed to parse value"));
+            }
+            other_error => {
+                panic!("Expected ParseError for Int8 overflow, got: {:?}", other_error);
+            }
+        }
+    }
+
+    #[test]
+    fn test_numeric_overflow_uint32() {
+        let xml_content = "<root><value>4294967296</value></root>";
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: test
+                    xml_path: /root
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /root/value
+                        data_type: UInt32
+            "#
+        );
+        
+        let result = parse_xml(xml_content.as_bytes(), &config);
+        assert!(result.is_err(), "UInt32 overflow should fail");
+    }
+
+    #[test]
+    fn test_numeric_boundary_int64_max() -> Result<()> {
+        let xml_content = "<root><value>9223372036854775807</value></root>";
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: test
+                    xml_path: /root
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /root/value
+                        data_type: Int64
+            "#
+        );
+        
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("test").unwrap();
+        let array = batch
+            .column_by_name("value")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        
+        assert_eq!(array.value(0), i64::MAX);
+        Ok(())
+    }
+
+    #[test]
+    fn test_negative_float_with_scale_and_offset() -> Result<()> {
+        let xml_content = "<root><value>-100.5</value></root>";
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: test
+                    xml_path: /root
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /root/value
+                        data_type: Float64
+                        nullable: false
+                        scale: 2.0
+                        offset: -10.0
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("test").unwrap();
+        
+        // Expected: (-100.5 * 2.0) + (-10.0) = -201.0 - 10.0 = -211.0
+        let array = batch
+            .column_by_name("value")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        
+        assert!(abs_diff_eq!(array.value(0), -211.0, epsilon = 1e-10));
+        Ok(())
+    }
+
+    // Nullable field tests
+    #[test]
+    fn test_nullable_fields_all_null_values() -> Result<()> {
+        let xml_content = r#"
+            <data>
+                <item><name></name></item>
+                <item><name></name></item>
+                <item><name></name></item>
+            </data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: name
+                        xml_path: /data/item/name
+                        data_type: Utf8
+                        nullable: true
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        let array = batch
+            .column_by_name("name")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+
+        assert_eq!(array.len(), 3);
+        assert!(array.is_null(0));
+        assert!(array.is_null(1));
+        assert!(array.is_null(2));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_mixed_null_and_valid_values() -> Result<()> {
+        let xml_content = r#"
+            <data>
+                <item><int_val>42</int_val><bool_val>true</bool_val></item>
+                <item><int_val></int_val><bool_val></bool_val></item>
+                <item><int_val>100</int_val><bool_val>false</bool_val></item>
+            </data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: int_val
+                        xml_path: /data/item/int_val
+                        data_type: Int32
+                        nullable: true
+                      - name: bool_val
+                        xml_path: /data/item/bool_val
+                        data_type: Boolean
+                        nullable: true
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        // Verify row 0 has values
+        assert!(!batch
+            .column_by_name("int_val")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap()
+            .is_null(0));
+
+        // Verify row 1 has nulls for all fields
+        assert!(batch
+            .column_by_name("int_val")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap()
+            .is_null(1));
+
+        assert!(batch
+            .column_by_name("bool_val")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap()
+            .is_null(1));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_nullable_all_data_types() -> Result<()> {
+        let xml_content = r#"
+            <data>
+                <item>
+                    <int_val>42</int_val>
+                    <float_val>3.14</float_val>
+                    <bool_val>true</bool_val>
+                    <str_val>hello</str_val>
+                </item>
+                <item>
+                </item>
+            </data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: int_val
+                        xml_path: /data/item/int_val
+                        data_type: Int32
+                        nullable: true
+                      - name: float_val
+                        xml_path: /data/item/float_val
+                        data_type: Float64
+                        nullable: true
+                      - name: bool_val
+                        xml_path: /data/item/bool_val
+                        data_type: Boolean
+                        nullable: true
+                      - name: str_val
+                        xml_path: /data/item/str_val
+                        data_type: Utf8
+                        nullable: true
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        // Second row should have all nulls
+        assert!(batch
+            .column_by_name("int_val")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap()
+            .is_null(1));
+
+        assert!(batch
+            .column_by_name("float_val")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .is_null(1));
+
+        assert!(batch
+            .column_by_name("bool_val")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap()
+            .is_null(1));
+
+        assert!(batch
+            .column_by_name("str_val")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .is_null(1));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_empty_element_vs_missing_element() -> Result<()> {
+        let xml_content = r#"
+            <data>
+                <item1><value></value></item1>
+                <item2></item2>
+            </data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: ["item"]
+                    fields:
+                      - name: value
+                        xml_path: /data/item/value
+                        data_type: Utf8
+                        nullable: true
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        // Both should result in null values for nullable fields
+        assert_eq!(batch.num_rows(), 2);
+        let array = batch
+            .column_by_name("value")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+
+        assert!(array.is_null(0), "Empty element should be null");
+        assert!(array.is_null(1), "Missing element should be null");
+
+        Ok(())
+    }
 }
