@@ -73,8 +73,13 @@ where
                 )));
             }
         }
-    } else {
+    } else if field_config.nullable {
         builder.append_null();
+    } else {
+        return Err(Error::ParseError(format!(
+            "Missing value for non-nullable field '{}' at path {}",
+            field_config.name, field_config.xml_path
+        )));
     }
     Ok(())
 }
@@ -197,8 +202,13 @@ impl FieldBuilder {
                             )));
                         }
                     }
-                } else {
+                } else if self.field_config.nullable {
                     builder.append_null();
+                } else {
+                    return Err(Error::ParseError(format!(
+                        "Missing value for non-nullable field '{}' at path {}",
+                        self.field_config.name, self.field_config.xml_path
+                    )));
                 }
             }
             _ => {
@@ -2465,9 +2475,6 @@ mod tests {
         }
     }
 
-    // ==================== Phase 1: High Priority Tests ====================
-
-    // --- CDATA Section Tests ---
     // --- CDATA Section Tests ---
 
     #[test]
@@ -2820,10 +2827,14 @@ mod tests {
 
         // Empty value for non-nullable Int32 should fail to parse
         let result = parse_xml(xml_content.as_bytes(), &config);
-        // The current implementation appends null even for non-nullable numeric fields,
-        // which may or may not be desired. This test documents the actual behavior.
-        // If the implementation should error, change this assertion.
-        assert!(result.is_ok() || result.is_err());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let err_msg = format!("{:?}", err);
+        assert!(
+            err_msg.contains("Missing value for non-nullable field"),
+            "Expected 'Missing value for non-nullable field' error, got: {}",
+            err_msg
+        );
     }
 
     // --- Additional Numeric Overflow Tests ---
