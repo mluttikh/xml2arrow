@@ -578,6 +578,11 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                 let text = String::from_utf8_lossy(&text);
                 xml_to_arrow_converter.set_field_value_for_current_table(xml_path, &text)?
             }
+            Event::CData(e) => {
+                let text = e.into_inner();
+                let text = String::from_utf8_lossy(&text);
+                xml_to_arrow_converter.set_field_value_for_current_table(xml_path, &text)?
+            }
             Event::End(_) => {
                 if xml_to_arrow_converter.is_table_path(xml_path) {
                     xml_to_arrow_converter.end_table()?;
@@ -2463,18 +2468,15 @@ mod tests {
     // ==================== Phase 1: High Priority Tests ====================
 
     // --- CDATA Section Tests ---
-    // NOTE: The current implementation does NOT handle CDATA sections.
-    // CDATA content is not captured by the parser. These tests document
-    // the current behavior and serve as a placeholder for future implementation.
+    // --- CDATA Section Tests ---
 
     #[test]
-    fn test_cdata_sections_not_supported() -> Result<()> {
-        // CDATA sections are currently not parsed - content inside CDATA is ignored
-        // This test documents the current limitation
+    fn test_cdata_sections() -> Result<()> {
+        // CDATA sections are parsed and their content is captured
         let xml_content = r#"
             <data>
                 <item>
-                    <content><![CDATA[This would be CDATA content]]></content>
+                    <content><![CDATA[This is CDATA content]]></content>
                 </item>
             </data>
         "#;
@@ -2497,29 +2499,19 @@ mod tests {
         let batch = record_batches.get("items").unwrap();
 
         assert_eq!(batch.num_rows(), 1);
-        // CDATA content is NOT captured - this documents current behavior
-        // When CDATA support is added, this test should be updated
-        let array = batch
-            .column_by_name("content")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        // Currently returns null because CDATA is not processed
-        assert!(
-            array.is_null(0),
-            "CDATA is not currently supported - content is not captured"
-        );
+        assert_array_values!(batch, "content", &["This is CDATA content"], StringArray);
 
         Ok(())
     }
 
     #[test]
-    fn test_mixed_text_and_cdata() -> Result<()> {
-        // When mixing regular text with CDATA, only regular text is captured
+    fn test_cdata_with_special_characters() -> Result<()> {
+        // CDATA allows embedding special XML characters without escaping
         let xml_content = r#"
             <data>
-                <item><content>Regular text</content></item>
+                <item>
+                    <content><![CDATA[<tag>Hello & World</tag>]]></content>
+                </item>
             </data>
         "#;
 
@@ -2540,8 +2532,108 @@ mod tests {
         let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("items").unwrap();
 
-        // Regular text (non-CDATA) works fine
-        assert_array_values!(batch, "content", &["Regular text"], StringArray);
+        // Special characters inside CDATA are preserved literally
+        assert_array_values!(batch, "content", &["<tag>Hello & World</tag>"], StringArray);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_mixed_text_and_cdata() -> Result<()> {
+        // When mixing regular text with CDATA, both are captured and concatenated
+        let xml_content = r#"
+            <data>
+                <item><content>Hello <![CDATA[<World>]]>!</content></item>
+            </data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: content
+                        xml_path: /data/item/content
+                        data_type: Utf8
+                        nullable: false
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        // Both regular text and CDATA content are concatenated
+        assert_array_values!(batch, "content", &["Hello <World>!"], StringArray);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_multiple_cdata_sections() -> Result<()> {
+        // Multiple CDATA sections in the same element are concatenated
+        let xml_content = r#"
+            <data>
+                <item><content><![CDATA[First]]><![CDATA[Second]]></content></item>
+            </data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: content
+                        xml_path: /data/item/content
+                        data_type: Utf8
+                        nullable: false
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        assert_array_values!(batch, "content", &["FirstSecond"], StringArray);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_cdata_with_numeric_conversion() -> Result<()> {
+        // CDATA content can be converted to numeric types
+        let xml_content = r#"
+            <data>
+                <item><value><![CDATA[42]]></value></item>
+            </data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /data/item/value
+                        data_type: Int32
+                        nullable: false
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        let array = batch
+            .column_by_name("value")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap();
+        assert_eq!(array.value(0), 42);
 
         Ok(())
     }
