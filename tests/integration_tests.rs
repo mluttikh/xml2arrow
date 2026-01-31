@@ -38,7 +38,7 @@ macro_rules! assert_array_values {
 }
 
 #[test]
-fn test_parse_from_file() {
+fn test_file_parse_basic() {
     // Create a temporary XML file
     let mut xml_file = NamedTempFile::new().unwrap();
     write!(
@@ -85,7 +85,7 @@ fn test_parse_from_file() {
 }
 
 #[test]
-fn test_large_xml_file_1000_rows() {
+fn test_file_parse_large_1k_rows() {
     // Generate a large XML file with 1000 items
     let mut xml_file = NamedTempFile::new().unwrap();
 
@@ -153,7 +153,7 @@ fn test_large_xml_file_1000_rows() {
 }
 
 #[test]
-fn test_large_xml_file_10000_rows() {
+fn test_file_parse_large_10k_rows() {
     // Generate a larger XML file with 10000 items
     let mut xml_file = NamedTempFile::new().unwrap();
 
@@ -198,7 +198,7 @@ fn test_large_xml_file_10000_rows() {
 }
 
 #[test]
-fn test_nested_structure_from_file() {
+fn test_file_parse_nested_structure() {
     // Note: Attributes on the table row boundary element are captured by child tables,
     // not the parent table. This test uses a structure that works with the parser.
     let mut xml_file = NamedTempFile::new().unwrap();
@@ -281,7 +281,7 @@ fn test_nested_structure_from_file() {
 }
 
 #[test]
-fn test_config_from_yaml_file() {
+fn test_file_config_yaml_with_transform() {
     // Create a temporary YAML config file
     let mut yaml_file = NamedTempFile::with_suffix(".yaml").unwrap();
     write!(
@@ -337,7 +337,7 @@ tables:
 }
 
 #[test]
-fn test_multiple_tables_from_file() {
+fn test_file_parse_multiple_tables() {
     // Test parsing multiple independent tables from a single XML file
     // Note: Each table needs a proper row boundary element defined by its xml_path
     let mut xml_file = NamedTempFile::new().unwrap();
@@ -407,7 +407,7 @@ fn test_multiple_tables_from_file() {
 }
 
 #[test]
-fn test_deeply_nested_from_file() {
+fn test_file_parse_deeply_nested() {
     let mut xml_file = NamedTempFile::new().unwrap();
     write!(
         xml_file,
@@ -455,7 +455,7 @@ fn test_deeply_nested_from_file() {
 }
 
 #[test]
-fn test_file_with_bom() {
+fn test_file_encoding_utf8_bom() {
     // UTF-8 BOM (Byte Order Mark)
     let mut xml_file = NamedTempFile::new().unwrap();
     // Write BOM followed by XML content
@@ -494,7 +494,7 @@ fn test_file_with_bom() {
 }
 
 #[test]
-fn test_empty_file() {
+fn test_file_edge_empty() {
     let xml_file = NamedTempFile::new().unwrap();
     // File is empty
 
@@ -524,7 +524,7 @@ fn test_empty_file() {
 }
 
 #[test]
-fn test_file_with_only_whitespace() {
+fn test_file_edge_whitespace_only() {
     let mut xml_file = NamedTempFile::new().unwrap();
     write!(xml_file, "   \n\t\n   ").unwrap();
 
@@ -551,7 +551,7 @@ fn test_file_with_only_whitespace() {
 }
 
 #[test]
-fn test_realistic_sensor_data() {
+fn test_file_parse_realistic_sensor_data() {
     // This test uses child elements instead of attributes on the table row element
     // because attributes on the row boundary element are captured by child tables
     let mut xml_file = NamedTempFile::new().unwrap();
