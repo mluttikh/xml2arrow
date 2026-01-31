@@ -1,11 +1,17 @@
 use std::fmt;
 use string_cache::DefaultAtom as Atom;
 
+/// Represents an XML path as a sequence of element names.
+///
+/// This type is retained for backward compatibility and use in tests.
+/// The main parsing code now uses integer-based path indexing via PathRegistry.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct XmlPath {
     parts: Vec<Atom>,
 }
 
+#[allow(dead_code)]
 impl XmlPath {
     pub fn new(path_str: &str) -> Self {
         Self {
