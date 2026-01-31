@@ -758,7 +758,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_xml_complex() -> Result<()> {
+    fn test_parse_complex_multiple_tables_nested() -> Result<()> {
         let xml_content = r#"
         <?xml version="1.0" encoding="UTF-8"?>
         <data>
@@ -916,7 +916,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_xml() -> Result<()> {
+    fn test_parse_basic_multiple_tables() -> Result<()> {
         let xml_content = r#"
             <data>
               <product_list>
@@ -1021,7 +1021,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_xml_different_data_types() -> Result<()> {
+    fn test_parse_dtypes_all_numeric_types() -> Result<()> {
         let xml_content = r#"
             <data>
               <item>
@@ -1113,7 +1113,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_xml_with_special_characters() -> Result<()> {
+    fn test_parse_text_special_characters_escaped() -> Result<()> {
         let xml_content = r#"<data><item><text>&lt; &gt; &amp; &quot; &apos;</text></item></data>"#;
         let config = config_from_yaml!(
             r#"
@@ -1135,7 +1135,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_xml_empty() -> Result<()> {
+    fn test_parse_edge_empty_input() -> Result<()> {
         let xml_content = "";
         let config = Config {
             parser_options: Default::default(),
@@ -1147,7 +1147,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_xml_with_scale_and_offset() -> Result<()> {
+    fn test_transform_scale_offset_float64() -> Result<()> {
         let xml_content =
             r#"<data><item><value>123.45</value></item><item><value>67.89</value></item></data>"#;
         let config = config_from_yaml!(
@@ -1180,7 +1180,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_xml_with_scale_and_offset_float32() -> Result<()> {
+    fn test_transform_scale_offset_float32() -> Result<()> {
         let xml_content =
             r#"<data><item><value>123.45</value></item><item><value>67.89</value></item></data>"#;
         let config = config_from_yaml!(
@@ -1214,7 +1214,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_xml_with_attributes() -> Result<()> {
+    fn test_attr_parse_multiple_attributes() -> Result<()> {
         let xml_data = r#"
             <data>
                 <items>
@@ -1277,7 +1277,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_xml_deeply_nested() -> Result<()> {
+    fn test_parse_structure_deeply_nested() -> Result<()> {
         let xml_content = r#"
             <root>
                 <container>
@@ -1409,7 +1409,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_xml_deeply_nested_generic() -> Result<()> {
+    fn test_parse_structure_deeply_nested_generic() -> Result<()> {
         let xml_content = r#"
             <document>
                 <collections>
@@ -1513,7 +1513,7 @@ mod tests {
     }
 
     #[test]
-    fn test_nested_row_index() -> Result<()> {
+    fn test_parse_indices_nested_row_index() -> Result<()> {
         let xml_content = r#"
             <data>
                 <dataset>
@@ -1563,7 +1563,7 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_tags() -> Result<()> {
+    fn test_parse_edge_empty_tags() -> Result<()> {
         let xml_content = r#"
             <data>
                 <dataset>
@@ -1615,7 +1615,7 @@ mod tests {
     }
 
     #[test]
-    fn test_boolean_parsing() -> Result<()> {
+    fn test_dtype_boolean_valid_values() -> Result<()> {
         let test_cases = [
             ("true", Some(true)),
             ("false", Some(false)),
@@ -1667,7 +1667,7 @@ mod tests {
     }
 
     #[test]
-    fn test_boolean_parsing_invalid_input() -> Result<()> {
+    fn test_dtype_boolean_invalid_values() -> Result<()> {
         let test_cases = [
             ("TRUE"),  // Case-sensitive - should be error
             ("FALSE"), // Case-sensitive - should be error
@@ -1726,7 +1726,7 @@ mod tests {
     }
 
     #[test]
-    fn test_boolean_parsing_no_value() -> Result<()> {
+    fn test_dtype_boolean_missing_value() -> Result<()> {
         let config_nullable = config_from_yaml!(
             r#"
                 tables:
@@ -1770,7 +1770,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unsupported_conversion_scale() {
+    fn test_transform_scale_unsupported_int32() {
         let result = FieldConfigBuilder::new("test_field", "/test/field", DType::Int32)
             .scale(2.0)
             .build();
@@ -1785,7 +1785,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unsupported_conversion_offset() {
+    fn test_transform_offset_unsupported_int16() {
         let result = FieldConfigBuilder::new("test_field", "/test/field", DType::Int16)
             .offset(1.0)
             .build();
@@ -1800,7 +1800,7 @@ mod tests {
     }
 
     #[test]
-    fn test_non_utf8_characters() -> Result<()> {
+    fn test_unicode_parse_non_utf8_bytes() -> Result<()> {
         let xml_bytes = b"<data><item><value>\xC2\xC2\xFE</value></item></data>";
         let fields = vec![
             match FieldConfigBuilder::new("value", "/data/item/value", DType::Utf8).build() {
@@ -1823,7 +1823,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_xml_with_attributes_and_empty_events() -> Result<()> {
+    fn test_attr_parse_empty_elements() -> Result<()> {
         let xml_content = r#"<library><book id="1" isbn="978-0-321-76572-3" /><book id="2" title="The Rust Programming Language" /></library>"#;
         let fields = vec![
             match FieldConfigBuilder::new("book_id", "/library/book/@id", DType::Int32).build() {
@@ -1871,7 +1871,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_xml_malformed_input_error_handling() -> Result<()> {
+    fn test_error_malformed_xml_various_cases() -> Result<()> {
         let config = config_from_yaml!(
             r#"
             tables:
@@ -1933,7 +1933,7 @@ mod tests {
     }
 
     #[test]
-    fn test_trim_text_option() -> Result<()> {
+    fn test_parse_options_trim_text() -> Result<()> {
         let xml_content_with_whitespace = r#"
             <data>
                 <item>
@@ -2028,7 +2028,7 @@ mod tests {
 
     // Numeric overflow tests
     #[test]
-    fn test_numeric_overflow_int8() {
+    fn test_dtype_overflow_int8() {
         let xml_content = "<root><value>128</value></root>";
         let config = config_from_yaml!(
             r#"
@@ -2059,7 +2059,7 @@ mod tests {
     }
 
     #[test]
-    fn test_numeric_overflow_uint32() {
+    fn test_dtype_overflow_uint32() {
         let xml_content = "<root><value>4294967296</value></root>";
         let config = config_from_yaml!(
             r#"
@@ -2079,7 +2079,7 @@ mod tests {
     }
 
     #[test]
-    fn test_numeric_boundary_int64_max() -> Result<()> {
+    fn test_dtype_boundary_int64_max() -> Result<()> {
         let xml_content = "<root><value>9223372036854775807</value></root>";
         let config = config_from_yaml!(
             r#"
@@ -2108,7 +2108,7 @@ mod tests {
     }
 
     #[test]
-    fn test_negative_float_with_scale_and_offset() -> Result<()> {
+    fn test_transform_scale_offset_negative_float() -> Result<()> {
         let xml_content = "<root><value>-100.5</value></root>";
         let config = config_from_yaml!(
             r#"
@@ -2143,7 +2143,7 @@ mod tests {
 
     // Nullable field tests
     #[test]
-    fn test_nullable_fields_all_null_values() -> Result<()> {
+    fn test_nullable_all_null_various_types() -> Result<()> {
         let xml_content = r#"
             <data>
                 <item><name></name></item>
@@ -2185,7 +2185,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mixed_null_and_valid_values() -> Result<()> {
+    fn test_nullable_mixed_null_and_valid() -> Result<()> {
         let xml_content = r#"
             <data>
                 <item><int_val>42</int_val><bool_val>true</bool_val></item>
@@ -2251,7 +2251,7 @@ mod tests {
     }
 
     #[test]
-    fn test_nullable_all_data_types() -> Result<()> {
+    fn test_nullable_all_types_with_nulls() -> Result<()> {
         let xml_content = r#"
             <data>
                 <item>
@@ -2339,7 +2339,7 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_element_vs_missing_element() -> Result<()> {
+    fn test_nullable_empty_vs_missing_element() -> Result<()> {
         let xml_content = r#"
             <data>
                 <item1><value></value></item1>
@@ -2380,7 +2380,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_not_found_on_end_current_row() -> Result<()> {
+    fn test_error_table_not_found_end_row() -> Result<()> {
         // Build a config with a single valid table path
         let config = config_from_yaml!(
             r#"
@@ -2412,7 +2412,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_not_found_on_parent_row_indices() -> Result<()> {
+    fn test_error_table_not_found_parent_indices() -> Result<()> {
         // Build a minimal config
         let config = config_from_yaml!(
             r#"
@@ -2441,7 +2441,7 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_attribute_parsing_error() {
+    fn test_error_attr_malformed() {
         // Malformed attribute (unclosed quote / broken pairs) should error
         let xml_content = r#"
             <data>
@@ -2475,7 +2475,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unsupported_conversion_scale_boolean() {
+    fn test_transform_scale_unsupported_boolean() {
         let result = FieldConfigBuilder::new("flag", "/root/flag", DType::Boolean)
             .scale(2.0)
             .build();
@@ -2489,7 +2489,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unsupported_conversion_offset_utf8() {
+    fn test_transform_offset_unsupported_utf8() {
         let result = FieldConfigBuilder::new("text", "/root/text", DType::Utf8)
             .offset(1.0)
             .build();
@@ -2505,7 +2505,7 @@ mod tests {
     // --- CDATA Section Tests ---
 
     #[test]
-    fn test_cdata_sections() -> Result<()> {
+    fn test_cdata_parse_basic() -> Result<()> {
         // CDATA sections are parsed and their content is captured
         let xml_content = r#"
             <data>
@@ -2539,7 +2539,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cdata_with_special_characters() -> Result<()> {
+    fn test_cdata_parse_special_characters() -> Result<()> {
         // CDATA allows embedding special XML characters without escaping
         let xml_content = r#"
             <data>
@@ -2573,7 +2573,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mixed_text_and_cdata() -> Result<()> {
+    fn test_cdata_parse_mixed_with_text() -> Result<()> {
         // When mixing regular text with CDATA, both are captured and concatenated
         let xml_content = r#"
             <data>
@@ -2605,7 +2605,7 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_cdata_sections() -> Result<()> {
+    fn test_cdata_parse_multiple_sections() -> Result<()> {
         // Multiple CDATA sections in the same element are concatenated
         let xml_content = r#"
             <data>
@@ -2636,7 +2636,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cdata_with_numeric_conversion() -> Result<()> {
+    fn test_cdata_parse_numeric_conversion() -> Result<()> {
         // CDATA content can be converted to numeric types
         let xml_content = r#"
             <data>
@@ -2675,7 +2675,7 @@ mod tests {
     // --- XML Namespace Tests ---
 
     #[test]
-    fn test_xml_namespaces_default() -> Result<()> {
+    fn test_namespace_parse_default() -> Result<()> {
         let xml_content = r#"
             <data xmlns="http://example.com/default">
                 <item>
@@ -2708,7 +2708,7 @@ mod tests {
     }
 
     #[test]
-    fn test_xml_namespaces_prefixed() -> Result<()> {
+    fn test_namespace_parse_prefixed() -> Result<()> {
         let xml_content = r#"
             <ns:data xmlns:ns="http://example.com/ns">
                 <ns:item>
@@ -2743,7 +2743,7 @@ mod tests {
     }
 
     #[test]
-    fn test_xml_namespaces_multiple() -> Result<()> {
+    fn test_namespace_parse_multiple() -> Result<()> {
         let xml_content = r#"
             <root xmlns:a="http://example.com/a" xmlns:b="http://example.com/b">
                 <a:item>
@@ -2778,7 +2778,7 @@ mod tests {
     // --- Non-nullable Field Tests ---
 
     #[test]
-    fn test_non_nullable_string_missing_value() -> Result<()> {
+    fn test_nullable_missing_string_uses_empty() -> Result<()> {
         // XML is missing the 'description' element for the second item
         let xml_content = r#"
             <data>
@@ -2827,7 +2827,7 @@ mod tests {
     }
 
     #[test]
-    fn test_non_nullable_numeric_missing_value_errors() {
+    fn test_nullable_missing_numeric_errors() {
         // For non-nullable numeric fields, missing values should cause a parse error
         // because we can't append null to a non-nullable numeric field
         let xml_content = r#"
@@ -2867,7 +2867,7 @@ mod tests {
     // --- Additional Numeric Overflow Tests ---
 
     #[test]
-    fn test_numeric_overflow_int16() {
+    fn test_dtype_overflow_int16() {
         let xml_content = "<root><value>32768</value></root>"; // Max Int16 is 32767
         let config = config_from_yaml!(
             r#"
@@ -2891,7 +2891,7 @@ mod tests {
     }
 
     #[test]
-    fn test_numeric_overflow_int16_negative() {
+    fn test_dtype_overflow_int16_negative() {
         let xml_content = "<root><value>-32769</value></root>"; // Min Int16 is -32768
         let config = config_from_yaml!(
             r#"
@@ -2911,7 +2911,7 @@ mod tests {
     }
 
     #[test]
-    fn test_numeric_overflow_uint8() {
+    fn test_dtype_overflow_uint8() {
         let xml_content = "<root><value>256</value></root>"; // Max UInt8 is 255
         let config = config_from_yaml!(
             r#"
@@ -2931,7 +2931,7 @@ mod tests {
     }
 
     #[test]
-    fn test_numeric_overflow_uint16() {
+    fn test_dtype_overflow_uint16() {
         let xml_content = "<root><value>65536</value></root>"; // Max UInt16 is 65535
         let config = config_from_yaml!(
             r#"
@@ -2951,7 +2951,7 @@ mod tests {
     }
 
     #[test]
-    fn test_numeric_overflow_int64() {
+    fn test_dtype_overflow_int64() {
         let xml_content = "<root><value>9223372036854775808</value></root>"; // Max Int64 + 1
         let config = config_from_yaml!(
             r#"
@@ -2971,7 +2971,7 @@ mod tests {
     }
 
     #[test]
-    fn test_numeric_overflow_uint64() {
+    fn test_dtype_overflow_uint64() {
         let xml_content = "<root><value>18446744073709551616</value></root>"; // Max UInt64 + 1
         let config = config_from_yaml!(
             r#"
@@ -2991,7 +2991,7 @@ mod tests {
     }
 
     #[test]
-    fn test_numeric_negative_unsigned() {
+    fn test_dtype_invalid_negative_unsigned() {
         let xml_content = "<root><value>-1</value></root>";
         let config = config_from_yaml!(
             r#"
@@ -3014,7 +3014,7 @@ mod tests {
     }
 
     #[test]
-    fn test_numeric_boundary_values() -> Result<()> {
+    fn test_dtype_boundary_all_types() -> Result<()> {
         let xml_content = r#"
             <data>
                 <item>
@@ -3087,7 +3087,7 @@ mod tests {
     // --- Scale and Offset Edge Cases ---
 
     #[test]
-    fn test_scale_only_float64() -> Result<()> {
+    fn test_transform_scale_only_float64() -> Result<()> {
         let xml_content = r#"<data><item><value>100</value></item></data>"#;
 
         let config = config_from_yaml!(
@@ -3114,7 +3114,7 @@ mod tests {
     }
 
     #[test]
-    fn test_scale_only_float32() -> Result<()> {
+    fn test_transform_scale_only_float32() -> Result<()> {
         let xml_content = r#"<data><item><value>100</value></item></data>"#;
 
         let config = config_from_yaml!(
@@ -3141,7 +3141,7 @@ mod tests {
     }
 
     #[test]
-    fn test_offset_only_float64() -> Result<()> {
+    fn test_transform_offset_only_float64() -> Result<()> {
         let xml_content = r#"<data><item><value>100</value></item></data>"#;
 
         let config = config_from_yaml!(
@@ -3168,7 +3168,7 @@ mod tests {
     }
 
     #[test]
-    fn test_offset_only_float32() -> Result<()> {
+    fn test_transform_offset_only_float32() -> Result<()> {
         let xml_content = r#"<data><item><value>100</value></item></data>"#;
 
         let config = config_from_yaml!(
@@ -3195,7 +3195,7 @@ mod tests {
     }
 
     #[test]
-    fn test_negative_scale() -> Result<()> {
+    fn test_transform_scale_negative_value() -> Result<()> {
         let xml_content = r#"<data><item><value>100</value></item></data>"#;
 
         let config = config_from_yaml!(
@@ -3222,7 +3222,7 @@ mod tests {
     }
 
     #[test]
-    fn test_negative_offset() -> Result<()> {
+    fn test_transform_offset_negative_value() -> Result<()> {
         let xml_content = r#"<data><item><value>100</value></item></data>"#;
 
         let config = config_from_yaml!(
@@ -3249,7 +3249,7 @@ mod tests {
     }
 
     #[test]
-    fn test_zero_scale() -> Result<()> {
+    fn test_transform_scale_zero_value() -> Result<()> {
         let xml_content = r#"<data><item><value>100</value></item></data>"#;
 
         let config = config_from_yaml!(
@@ -3276,7 +3276,7 @@ mod tests {
     }
 
     #[test]
-    fn test_very_small_scale() -> Result<()> {
+    fn test_transform_scale_very_small() -> Result<()> {
         let xml_content = r#"<data><item><value>1000000000</value></item></data>"#;
 
         let config = config_from_yaml!(
@@ -3303,7 +3303,7 @@ mod tests {
     }
 
     #[test]
-    fn test_very_large_scale() -> Result<()> {
+    fn test_transform_scale_very_large() -> Result<()> {
         let xml_content = r#"<data><item><value>0.000001</value></item></data>"#;
 
         let config = config_from_yaml!(
@@ -3332,7 +3332,7 @@ mod tests {
     // --- Float Edge Cases ---
 
     #[test]
-    fn test_float_scientific_notation() -> Result<()> {
+    fn test_dtype_float_scientific_notation() -> Result<()> {
         let xml_content = r#"
             <data>
                 <item><value>1.23e10</value></item>
@@ -3369,7 +3369,7 @@ mod tests {
     }
 
     #[test]
-    fn test_float_very_small_values() -> Result<()> {
+    fn test_dtype_float_very_small() -> Result<()> {
         let xml_content = r#"
             <data>
                 <item><value>1e-308</value></item>
@@ -3399,7 +3399,7 @@ mod tests {
     }
 
     #[test]
-    fn test_float_very_large_values() -> Result<()> {
+    fn test_dtype_float_very_large() -> Result<()> {
         let xml_content = r#"
             <data>
                 <item><value>1e308</value></item>
@@ -3431,7 +3431,7 @@ mod tests {
     // --- Unicode Tests ---
 
     #[test]
-    fn test_unicode_in_attribute_values() -> Result<()> {
+    fn test_unicode_attr_various_scripts() -> Result<()> {
         let xml_content = r#"
             <data>
                 <item name="日本語" type="中文">
@@ -3473,7 +3473,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unicode_emojis_in_text() -> Result<()> {
+    fn test_unicode_text_emojis() -> Result<()> {
         let xml_content = r#"
             <data>
                 <item><text>Hello 🌍 World 🎉</text></item>
@@ -3508,7 +3508,7 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_attribute_value() -> Result<()> {
+    fn test_attr_parse_empty_value() -> Result<()> {
         let xml_content = r#"
             <data>
                 <item id="" name="valid">
@@ -3545,7 +3545,7 @@ mod tests {
     }
 
     #[test]
-    fn test_whitespace_in_attribute_values() -> Result<()> {
+    fn test_attr_parse_whitespace_preserved() -> Result<()> {
         let xml_content = r#"
             <data>
                 <item name="  leading and trailing  ">
@@ -3577,7 +3577,7 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_attributes_on_element() -> Result<()> {
+    fn test_attr_parse_multiple_on_element() -> Result<()> {
         let xml_content = r#"
             <data>
                 <item a="1" b="2" c="3" d="4" e="5">
@@ -3630,7 +3630,7 @@ mod tests {
     // --- XML Comments and Processing Instructions ---
 
     #[test]
-    fn test_xml_comments_ignored() -> Result<()> {
+    fn test_parse_xml_features_comments_ignored() -> Result<()> {
         let xml_content = r#"
             <!-- This is a comment at the start -->
             <data>
@@ -3671,7 +3671,7 @@ mod tests {
     }
 
     #[test]
-    fn test_xml_declaration() -> Result<()> {
+    fn test_parse_xml_features_declaration() -> Result<()> {
         let xml_content = r#"<?xml version="1.0" encoding="UTF-8"?>
             <data>
                 <item><value>123</value></item>
@@ -3705,7 +3705,7 @@ mod tests {
     // This is by design - tables must have at least one field to produce output.
 
     #[test]
-    fn test_table_with_only_indices_not_in_output() -> Result<()> {
+    fn test_parse_table_indices_only_excluded() -> Result<()> {
         // Tables with no fields (only levels/indices) are not included in output
         let xml_content = r#"
             <data>
@@ -3755,7 +3755,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fields_at_root_level() -> Result<()> {
+    fn test_parse_structure_fields_at_root() -> Result<()> {
         // Test that fields can be defined at the root level (xml_path: /)
         let xml_content = r#"
             <?xml version="1.0" encoding="UTF-8"?>
@@ -3814,7 +3814,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fields_at_root_level_with_attributes() -> Result<()> {
+    fn test_parse_structure_root_with_attributes() -> Result<()> {
         // Test root level fields including attributes on the root element
         let xml_content = r#"
             <report id="RPT-001" status="final">
@@ -3862,7 +3862,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fields_at_root_level_with_deeply_nested_tables() -> Result<()> {
+    fn test_parse_structure_root_with_nested_tables() -> Result<()> {
         // Test root level fields combined with multiple levels of nested tables
         let xml_content = r#"
             <?xml version="1.0" encoding="UTF-8"?>
