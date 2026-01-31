@@ -73,8 +73,13 @@ where
                 )));
             }
         }
-    } else {
+    } else if field_config.nullable {
         builder.append_null();
+    } else {
+        return Err(Error::ParseError(format!(
+            "Missing value for non-nullable field '{}' at path {}",
+            field_config.name, field_config.xml_path
+        )));
     }
     Ok(())
 }
@@ -197,8 +202,13 @@ impl FieldBuilder {
                             )));
                         }
                     }
-                } else {
+                } else if self.field_config.nullable {
                     builder.append_null();
+                } else {
+                    return Err(Error::ParseError(format!(
+                        "Missing value for non-nullable field '{}' at path {}",
+                        self.field_config.name, self.field_config.xml_path
+                    )));
                 }
             }
             _ => {
@@ -405,6 +415,15 @@ impl XmlToArrowConverter {
         self.table_builders.contains_key(xml_path)
     }
 
+    /// Check if there's a root-level table (xml_path: /) that has fields defined.
+    fn has_root_table_with_fields(&self) -> bool {
+        let root_path = XmlPath::new("/");
+        self.table_builders
+            .get(&root_path)
+            .map(|tb| !tb.field_builders.is_empty())
+            .unwrap_or(false)
+    }
+
     fn current_table_builder_mut(&mut self) -> Result<Option<&mut TableBuilder>> {
         if let Some(table_path) = self.builder_stack.back() {
             let builder = self
@@ -437,8 +456,17 @@ impl XmlToArrowConverter {
     }
 
     fn parent_row_indices(&self) -> Result<Vec<u32>> {
+        let root_path = XmlPath::new("/");
         let mut indices = Vec::with_capacity(self.builder_stack.len());
         for table_path in self.builder_stack.iter() {
+            // Skip the root table (xml_path: /) when collecting parent indices.
+            // The root table is special - it represents the document root and shouldn't
+            // contribute to parent indices for child tables. Child tables use `levels`
+            // to specify which parent table indices they want, and the root table
+            // is not part of the XML element hierarchy.
+            if *table_path == root_path {
+                continue;
+            }
             let table_builder = self
                 .table_builders
                 .get(table_path)
@@ -519,6 +547,15 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
     let mut xml_path = XmlPath::new("/");
     let mut xml_to_arrow_converter = XmlToArrowConverter::from_config(config)?;
 
+    // Start the root-level table (xml_path: /) if it exists AND has fields defined.
+    // We only start it if it has fields, because adding it to the builder_stack
+    // would affect parent_row_indices for all nested tables, breaking their
+    // level indexing. Tables with xml_path: / and no fields are just used for
+    // hierarchy purposes and don't need to be on the stack.
+    if xml_to_arrow_converter.has_root_table_with_fields() {
+        xml_to_arrow_converter.start_table(&xml_path)?;
+    }
+
     // Use specialized parsing logic based on whether attribute parsing is required.
     // This avoids unnecessary attribute processing and Empty event handling
     // when attributes are not needed, improving performance.
@@ -574,6 +611,11 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                 xml_to_arrow_converter.set_field_value_for_current_table(xml_path, &text)?
             }
             Event::Text(e) => {
+                let text = e.into_inner();
+                let text = String::from_utf8_lossy(&text);
+                xml_to_arrow_converter.set_field_value_for_current_table(xml_path, &text)?
+            }
+            Event::CData(e) => {
                 let text = e.into_inner();
                 let text = String::from_utf8_lossy(&text);
                 xml_to_arrow_converter.set_field_value_for_current_table(xml_path, &text)?
@@ -2000,7 +2042,7 @@ mod tests {
                         data_type: Int8
             "#
         );
-        
+
         let result = parse_xml(xml_content.as_bytes(), &config);
         assert!(result.is_err(), "Int8 overflow (128) should fail");
         match result.unwrap_err() {
@@ -2008,7 +2050,10 @@ mod tests {
                 assert!(msg.contains("Failed to parse value"));
             }
             other_error => {
-                panic!("Expected ParseError for Int8 overflow, got: {:?}", other_error);
+                panic!(
+                    "Expected ParseError for Int8 overflow, got: {:?}",
+                    other_error
+                );
             }
         }
     }
@@ -2028,7 +2073,7 @@ mod tests {
                         data_type: UInt32
             "#
         );
-        
+
         let result = parse_xml(xml_content.as_bytes(), &config);
         assert!(result.is_err(), "UInt32 overflow should fail");
     }
@@ -2048,7 +2093,7 @@ mod tests {
                         data_type: Int64
             "#
         );
-        
+
         let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("test").unwrap();
         let array = batch
@@ -2057,7 +2102,7 @@ mod tests {
             .as_any()
             .downcast_ref::<Int64Array>()
             .unwrap();
-        
+
         assert_eq!(array.value(0), i64::MAX);
         Ok(())
     }
@@ -2083,7 +2128,7 @@ mod tests {
 
         let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("test").unwrap();
-        
+
         // Expected: (-100.5 * 2.0) + (-10.0) = -201.0 - 10.0 = -211.0
         let array = batch
             .column_by_name("value")
@@ -2091,7 +2136,7 @@ mod tests {
             .as_any()
             .downcast_ref::<Float64Array>()
             .unwrap();
-        
+
         assert!(abs_diff_eq!(array.value(0), -211.0, epsilon = 1e-10));
         Ok(())
     }
@@ -2171,30 +2216,36 @@ mod tests {
         let batch = record_batches.get("items").unwrap();
 
         // Verify row 0 has values
-        assert!(!batch
-            .column_by_name("int_val")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap()
-            .is_null(0));
+        assert!(
+            !batch
+                .column_by_name("int_val")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap()
+                .is_null(0)
+        );
 
         // Verify row 1 has nulls for all fields
-        assert!(batch
-            .column_by_name("int_val")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap()
-            .is_null(1));
+        assert!(
+            batch
+                .column_by_name("int_val")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap()
+                .is_null(1)
+        );
 
-        assert!(batch
-            .column_by_name("bool_val")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .unwrap()
-            .is_null(1));
+        assert!(
+            batch
+                .column_by_name("bool_val")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .unwrap()
+                .is_null(1)
+        );
 
         Ok(())
     }
@@ -2244,37 +2295,45 @@ mod tests {
         let batch = record_batches.get("items").unwrap();
 
         // Second row should have all nulls
-        assert!(batch
-            .column_by_name("int_val")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap()
-            .is_null(1));
+        assert!(
+            batch
+                .column_by_name("int_val")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap()
+                .is_null(1)
+        );
 
-        assert!(batch
-            .column_by_name("float_val")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap()
-            .is_null(1));
+        assert!(
+            batch
+                .column_by_name("float_val")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .is_null(1)
+        );
 
-        assert!(batch
-            .column_by_name("bool_val")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .unwrap()
-            .is_null(1));
+        assert!(
+            batch
+                .column_by_name("bool_val")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .unwrap()
+                .is_null(1)
+        );
 
-        assert!(batch
-            .column_by_name("str_val")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap()
-            .is_null(1));
+        assert!(
+            batch
+                .column_by_name("str_val")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .is_null(1)
+        );
 
         Ok(())
     }
@@ -2441,5 +2500,1557 @@ mod tests {
         } else {
             panic!("Expected UnsupportedConversion error for Utf8 offset");
         }
+    }
+
+    // --- CDATA Section Tests ---
+
+    #[test]
+    fn test_cdata_sections() -> Result<()> {
+        // CDATA sections are parsed and their content is captured
+        let xml_content = r#"
+            <data>
+                <item>
+                    <content><![CDATA[This is CDATA content]]></content>
+                </item>
+            </data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: content
+                        xml_path: /data/item/content
+                        data_type: Utf8
+                        nullable: true
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        assert_eq!(batch.num_rows(), 1);
+        assert_array_values!(batch, "content", &["This is CDATA content"], StringArray);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_cdata_with_special_characters() -> Result<()> {
+        // CDATA allows embedding special XML characters without escaping
+        let xml_content = r#"
+            <data>
+                <item>
+                    <content><![CDATA[<tag>Hello & World</tag>]]></content>
+                </item>
+            </data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: content
+                        xml_path: /data/item/content
+                        data_type: Utf8
+                        nullable: false
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        // Special characters inside CDATA are preserved literally
+        assert_array_values!(batch, "content", &["<tag>Hello & World</tag>"], StringArray);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_mixed_text_and_cdata() -> Result<()> {
+        // When mixing regular text with CDATA, both are captured and concatenated
+        let xml_content = r#"
+            <data>
+                <item><content>Hello <![CDATA[<World>]]>!</content></item>
+            </data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: content
+                        xml_path: /data/item/content
+                        data_type: Utf8
+                        nullable: false
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        // Both regular text and CDATA content are concatenated
+        assert_array_values!(batch, "content", &["Hello <World>!"], StringArray);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_multiple_cdata_sections() -> Result<()> {
+        // Multiple CDATA sections in the same element are concatenated
+        let xml_content = r#"
+            <data>
+                <item><content><![CDATA[First]]><![CDATA[Second]]></content></item>
+            </data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: content
+                        xml_path: /data/item/content
+                        data_type: Utf8
+                        nullable: false
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        assert_array_values!(batch, "content", &["FirstSecond"], StringArray);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_cdata_with_numeric_conversion() -> Result<()> {
+        // CDATA content can be converted to numeric types
+        let xml_content = r#"
+            <data>
+                <item><value><![CDATA[42]]></value></item>
+            </data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /data/item/value
+                        data_type: Int32
+                        nullable: false
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        let array = batch
+            .column_by_name("value")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap();
+        assert_eq!(array.value(0), 42);
+
+        Ok(())
+    }
+
+    // --- XML Namespace Tests ---
+
+    #[test]
+    fn test_xml_namespaces_default() -> Result<()> {
+        let xml_content = r#"
+            <data xmlns="http://example.com/default">
+                <item>
+                    <value>123</value>
+                </item>
+            </data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /data/item/value
+                        data_type: Int32
+                        nullable: false
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        assert_eq!(batch.num_rows(), 1);
+        assert_array_values!(batch, "value", &[123], Int32Array);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_xml_namespaces_prefixed() -> Result<()> {
+        let xml_content = r#"
+            <ns:data xmlns:ns="http://example.com/ns">
+                <ns:item>
+                    <ns:value>456</ns:value>
+                </ns:item>
+            </ns:data>
+        "#;
+
+        // The current implementation uses local names (without prefix),
+        // so namespaced elements should work without the prefix in the path
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /data/item/value
+                        data_type: Int32
+                        nullable: false
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        assert_eq!(batch.num_rows(), 1);
+        assert_array_values!(batch, "value", &[456], Int32Array);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_xml_namespaces_multiple() -> Result<()> {
+        let xml_content = r#"
+            <root xmlns:a="http://example.com/a" xmlns:b="http://example.com/b">
+                <a:item>
+                    <b:value>789</b:value>
+                </a:item>
+            </root>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /root
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /root/item/value
+                        data_type: Int32
+                        nullable: false
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        assert_eq!(batch.num_rows(), 1);
+        assert_array_values!(batch, "value", &[789], Int32Array);
+
+        Ok(())
+    }
+
+    // --- Non-nullable Field Tests ---
+
+    #[test]
+    fn test_non_nullable_string_missing_value() -> Result<()> {
+        // XML is missing the 'description' element for the second item
+        let xml_content = r#"
+            <data>
+                <item>
+                    <name>First</name>
+                    <description>Has description</description>
+                </item>
+                <item>
+                    <name>Second</name>
+                </item>
+            </data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: name
+                        xml_path: /data/item/name
+                        data_type: Utf8
+                        nullable: false
+                      - name: description
+                        xml_path: /data/item/description
+                        data_type: Utf8
+                        nullable: false
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        // For non-nullable Utf8, missing values become empty strings
+        assert_eq!(batch.num_rows(), 2);
+        assert_array_values!(batch, "name", &["First", "Second"], StringArray);
+        assert_array_values!(batch, "description", &["Has description", ""], StringArray);
+
+        // Verify the schema marks the field as non-nullable
+        let schema = batch.schema();
+        let field = schema.field_with_name("description").unwrap();
+        assert!(!field.is_nullable(), "Field should be marked non-nullable");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_non_nullable_numeric_missing_value_errors() {
+        // For non-nullable numeric fields, missing values should cause a parse error
+        // because we can't append null to a non-nullable numeric field
+        let xml_content = r#"
+            <data>
+                <item>
+                    <value></value>
+                </item>
+            </data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /data/item/value
+                        data_type: Int32
+                        nullable: false
+            "#
+        );
+
+        // Empty value for non-nullable Int32 should fail to parse
+        let result = parse_xml(xml_content.as_bytes(), &config);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let err_msg = format!("{:?}", err);
+        assert!(
+            err_msg.contains("Missing value for non-nullable field"),
+            "Expected 'Missing value for non-nullable field' error, got: {}",
+            err_msg
+        );
+    }
+
+    // --- Additional Numeric Overflow Tests ---
+
+    #[test]
+    fn test_numeric_overflow_int16() {
+        let xml_content = "<root><value>32768</value></root>"; // Max Int16 is 32767
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: test
+                    xml_path: /root
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /root/value
+                        data_type: Int16
+            "#
+        );
+
+        let result = parse_xml(xml_content.as_bytes(), &config);
+        assert!(result.is_err(), "Int16 overflow (32768) should fail");
+        match result.unwrap_err() {
+            Error::ParseError(msg) => assert!(msg.contains("Failed to parse")),
+            other => panic!("Expected ParseError, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_numeric_overflow_int16_negative() {
+        let xml_content = "<root><value>-32769</value></root>"; // Min Int16 is -32768
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: test
+                    xml_path: /root
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /root/value
+                        data_type: Int16
+            "#
+        );
+
+        let result = parse_xml(xml_content.as_bytes(), &config);
+        assert!(result.is_err(), "Int16 underflow (-32769) should fail");
+    }
+
+    #[test]
+    fn test_numeric_overflow_uint8() {
+        let xml_content = "<root><value>256</value></root>"; // Max UInt8 is 255
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: test
+                    xml_path: /root
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /root/value
+                        data_type: UInt8
+            "#
+        );
+
+        let result = parse_xml(xml_content.as_bytes(), &config);
+        assert!(result.is_err(), "UInt8 overflow (256) should fail");
+    }
+
+    #[test]
+    fn test_numeric_overflow_uint16() {
+        let xml_content = "<root><value>65536</value></root>"; // Max UInt16 is 65535
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: test
+                    xml_path: /root
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /root/value
+                        data_type: UInt16
+            "#
+        );
+
+        let result = parse_xml(xml_content.as_bytes(), &config);
+        assert!(result.is_err(), "UInt16 overflow (65536) should fail");
+    }
+
+    #[test]
+    fn test_numeric_overflow_int64() {
+        let xml_content = "<root><value>9223372036854775808</value></root>"; // Max Int64 + 1
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: test
+                    xml_path: /root
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /root/value
+                        data_type: Int64
+            "#
+        );
+
+        let result = parse_xml(xml_content.as_bytes(), &config);
+        assert!(result.is_err(), "Int64 overflow should fail");
+    }
+
+    #[test]
+    fn test_numeric_overflow_uint64() {
+        let xml_content = "<root><value>18446744073709551616</value></root>"; // Max UInt64 + 1
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: test
+                    xml_path: /root
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /root/value
+                        data_type: UInt64
+            "#
+        );
+
+        let result = parse_xml(xml_content.as_bytes(), &config);
+        assert!(result.is_err(), "UInt64 overflow should fail");
+    }
+
+    #[test]
+    fn test_numeric_negative_unsigned() {
+        let xml_content = "<root><value>-1</value></root>";
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: test
+                    xml_path: /root
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /root/value
+                        data_type: UInt32
+            "#
+        );
+
+        let result = parse_xml(xml_content.as_bytes(), &config);
+        assert!(
+            result.is_err(),
+            "Negative value for unsigned type should fail"
+        );
+    }
+
+    #[test]
+    fn test_numeric_boundary_values() -> Result<()> {
+        let xml_content = r#"
+            <data>
+                <item>
+                    <i8_min>-128</i8_min>
+                    <i8_max>127</i8_max>
+                    <u8_max>255</u8_max>
+                    <i16_min>-32768</i16_min>
+                    <i16_max>32767</i16_max>
+                    <u16_max>65535</u16_max>
+                    <i32_min>-2147483648</i32_min>
+                    <i32_max>2147483647</i32_max>
+                    <u32_max>4294967295</u32_max>
+                </item>
+            </data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: i8_min
+                        xml_path: /data/item/i8_min
+                        data_type: Int8
+                      - name: i8_max
+                        xml_path: /data/item/i8_max
+                        data_type: Int8
+                      - name: u8_max
+                        xml_path: /data/item/u8_max
+                        data_type: UInt8
+                      - name: i16_min
+                        xml_path: /data/item/i16_min
+                        data_type: Int16
+                      - name: i16_max
+                        xml_path: /data/item/i16_max
+                        data_type: Int16
+                      - name: u16_max
+                        xml_path: /data/item/u16_max
+                        data_type: UInt16
+                      - name: i32_min
+                        xml_path: /data/item/i32_min
+                        data_type: Int32
+                      - name: i32_max
+                        xml_path: /data/item/i32_max
+                        data_type: Int32
+                      - name: u32_max
+                        xml_path: /data/item/u32_max
+                        data_type: UInt32
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        assert_array_values!(batch, "i8_min", &[-128i8], Int8Array);
+        assert_array_values!(batch, "i8_max", &[127i8], Int8Array);
+        assert_array_values!(batch, "u8_max", &[255u8], UInt8Array);
+        assert_array_values!(batch, "i16_min", &[-32768i16], Int16Array);
+        assert_array_values!(batch, "i16_max", &[32767i16], Int16Array);
+        assert_array_values!(batch, "u16_max", &[65535u16], UInt16Array);
+        assert_array_values!(batch, "i32_min", &[-2147483648i32], Int32Array);
+        assert_array_values!(batch, "i32_max", &[2147483647i32], Int32Array);
+        assert_array_values!(batch, "u32_max", &[4294967295u32], UInt32Array);
+
+        Ok(())
+    }
+
+    // --- Scale and Offset Edge Cases ---
+
+    #[test]
+    fn test_scale_only_float64() -> Result<()> {
+        let xml_content = r#"<data><item><value>100</value></item></data>"#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /data/item/value
+                        data_type: Float64
+                        scale: 0.001
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        // Expected: 100 * 0.001 = 0.1
+        assert_array_approx_values!(batch, "value", &[0.1], Float64Array, 1e-10);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_scale_only_float32() -> Result<()> {
+        let xml_content = r#"<data><item><value>100</value></item></data>"#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /data/item/value
+                        data_type: Float32
+                        scale: 0.001
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        // Expected: 100 * 0.001 = 0.1
+        assert_array_approx_values!(batch, "value", &[0.1f32], Float32Array, 1e-6);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_offset_only_float64() -> Result<()> {
+        let xml_content = r#"<data><item><value>100</value></item></data>"#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /data/item/value
+                        data_type: Float64
+                        offset: 273.15
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        // Expected: 100 + 273.15 = 373.15
+        assert_array_approx_values!(batch, "value", &[373.15], Float64Array, 1e-10);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_offset_only_float32() -> Result<()> {
+        let xml_content = r#"<data><item><value>100</value></item></data>"#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /data/item/value
+                        data_type: Float32
+                        offset: 273.15
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        // Expected: 100 + 273.15 = 373.15
+        assert_array_approx_values!(batch, "value", &[373.15f32], Float32Array, 1e-4);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_negative_scale() -> Result<()> {
+        let xml_content = r#"<data><item><value>100</value></item></data>"#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /data/item/value
+                        data_type: Float64
+                        scale: -1.0
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        // Expected: 100 * -1.0 = -100
+        assert_array_approx_values!(batch, "value", &[-100.0], Float64Array, 1e-10);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_negative_offset() -> Result<()> {
+        let xml_content = r#"<data><item><value>100</value></item></data>"#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /data/item/value
+                        data_type: Float64
+                        offset: -50.0
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        // Expected: 100 + (-50.0) = 50
+        assert_array_approx_values!(batch, "value", &[50.0], Float64Array, 1e-10);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_zero_scale() -> Result<()> {
+        let xml_content = r#"<data><item><value>100</value></item></data>"#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /data/item/value
+                        data_type: Float64
+                        scale: 0.0
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        // Expected: 100 * 0.0 = 0.0
+        assert_array_approx_values!(batch, "value", &[0.0], Float64Array, 1e-10);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_very_small_scale() -> Result<()> {
+        let xml_content = r#"<data><item><value>1000000000</value></item></data>"#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /data/item/value
+                        data_type: Float64
+                        scale: 1e-9
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        // Expected: 1000000000 * 1e-9 = 1.0
+        assert_array_approx_values!(batch, "value", &[1.0], Float64Array, 1e-10);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_very_large_scale() -> Result<()> {
+        let xml_content = r#"<data><item><value>0.000001</value></item></data>"#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /data/item/value
+                        data_type: Float64
+                        scale: 1e9
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        // Expected: 0.000001 * 1e9 = 1000.0
+        assert_array_approx_values!(batch, "value", &[1000.0], Float64Array, 1e-6);
+
+        Ok(())
+    }
+
+    // --- Float Edge Cases ---
+
+    #[test]
+    fn test_float_scientific_notation() -> Result<()> {
+        let xml_content = r#"
+            <data>
+                <item><value>1.23e10</value></item>
+                <item><value>4.56E-5</value></item>
+                <item><value>-7.89e+3</value></item>
+            </data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /data/item/value
+                        data_type: Float64
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        assert_array_approx_values!(
+            batch,
+            "value",
+            &[1.23e10, 4.56e-5, -7.89e3],
+            Float64Array,
+            1e-10
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_float_very_small_values() -> Result<()> {
+        let xml_content = r#"
+            <data>
+                <item><value>1e-308</value></item>
+                <item><value>-1e-308</value></item>
+            </data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /data/item/value
+                        data_type: Float64
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        assert_array_approx_values!(batch, "value", &[1e-308, -1e-308], Float64Array, 1e-318);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_float_very_large_values() -> Result<()> {
+        let xml_content = r#"
+            <data>
+                <item><value>1e308</value></item>
+                <item><value>-1e308</value></item>
+            </data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /data/item/value
+                        data_type: Float64
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        assert_array_approx_values!(batch, "value", &[1e308, -1e308], Float64Array, 1e298);
+
+        Ok(())
+    }
+
+    // --- Unicode Tests ---
+
+    #[test]
+    fn test_unicode_in_attribute_values() -> Result<()> {
+        let xml_content = r#"
+            <data>
+                <item name="日本語" type="中文">
+                    <value>1</value>
+                </item>
+                <item name="한국어" type="العربية">
+                    <value>2</value>
+                </item>
+            </data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: name
+                        xml_path: /data/item/@name
+                        data_type: Utf8
+                      - name: type
+                        xml_path: /data/item/@type
+                        data_type: Utf8
+                      - name: value
+                        xml_path: /data/item/value
+                        data_type: Int32
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        assert_eq!(batch.num_rows(), 2);
+        assert_array_values!(batch, "name", &["日本語", "한국어"], StringArray);
+        assert_array_values!(batch, "type", &["中文", "العربية"], StringArray);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_unicode_emojis_in_text() -> Result<()> {
+        let xml_content = r#"
+            <data>
+                <item><text>Hello 🌍 World 🎉</text></item>
+                <item><text>🚀 Rocket Science 🔬</text></item>
+            </data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: text
+                        xml_path: /data/item/text
+                        data_type: Utf8
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        assert_array_values!(
+            batch,
+            "text",
+            &["Hello 🌍 World 🎉", "🚀 Rocket Science 🔬"],
+            StringArray
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_empty_attribute_value() -> Result<()> {
+        let xml_content = r#"
+            <data>
+                <item id="" name="valid">
+                    <value>1</value>
+                </item>
+            </data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: id
+                        xml_path: /data/item/@id
+                        data_type: Utf8
+                        nullable: true
+                      - name: name
+                        xml_path: /data/item/@name
+                        data_type: Utf8
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        // Empty string attribute should be empty string, not null
+        assert_array_values!(batch, "id", &[""], StringArray);
+        assert_array_values!(batch, "name", &["valid"], StringArray);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_whitespace_in_attribute_values() -> Result<()> {
+        let xml_content = r#"
+            <data>
+                <item name="  leading and trailing  ">
+                    <value>1</value>
+                </item>
+            </data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: name
+                        xml_path: /data/item/@name
+                        data_type: Utf8
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        // Attribute values preserve whitespace
+        assert_array_values!(batch, "name", &["  leading and trailing  "], StringArray);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_multiple_attributes_on_element() -> Result<()> {
+        let xml_content = r#"
+            <data>
+                <item a="1" b="2" c="3" d="4" e="5">
+                    <value>test</value>
+                </item>
+            </data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: a
+                        xml_path: /data/item/@a
+                        data_type: Int32
+                      - name: b
+                        xml_path: /data/item/@b
+                        data_type: Int32
+                      - name: c
+                        xml_path: /data/item/@c
+                        data_type: Int32
+                      - name: d
+                        xml_path: /data/item/@d
+                        data_type: Int32
+                      - name: e
+                        xml_path: /data/item/@e
+                        data_type: Int32
+                      - name: value
+                        xml_path: /data/item/value
+                        data_type: Utf8
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        assert_array_values!(batch, "a", &[1], Int32Array);
+        assert_array_values!(batch, "b", &[2], Int32Array);
+        assert_array_values!(batch, "c", &[3], Int32Array);
+        assert_array_values!(batch, "d", &[4], Int32Array);
+        assert_array_values!(batch, "e", &[5], Int32Array);
+        assert_array_values!(batch, "value", &["test"], StringArray);
+
+        Ok(())
+    }
+
+    // --- XML Comments and Processing Instructions ---
+
+    #[test]
+    fn test_xml_comments_ignored() -> Result<()> {
+        let xml_content = r#"
+            <!-- This is a comment at the start -->
+            <data>
+                <!-- Comment before item -->
+                <item>
+                    <!-- Comment inside item -->
+                    <value>42</value>
+                    <!-- Comment after value -->
+                </item>
+                <!-- Comment between items -->
+                <item>
+                    <value>43</value>
+                </item>
+            </data>
+            <!-- Comment at the end -->
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /data/item/value
+                        data_type: Int32
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        assert_eq!(batch.num_rows(), 2);
+        assert_array_values!(batch, "value", &[42, 43], Int32Array);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_xml_declaration() -> Result<()> {
+        let xml_content = r#"<?xml version="1.0" encoding="UTF-8"?>
+            <data>
+                <item><value>123</value></item>
+            </data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /data/item/value
+                        data_type: Int32
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        assert_eq!(batch.num_rows(), 1);
+        assert_array_values!(batch, "value", &[123], Int32Array);
+
+        Ok(())
+    }
+
+    // --- Tables with Only Indices (no fields) ---
+    // NOTE: Tables with no fields are not included in the output.
+    // This is by design - tables must have at least one field to produce output.
+
+    #[test]
+    fn test_table_with_only_indices_not_in_output() -> Result<()> {
+        // Tables with no fields (only levels/indices) are not included in output
+        let xml_content = r#"
+            <data>
+                <group>
+                    <item><value>1</value></item>
+                    <item><value>2</value></item>
+                </group>
+                <group>
+                    <item><value>3</value></item>
+                </group>
+            </data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: groups
+                    xml_path: /data
+                    levels: ["group"]
+                    fields: []
+                  - name: items
+                    xml_path: /data/group
+                    levels: ["group", "item"]
+                    fields:
+                      - name: value
+                        xml_path: /data/group/item/value
+                        data_type: Int32
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+
+        // Groups table with no fields is NOT included in output
+        assert!(
+            !record_batches.contains_key("groups"),
+            "Tables with no fields should not be in output"
+        );
+
+        // Items table should have group index, item index, and value
+        let items_batch = record_batches.get("items").unwrap();
+        assert_eq!(items_batch.num_rows(), 3);
+        assert_array_values!(items_batch, "<group>", &[0, 0, 1], UInt32Array);
+        assert_array_values!(items_batch, "<item>", &[0, 1, 0], UInt32Array);
+        assert_array_values!(items_batch, "value", &[1, 2, 3], Int32Array);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_fields_at_root_level() -> Result<()> {
+        // Test that fields can be defined at the root level (xml_path: /)
+        let xml_content = r#"
+            <?xml version="1.0" encoding="UTF-8"?>
+            <document>
+                <header>
+                    <title>Test Document</title>
+                    <version>1.0</version>
+                </header>
+                <items>
+                    <item><value>100</value></item>
+                    <item><value>200</value></item>
+                </items>
+            </document>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: document
+                    xml_path: /
+                    levels: []
+                    fields:
+                      - name: title
+                        xml_path: /document/header/title
+                        data_type: Utf8
+                        nullable: false
+                      - name: version
+                        xml_path: /document/header/version
+                        data_type: Utf8
+                        nullable: false
+                  - name: items
+                    xml_path: /document/items
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /document/items/item/value
+                        data_type: Int32
+                        nullable: false
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+
+        // Check the root-level document table
+        let doc_batch = record_batches.get("document").unwrap();
+        assert_eq!(doc_batch.num_rows(), 1);
+        assert_array_values!(doc_batch, "title", &["Test Document"], StringArray);
+        assert_array_values!(doc_batch, "version", &["1.0"], StringArray);
+
+        // Check the items table
+        let items_batch = record_batches.get("items").unwrap();
+        assert_eq!(items_batch.num_rows(), 2);
+        assert_array_values!(items_batch, "value", &[100, 200], Int32Array);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_fields_at_root_level_with_attributes() -> Result<()> {
+        // Test root level fields including attributes on the root element
+        let xml_content = r#"
+            <report id="RPT-001" status="final">
+                <title>Monthly Report</title>
+                <author>John Doe</author>
+            </report>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: report
+                    xml_path: /
+                    levels: []
+                    fields:
+                      - name: report_id
+                        xml_path: /report/@id
+                        data_type: Utf8
+                        nullable: false
+                      - name: status
+                        xml_path: /report/@status
+                        data_type: Utf8
+                        nullable: false
+                      - name: title
+                        xml_path: /report/title
+                        data_type: Utf8
+                        nullable: false
+                      - name: author
+                        xml_path: /report/author
+                        data_type: Utf8
+                        nullable: false
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+
+        let report_batch = record_batches.get("report").unwrap();
+        assert_eq!(report_batch.num_rows(), 1);
+        assert_array_values!(report_batch, "report_id", &["RPT-001"], StringArray);
+        assert_array_values!(report_batch, "status", &["final"], StringArray);
+        assert_array_values!(report_batch, "title", &["Monthly Report"], StringArray);
+        assert_array_values!(report_batch, "author", &["John Doe"], StringArray);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_fields_at_root_level_with_deeply_nested_tables() -> Result<()> {
+        // Test root level fields combined with multiple levels of nested tables
+        let xml_content = r#"
+            <?xml version="1.0" encoding="UTF-8"?>
+            <catalog version="2.0" generated="2024-01-15">
+                <metadata>
+                    <name>Product Catalog</name>
+                    <region>North America</region>
+                </metadata>
+                <categories>
+                    <category id="CAT-1">
+                        <name>Electronics</name>
+                        <products>
+                            <product sku="ELEC-001">
+                                <name>Laptop</name>
+                                <price>999.99</price>
+                                <variants>
+                                    <variant color="silver" stock="10"/>
+                                    <variant color="black" stock="5"/>
+                                </variants>
+                            </product>
+                            <product sku="ELEC-002">
+                                <name>Phone</name>
+                                <price>599.99</price>
+                                <variants>
+                                    <variant color="white" stock="20"/>
+                                </variants>
+                            </product>
+                        </products>
+                    </category>
+                    <category id="CAT-2">
+                        <name>Books</name>
+                        <products>
+                            <product sku="BOOK-001">
+                                <name>Rust Programming</name>
+                                <price>49.99</price>
+                                <variants>
+                                    <variant color="n/a" stock="100"/>
+                                </variants>
+                            </product>
+                        </products>
+                    </category>
+                </categories>
+            </catalog>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: catalog
+                    xml_path: /
+                    levels: []
+                    fields:
+                      - name: version
+                        xml_path: /catalog/@version
+                        data_type: Utf8
+                        nullable: false
+                      - name: generated
+                        xml_path: /catalog/@generated
+                        data_type: Utf8
+                        nullable: false
+                      - name: catalog_name
+                        xml_path: /catalog/metadata/name
+                        data_type: Utf8
+                        nullable: false
+                      - name: region
+                        xml_path: /catalog/metadata/region
+                        data_type: Utf8
+                        nullable: false
+                  - name: categories
+                    xml_path: /catalog/categories
+                    levels:
+                      - category
+                    fields:
+                      - name: category_id
+                        xml_path: /catalog/categories/category/@id
+                        data_type: Utf8
+                        nullable: false
+                      - name: category_name
+                        xml_path: /catalog/categories/category/name
+                        data_type: Utf8
+                        nullable: false
+                  - name: products
+                    xml_path: /catalog/categories/category/products
+                    levels:
+                      - category
+                      - product
+                    fields:
+                      - name: sku
+                        xml_path: /catalog/categories/category/products/product/@sku
+                        data_type: Utf8
+                        nullable: false
+                      - name: product_name
+                        xml_path: /catalog/categories/category/products/product/name
+                        data_type: Utf8
+                        nullable: false
+                      - name: price
+                        xml_path: /catalog/categories/category/products/product/price
+                        data_type: Float64
+                        nullable: false
+                  - name: variants
+                    xml_path: /catalog/categories/category/products/product/variants
+                    levels:
+                      - category
+                      - product
+                      - variant
+                    fields:
+                      - name: color
+                        xml_path: /catalog/categories/category/products/product/variants/variant/@color
+                        data_type: Utf8
+                        nullable: false
+                      - name: stock
+                        xml_path: /catalog/categories/category/products/product/variants/variant/@stock
+                        data_type: Int32
+                        nullable: false
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+
+        // Check the root-level catalog table
+        let catalog_batch = record_batches.get("catalog").unwrap();
+        assert_eq!(catalog_batch.num_rows(), 1);
+        assert_array_values!(catalog_batch, "version", &["2.0"], StringArray);
+        assert_array_values!(catalog_batch, "generated", &["2024-01-15"], StringArray);
+        assert_array_values!(
+            catalog_batch,
+            "catalog_name",
+            &["Product Catalog"],
+            StringArray
+        );
+        assert_array_values!(catalog_batch, "region", &["North America"], StringArray);
+
+        // Check the categories table (2 categories)
+        let categories_batch = record_batches.get("categories").unwrap();
+        assert_eq!(categories_batch.num_rows(), 2);
+        assert_array_values!(categories_batch, "<category>", &[0, 1], UInt32Array);
+        assert_array_values!(
+            categories_batch,
+            "category_id",
+            &["CAT-1", "CAT-2"],
+            StringArray
+        );
+        assert_array_values!(
+            categories_batch,
+            "category_name",
+            &["Electronics", "Books"],
+            StringArray
+        );
+
+        // Check the products table (3 products total: 2 in Electronics, 1 in Books)
+        let products_batch = record_batches.get("products").unwrap();
+        assert_eq!(products_batch.num_rows(), 3);
+        assert_array_values!(products_batch, "<category>", &[0, 0, 1], UInt32Array);
+        assert_array_values!(products_batch, "<product>", &[0, 1, 0], UInt32Array);
+        assert_array_values!(
+            products_batch,
+            "sku",
+            &["ELEC-001", "ELEC-002", "BOOK-001"],
+            StringArray
+        );
+        assert_array_values!(
+            products_batch,
+            "product_name",
+            &["Laptop", "Phone", "Rust Programming"],
+            StringArray
+        );
+        assert_array_approx_values!(
+            products_batch,
+            "price",
+            &[999.99, 599.99, 49.99],
+            Float64Array,
+            1e-10
+        );
+
+        // Check the variants table (4 variants total)
+        let variants_batch = record_batches.get("variants").unwrap();
+        assert_eq!(variants_batch.num_rows(), 4);
+        assert_array_values!(variants_batch, "<category>", &[0, 0, 0, 1], UInt32Array);
+        assert_array_values!(variants_batch, "<product>", &[0, 0, 1, 0], UInt32Array);
+        assert_array_values!(variants_batch, "<variant>", &[0, 1, 0, 0], UInt32Array);
+        assert_array_values!(
+            variants_batch,
+            "color",
+            &["silver", "black", "white", "n/a"],
+            StringArray
+        );
+        assert_array_values!(variants_batch, "stock", &[10, 5, 20, 100], Int32Array);
+
+        Ok(())
     }
 }
