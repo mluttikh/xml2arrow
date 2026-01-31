@@ -415,6 +415,15 @@ impl XmlToArrowConverter {
         self.table_builders.contains_key(xml_path)
     }
 
+    /// Check if there's a root-level table (xml_path: /) that has fields defined.
+    fn has_root_table_with_fields(&self) -> bool {
+        let root_path = XmlPath::new("/");
+        self.table_builders
+            .get(&root_path)
+            .map(|tb| !tb.field_builders.is_empty())
+            .unwrap_or(false)
+    }
+
     fn current_table_builder_mut(&mut self) -> Result<Option<&mut TableBuilder>> {
         if let Some(table_path) = self.builder_stack.back() {
             let builder = self
@@ -447,8 +456,17 @@ impl XmlToArrowConverter {
     }
 
     fn parent_row_indices(&self) -> Result<Vec<u32>> {
+        let root_path = XmlPath::new("/");
         let mut indices = Vec::with_capacity(self.builder_stack.len());
         for table_path in self.builder_stack.iter() {
+            // Skip the root table (xml_path: /) when collecting parent indices.
+            // The root table is special - it represents the document root and shouldn't
+            // contribute to parent indices for child tables. Child tables use `levels`
+            // to specify which parent table indices they want, and the root table
+            // is not part of the XML element hierarchy.
+            if *table_path == root_path {
+                continue;
+            }
             let table_builder = self
                 .table_builders
                 .get(table_path)
@@ -528,6 +546,15 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
     }
     let mut xml_path = XmlPath::new("/");
     let mut xml_to_arrow_converter = XmlToArrowConverter::from_config(config)?;
+
+    // Start the root-level table (xml_path: /) if it exists AND has fields defined.
+    // We only start it if it has fields, because adding it to the builder_stack
+    // would affect parent_row_indices for all nested tables, breaking their
+    // level indexing. Tables with xml_path: / and no fields are just used for
+    // hierarchy purposes and don't need to be on the stack.
+    if xml_to_arrow_converter.has_root_table_with_fields() {
+        xml_to_arrow_converter.start_table(&xml_path)?;
+    }
 
     // Use specialized parsing logic based on whether attribute parsing is required.
     // This avoids unnecessary attribute processing and Empty event handling
@@ -3723,6 +3750,306 @@ mod tests {
         assert_array_values!(items_batch, "<group>", &[0, 0, 1], UInt32Array);
         assert_array_values!(items_batch, "<item>", &[0, 1, 0], UInt32Array);
         assert_array_values!(items_batch, "value", &[1, 2, 3], Int32Array);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_fields_at_root_level() -> Result<()> {
+        // Test that fields can be defined at the root level (xml_path: /)
+        let xml_content = r#"
+            <?xml version="1.0" encoding="UTF-8"?>
+            <document>
+                <header>
+                    <title>Test Document</title>
+                    <version>1.0</version>
+                </header>
+                <items>
+                    <item><value>100</value></item>
+                    <item><value>200</value></item>
+                </items>
+            </document>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: document
+                    xml_path: /
+                    levels: []
+                    fields:
+                      - name: title
+                        xml_path: /document/header/title
+                        data_type: Utf8
+                        nullable: false
+                      - name: version
+                        xml_path: /document/header/version
+                        data_type: Utf8
+                        nullable: false
+                  - name: items
+                    xml_path: /document/items
+                    levels: []
+                    fields:
+                      - name: value
+                        xml_path: /document/items/item/value
+                        data_type: Int32
+                        nullable: false
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+
+        // Check the root-level document table
+        let doc_batch = record_batches.get("document").unwrap();
+        assert_eq!(doc_batch.num_rows(), 1);
+        assert_array_values!(doc_batch, "title", &["Test Document"], StringArray);
+        assert_array_values!(doc_batch, "version", &["1.0"], StringArray);
+
+        // Check the items table
+        let items_batch = record_batches.get("items").unwrap();
+        assert_eq!(items_batch.num_rows(), 2);
+        assert_array_values!(items_batch, "value", &[100, 200], Int32Array);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_fields_at_root_level_with_attributes() -> Result<()> {
+        // Test root level fields including attributes on the root element
+        let xml_content = r#"
+            <report id="RPT-001" status="final">
+                <title>Monthly Report</title>
+                <author>John Doe</author>
+            </report>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: report
+                    xml_path: /
+                    levels: []
+                    fields:
+                      - name: report_id
+                        xml_path: /report/@id
+                        data_type: Utf8
+                        nullable: false
+                      - name: status
+                        xml_path: /report/@status
+                        data_type: Utf8
+                        nullable: false
+                      - name: title
+                        xml_path: /report/title
+                        data_type: Utf8
+                        nullable: false
+                      - name: author
+                        xml_path: /report/author
+                        data_type: Utf8
+                        nullable: false
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+
+        let report_batch = record_batches.get("report").unwrap();
+        assert_eq!(report_batch.num_rows(), 1);
+        assert_array_values!(report_batch, "report_id", &["RPT-001"], StringArray);
+        assert_array_values!(report_batch, "status", &["final"], StringArray);
+        assert_array_values!(report_batch, "title", &["Monthly Report"], StringArray);
+        assert_array_values!(report_batch, "author", &["John Doe"], StringArray);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_fields_at_root_level_with_deeply_nested_tables() -> Result<()> {
+        // Test root level fields combined with multiple levels of nested tables
+        let xml_content = r#"
+            <?xml version="1.0" encoding="UTF-8"?>
+            <catalog version="2.0" generated="2024-01-15">
+                <metadata>
+                    <name>Product Catalog</name>
+                    <region>North America</region>
+                </metadata>
+                <categories>
+                    <category id="CAT-1">
+                        <name>Electronics</name>
+                        <products>
+                            <product sku="ELEC-001">
+                                <name>Laptop</name>
+                                <price>999.99</price>
+                                <variants>
+                                    <variant color="silver" stock="10"/>
+                                    <variant color="black" stock="5"/>
+                                </variants>
+                            </product>
+                            <product sku="ELEC-002">
+                                <name>Phone</name>
+                                <price>599.99</price>
+                                <variants>
+                                    <variant color="white" stock="20"/>
+                                </variants>
+                            </product>
+                        </products>
+                    </category>
+                    <category id="CAT-2">
+                        <name>Books</name>
+                        <products>
+                            <product sku="BOOK-001">
+                                <name>Rust Programming</name>
+                                <price>49.99</price>
+                                <variants>
+                                    <variant color="n/a" stock="100"/>
+                                </variants>
+                            </product>
+                        </products>
+                    </category>
+                </categories>
+            </catalog>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                  - name: catalog
+                    xml_path: /
+                    levels: []
+                    fields:
+                      - name: version
+                        xml_path: /catalog/@version
+                        data_type: Utf8
+                        nullable: false
+                      - name: generated
+                        xml_path: /catalog/@generated
+                        data_type: Utf8
+                        nullable: false
+                      - name: catalog_name
+                        xml_path: /catalog/metadata/name
+                        data_type: Utf8
+                        nullable: false
+                      - name: region
+                        xml_path: /catalog/metadata/region
+                        data_type: Utf8
+                        nullable: false
+                  - name: categories
+                    xml_path: /catalog/categories
+                    levels:
+                      - category
+                    fields:
+                      - name: category_id
+                        xml_path: /catalog/categories/category/@id
+                        data_type: Utf8
+                        nullable: false
+                      - name: category_name
+                        xml_path: /catalog/categories/category/name
+                        data_type: Utf8
+                        nullable: false
+                  - name: products
+                    xml_path: /catalog/categories/category/products
+                    levels:
+                      - category
+                      - product
+                    fields:
+                      - name: sku
+                        xml_path: /catalog/categories/category/products/product/@sku
+                        data_type: Utf8
+                        nullable: false
+                      - name: product_name
+                        xml_path: /catalog/categories/category/products/product/name
+                        data_type: Utf8
+                        nullable: false
+                      - name: price
+                        xml_path: /catalog/categories/category/products/product/price
+                        data_type: Float64
+                        nullable: false
+                  - name: variants
+                    xml_path: /catalog/categories/category/products/product/variants
+                    levels:
+                      - category
+                      - product
+                      - variant
+                    fields:
+                      - name: color
+                        xml_path: /catalog/categories/category/products/product/variants/variant/@color
+                        data_type: Utf8
+                        nullable: false
+                      - name: stock
+                        xml_path: /catalog/categories/category/products/product/variants/variant/@stock
+                        data_type: Int32
+                        nullable: false
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+
+        // Check the root-level catalog table
+        let catalog_batch = record_batches.get("catalog").unwrap();
+        assert_eq!(catalog_batch.num_rows(), 1);
+        assert_array_values!(catalog_batch, "version", &["2.0"], StringArray);
+        assert_array_values!(catalog_batch, "generated", &["2024-01-15"], StringArray);
+        assert_array_values!(
+            catalog_batch,
+            "catalog_name",
+            &["Product Catalog"],
+            StringArray
+        );
+        assert_array_values!(catalog_batch, "region", &["North America"], StringArray);
+
+        // Check the categories table (2 categories)
+        let categories_batch = record_batches.get("categories").unwrap();
+        assert_eq!(categories_batch.num_rows(), 2);
+        assert_array_values!(categories_batch, "<category>", &[0, 1], UInt32Array);
+        assert_array_values!(
+            categories_batch,
+            "category_id",
+            &["CAT-1", "CAT-2"],
+            StringArray
+        );
+        assert_array_values!(
+            categories_batch,
+            "category_name",
+            &["Electronics", "Books"],
+            StringArray
+        );
+
+        // Check the products table (3 products total: 2 in Electronics, 1 in Books)
+        let products_batch = record_batches.get("products").unwrap();
+        assert_eq!(products_batch.num_rows(), 3);
+        assert_array_values!(products_batch, "<category>", &[0, 0, 1], UInt32Array);
+        assert_array_values!(products_batch, "<product>", &[0, 1, 0], UInt32Array);
+        assert_array_values!(
+            products_batch,
+            "sku",
+            &["ELEC-001", "ELEC-002", "BOOK-001"],
+            StringArray
+        );
+        assert_array_values!(
+            products_batch,
+            "product_name",
+            &["Laptop", "Phone", "Rust Programming"],
+            StringArray
+        );
+        assert_array_approx_values!(
+            products_batch,
+            "price",
+            &[999.99, 599.99, 49.99],
+            Float64Array,
+            1e-10
+        );
+
+        // Check the variants table (4 variants total)
+        let variants_batch = record_batches.get("variants").unwrap();
+        assert_eq!(variants_batch.num_rows(), 4);
+        assert_array_values!(variants_batch, "<category>", &[0, 0, 0, 1], UInt32Array);
+        assert_array_values!(variants_batch, "<product>", &[0, 0, 1, 0], UInt32Array);
+        assert_array_values!(variants_batch, "<variant>", &[0, 1, 0, 0], UInt32Array);
+        assert_array_values!(
+            variants_batch,
+            "color",
+            &["silver", "black", "white", "n/a"],
+            StringArray
+        );
+        assert_array_values!(variants_batch, "stock", &[10, 5, 20, 100], Int32Array);
 
         Ok(())
     }
