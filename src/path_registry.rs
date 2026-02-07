@@ -136,22 +136,22 @@ impl PathRegistry {
         self.children.get(parent.index())?.get(name).copied()
     }
 
-    /// Gets information about a node.
+    /// Returns the table index if this node represents a table.
     #[inline]
-    pub fn get_node_info(&self, node_id: PathNodeId) -> &PathNodeInfo {
-        &self.node_info[node_id.index()]
+    pub fn table_at(&self, node_id: PathNodeId) -> Option<usize> {
+        self.node_info[node_id.index()].table_index
+    }
+
+    /// Returns the field indices for this node.
+    #[inline]
+    pub fn fields_at(&self, node_id: PathNodeId) -> &[(usize, usize)] {
+        &self.node_info[node_id.index()].field_indices
     }
 
     /// Returns true if the given node represents a table path.
     #[inline]
     pub fn is_table_path(&self, node_id: PathNodeId) -> bool {
         self.node_info[node_id.index()].is_table()
-    }
-
-    /// Returns the table index if this node represents a table.
-    #[inline]
-    pub fn get_table_index(&self, node_id: PathNodeId) -> Option<usize> {
-        self.node_info[node_id.index()].table_index
     }
 
     /// Returns the root node info.
@@ -236,11 +236,7 @@ impl PathTracker {
     #[inline]
     pub fn current(&self) -> Option<PathNodeId> {
         let (node_id, is_known) = self.node_stack.last().copied().unwrap();
-        if is_known {
-            Some(node_id)
-        } else {
-            None
-        }
+        if is_known { Some(node_id) } else { None }
     }
 
     /// Returns the current node ID, or ROOT if unknown.
@@ -361,8 +357,8 @@ mod tests {
 
         assert!(registry.is_table_path(items_node));
         assert!(registry.is_table_path(metadata_node));
-        assert_eq!(registry.get_table_index(items_node), Some(0));
-        assert_eq!(registry.get_table_index(metadata_node), Some(1));
+        assert_eq!(registry.table_at(items_node), Some(0));
+        assert_eq!(registry.table_at(metadata_node), Some(1));
     }
 
     #[test]
@@ -381,11 +377,12 @@ mod tests {
         let item_node = registry.get_child(items_node, &item_atom).unwrap();
         let name_node = registry.get_child(item_node, &name_atom).unwrap();
 
-        let info = registry.get_node_info(name_node);
-        assert!(!info.is_table());
-        assert!(info.has_fields());
-        assert_eq!(info.field_indices.len(), 1);
-        assert_eq!(info.field_indices[0], (0, 0)); // table 0, field 0
+        let table = registry.table_at(name_node);
+        let fields = registry.fields_at(name_node);
+        assert!(table.is_none());
+        assert!(!fields.is_empty());
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0], (0, 0)); // table 0, field 0
     }
 
     #[test]
@@ -460,7 +457,7 @@ mod tests {
 
         // Root path "/" should be a table
         assert!(registry.is_table_path(PathNodeId::ROOT));
-        assert_eq!(registry.get_table_index(PathNodeId::ROOT), Some(0));
+        assert_eq!(registry.table_at(PathNodeId::ROOT), Some(0));
     }
 
     #[test]
@@ -494,8 +491,8 @@ mod tests {
         let node = tracker.enter("@id", &registry);
         assert!(node.is_some());
 
-        let info = registry.get_node_info(node.unwrap());
-        assert!(info.has_fields());
-        assert_eq!(info.field_indices[0], (0, 0)); // table 0, field 0
+        let fields = registry.fields_at(node.unwrap());
+        assert!(!fields.is_empty());
+        assert_eq!(fields[0], (0, 0)); // table 0, field 0
     }
 }

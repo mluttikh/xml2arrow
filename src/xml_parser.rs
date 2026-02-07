@@ -442,7 +442,7 @@ impl XmlToArrowConverter {
 
     /// Check if there's a root-level table (xml_path: /) that has fields defined.
     fn has_root_table_with_fields(&self) -> bool {
-        if let Some(table_idx) = self.registry.get_table_index(PathNodeId::ROOT) {
+        if let Some(table_idx) = self.registry.table_at(PathNodeId::ROOT) {
             !self.table_builders[table_idx].field_builders.is_empty()
         } else {
             false
@@ -460,8 +460,8 @@ impl XmlToArrowConverter {
     /// Sets a field value for the current table using path node information.
     #[inline]
     pub fn set_field_value_for_node(&mut self, node_id: PathNodeId, value: &str) {
-        let info = self.registry.get_node_info(node_id);
-        if info.field_indices.is_empty() {
+        let field_indices = self.registry.fields_at(node_id);
+        if field_indices.is_empty() {
             return;
         }
 
@@ -470,7 +470,7 @@ impl XmlToArrowConverter {
             let current_table_idx = current_entry.table_idx;
 
             // Find matching field indices for the current table
-            for &(table_idx, field_idx) in &info.field_indices {
+            for &(table_idx, field_idx) in field_indices {
                 if table_idx == current_table_idx {
                     self.table_builders[table_idx].set_field_value_by_index(field_idx, value);
                 }
@@ -501,7 +501,7 @@ impl XmlToArrowConverter {
     }
 
     fn start_table(&mut self, node_id: PathNodeId) -> Result<()> {
-        if let Some(table_idx) = self.registry.get_table_index(node_id) {
+        if let Some(table_idx) = self.registry.table_at(node_id) {
             self.builder_stack
                 .push(TableStackEntry { table_idx, node_id });
             self.table_builders[table_idx].row_index = 0;
