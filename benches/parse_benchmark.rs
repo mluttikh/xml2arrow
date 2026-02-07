@@ -229,10 +229,12 @@ tables:
         xml_path: /document/data/sensors/sensor/measurements/measurement/value
         data_type: Float64
         nullable: false
+        scale: 0.001
       - name: temperature
         xml_path: /document/data/sensors/sensor/measurements/measurement/temperature
         data_type: Float64
         nullable: false
+        offset: 273.15
 "#,
     )
     .expect("Failed to parse config")

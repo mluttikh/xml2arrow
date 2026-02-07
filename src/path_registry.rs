@@ -236,7 +236,11 @@ impl PathTracker {
     #[inline]
     pub fn current(&self) -> Option<PathNodeId> {
         let (node_id, is_known) = self.node_stack.last().copied().unwrap();
-        if is_known { Some(node_id) } else { None }
+        if is_known {
+            Some(node_id)
+        } else {
+            None
+        }
     }
 
     /// Returns the current node ID, or ROOT if unknown.
