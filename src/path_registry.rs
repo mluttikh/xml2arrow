@@ -33,7 +33,6 @@ pub struct PathNodeInfo {
     /// If this path represents a table, store the table index.
     pub table_index: Option<usize>,
     /// Field indices: (table_idx, field_idx) pairs for fields at this path.
-    /// A path can correspond to fields in multiple tables if they share the same XML path.
     pub field_indices: Vec<(usize, usize)>,
 }
 
@@ -237,7 +236,11 @@ impl PathTracker {
     #[inline]
     pub fn current(&self) -> Option<PathNodeId> {
         let (node_id, is_known) = self.node_stack.last().copied().unwrap();
-        if is_known { Some(node_id) } else { None }
+        if is_known {
+            Some(node_id)
+        } else {
+            None
+        }
     }
 
     /// Returns the current node ID, or ROOT if unknown.

@@ -115,7 +115,7 @@ impl Config {
     pub fn requires_attribute_parsing(&self) -> bool {
         for table in &self.tables {
             for field in &table.fields {
-                if field.xml_path.contains("@") {
+                if field.xml_path.contains('@') {
                     return true;
                 }
             }
