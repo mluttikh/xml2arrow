@@ -4,12 +4,11 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayBuilder, ArrowNumericType, AsArray, BooleanBuilder, Float32Array, Float32Builder,
-    Float64Array, Float64Builder, Int8Builder, Int16Builder, Int32Builder, Int64Builder,
-    RecordBatch, StringBuilder, UInt8Builder, UInt16Builder, UInt32Builder, UInt64Builder,
+    Array, ArrayBuilder, ArrowNumericType, BooleanBuilder, Float32Builder, Float64Builder,
+    Int8Builder, Int16Builder, Int32Builder, Int64Builder, RecordBatch, StringBuilder,
+    UInt8Builder, UInt16Builder, UInt32Builder, UInt64Builder,
 };
-use arrow::compute::kernels::numeric;
-use arrow::datatypes::{DataType, Field, Float32Type, Float64Type, Schema};
+use arrow::datatypes::{DataType, Field, Schema};
 use indexmap::IndexMap;
 use quick_xml::Reader;
 use quick_xml::escape;
@@ -69,6 +68,86 @@ where
                     field_config.name,
                     field_config.xml_path,
                     e
+                )));
+            }
+        }
+    } else if field_config.nullable {
+        builder.append_null();
+    } else {
+        return Err(Error::ParseError(format!(
+            "Missing value for non-nullable field '{}' at path {}",
+            field_config.name, field_config.xml_path
+        )));
+    }
+    Ok(())
+}
+
+fn append_float32(
+    builder: &mut Box<dyn ArrayBuilder>,
+    value: &str,
+    has_value: bool,
+    field_config: &FieldConfig,
+) -> Result<()> {
+    let builder = builder
+        .as_any_mut()
+        .downcast_mut::<arrow::array::PrimitiveBuilder<arrow::datatypes::Float32Type>>()
+        .expect("Builder type mismatch. This is a bug in create_array_builder.");
+
+    if has_value {
+        match value.parse::<f32>() {
+            Ok(mut val) => {
+                if let Some(scale) = field_config.scale {
+                    val *= scale as f32;
+                }
+                if let Some(offset) = field_config.offset {
+                    val += offset as f32;
+                }
+                builder.append_value(val);
+            }
+            Err(e) => {
+                return Err(Error::ParseError(format!(
+                    "Failed to parse value '{}' as f32 for field '{}' at path {}: {}",
+                    value, field_config.name, field_config.xml_path, e
+                )));
+            }
+        }
+    } else if field_config.nullable {
+        builder.append_null();
+    } else {
+        return Err(Error::ParseError(format!(
+            "Missing value for non-nullable field '{}' at path {}",
+            field_config.name, field_config.xml_path
+        )));
+    }
+    Ok(())
+}
+
+fn append_float64(
+    builder: &mut Box<dyn ArrayBuilder>,
+    value: &str,
+    has_value: bool,
+    field_config: &FieldConfig,
+) -> Result<()> {
+    let builder = builder
+        .as_any_mut()
+        .downcast_mut::<arrow::array::PrimitiveBuilder<arrow::datatypes::Float64Type>>()
+        .expect("Builder type mismatch. This is a bug in create_array_builder.");
+
+    if has_value {
+        match value.parse::<f64>() {
+            Ok(mut val) => {
+                if let Some(scale) = field_config.scale {
+                    val *= scale;
+                }
+                if let Some(offset) = field_config.offset {
+                    val += offset;
+                }
+                builder.append_value(val);
+            }
+            Err(e) => {
+                return Err(Error::ParseError(format!(
+                    "Failed to parse value '{}' as f64 for field '{}' at path {}: {}",
+                    value, field_config.name, field_config.xml_path, e
                 )));
             }
         }
@@ -173,13 +252,13 @@ impl FieldBuilder {
                 self.has_value,
                 &self.field_config,
             )?,
-            DataType::Float32 => append_numeric::<arrow::datatypes::Float32Type>(
+            DataType::Float32 => append_float32(
                 &mut self.array_builder,
                 value,
                 self.has_value,
                 &self.field_config,
             )?,
-            DataType::Float64 => append_numeric::<arrow::datatypes::Float64Type>(
+            DataType::Float64 => append_float64(
                 &mut self.array_builder,
                 value,
                 self.has_value,
@@ -222,44 +301,7 @@ impl FieldBuilder {
     }
 
     pub fn finish(&mut self) -> Result<Arc<dyn Array>> {
-        let mut array = self.array_builder.finish();
-        if let Some(scale) = self.field_config.scale {
-            array = match self.field.data_type() {
-                DataType::Float32 => numeric::mul(
-                    array.as_primitive::<Float32Type>(),
-                    &Float32Array::new_scalar(scale as f32),
-                )?,
-                &DataType::Float64 => numeric::mul(
-                    array.as_primitive::<Float64Type>(),
-                    &Float64Array::new_scalar(scale),
-                )?,
-                _ => {
-                    return Err(Error::UnsupportedConversion(format!(
-                        "Scaling is only supported for Float32 and Float64, but found {:?}",
-                        self.field.data_type()
-                    )));
-                }
-            };
-        }
-        if let Some(offset) = self.field_config.offset {
-            array = match self.field.data_type() {
-                DataType::Float32 => numeric::add(
-                    array.as_primitive::<Float32Type>(),
-                    &Float32Array::new_scalar(offset as f32),
-                )?,
-                &DataType::Float64 => numeric::add(
-                    array.as_primitive::<Float64Type>(),
-                    &Float64Array::new_scalar(offset),
-                )?,
-                _ => {
-                    return Err(Error::UnsupportedConversion(format!(
-                        "Offset is only supported for Float32 and Float64, but found {:?}",
-                        self.field.data_type()
-                    )));
-                }
-            };
-        }
-        Ok(array)
+        Ok(self.array_builder.finish())
     }
 }
 
@@ -720,8 +762,8 @@ mod tests {
     use crate::config_from_yaml;
     use approx::abs_diff_eq;
     use arrow::array::{
-        BooleanArray, Int8Array, Int16Array, Int32Array, Int64Array, StringArray, UInt8Array,
-        UInt16Array, UInt32Array, UInt64Array,
+        BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
+        StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
     };
 
     macro_rules! assert_array_values {
