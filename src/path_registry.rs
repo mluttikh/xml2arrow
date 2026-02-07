@@ -33,7 +33,6 @@ pub struct PathNodeInfo {
     /// If this path represents a table, store the table index.
     pub table_index: Option<usize>,
     /// Field indices: (table_idx, field_idx) pairs for fields at this path.
-    /// A path can correspond to fields in multiple tables if they share the same XML path.
     pub field_indices: Vec<(usize, usize)>,
 }
 
