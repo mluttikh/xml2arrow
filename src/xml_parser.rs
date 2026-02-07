@@ -83,6 +83,14 @@ where
     Ok(())
 }
 
+fn parse_boolean_token(value: &str) -> Option<bool> {
+    match value {
+        "false" | "0" | "no" | "n" | "f" | "off" => Some(false),
+        "true" | "1" | "yes" | "y" | "t" | "on" => Some(true),
+        _ => None,
+    }
+}
+
 impl FieldBuilder {
     fn new(field_config: &FieldConfig) -> Result<Self> {
         let array_builder = create_array_builder(field_config.data_type)?;
@@ -192,14 +200,26 @@ impl FieldBuilder {
                     .downcast_mut::<BooleanBuilder>()
                     .expect("BooleanBuilder");
                 if self.has_value {
-                    match value {
-                        "false" | "0" => builder.append_value(false),
-                        "true" | "1" => builder.append_value(true),
-                        _ => {
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() {
+                        if self.field_config.nullable {
+                            builder.append_null();
+                        } else {
                             return Err(Error::ParseError(format!(
-                                "Failed to parse value '{}' as boolean for field '{}' at path {}: expected 'true', 'false', '1' or '0'",
-                                value, self.field_config.name, self.field_config.xml_path
+                                "Missing value for non-nullable field '{}' at path {}",
+                                self.field_config.name, self.field_config.xml_path
                             )));
+                        }
+                    } else {
+                        let normalized = trimmed.to_ascii_lowercase();
+                        match parse_boolean_token(normalized.as_str()) {
+                            Some(val) => builder.append_value(val),
+                            None => {
+                                return Err(Error::ParseError(format!(
+                                    "Failed to parse value '{}' as boolean for field '{}' at path {}: expected one of 'true', 'false', '1', '0', 'yes', 'no', 'on', 'off', 't', 'f', 'y', or 'n'",
+                                    value, self.field_config.name, self.field_config.xml_path
+                                )));
+                            }
                         }
                     }
                 } else if self.field_config.nullable {
@@ -1369,6 +1389,16 @@ mod tests {
             <row><bool>false</bool></row>
             <row><bool>1</bool></row>
             <row><bool>0</bool></row>
+            <row><bool>yes</bool></row>
+            <row><bool>no</bool></row>
+            <row><bool>on</bool></row>
+            <row><bool>off</bool></row>
+            <row><bool>t</bool></row>
+            <row><bool>f</bool></row>
+            <row><bool>y</bool></row>
+            <row><bool>n</bool></row>
+            <row><bool> TrUe </bool></row>
+            <row><bool> OFF </bool></row>
         </data>
         "#;
 
@@ -1387,8 +1417,16 @@ mod tests {
 
         let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("bools").unwrap();
-        assert_eq!(batch.num_rows(), 4);
-        assert_array_values!(batch, "bool", vec![true, false, true, false], BooleanArray);
+        assert_eq!(batch.num_rows(), 14);
+        assert_array_values!(
+            batch,
+            "bool",
+            vec![
+                true, false, true, false, true, false, true, false, true, false, true, false, true,
+                false
+            ],
+            BooleanArray
+        );
 
         Ok(())
     }
@@ -1397,7 +1435,7 @@ mod tests {
     fn test_dtype_boolean_invalid_values() -> Result<()> {
         let xml_content = r#"
         <data>
-            <row><bool>yes</bool></row>
+            <row><bool>maybe</bool></row>
         </data>
         "#;
 
@@ -1419,7 +1457,7 @@ mod tests {
         let err = result.unwrap_err();
         match err {
             Error::ParseError(msg) => {
-                assert!(msg.contains("yes"));
+                assert!(msg.contains("maybe"));
                 assert!(msg.contains("boolean"));
             }
             _ => panic!("Expected ParseError, got {:?}", err),
@@ -1433,6 +1471,7 @@ mod tests {
         let xml_content = r#"
         <data>
             <row><bool></bool></row>
+            <row><bool>   </bool></row>
         </data>
         "#;
 
@@ -1454,7 +1493,7 @@ mod tests {
         let result = parse_xml(xml_content.as_bytes(), &config);
         assert!(result.is_err());
 
-        // Nullable should succeed with null
+        // Nullable should succeed with nulls
         let config = config_from_yaml!(
             r#"
             tables:
@@ -1471,7 +1510,12 @@ mod tests {
 
         let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("bools").unwrap();
-        assert_array_values_option!(batch, "bool", vec![None::<bool>], BooleanArray);
+        assert_array_values_option!(
+            batch,
+            "bool",
+            vec![None::<bool>, None::<bool>],
+            BooleanArray
+        );
 
         Ok(())
     }

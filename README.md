@@ -55,7 +55,7 @@ tables:
         *   **`name`:** The name of the field in the Arrow schema.
         *   **`xml_path`:** An XPath-like string selecting the field's value. Use `@` to select attributes (e.g., `/library/book/@id`).
         *   **`data_type`:** The Arrow data type. Supported types:
-            *   `Boolean` (`false`, `true`, `0` or `1`)
+            *   `Boolean` (`false`, `true`, `0`, `1`, `yes`, `no`, `on`, `off`, `t`, `f`, `y`, `n` — case-insensitive, surrounding whitespace ignored)
             *   `Int8`, `UInt8`, `Int16`, `UInt16`, `Int32`, `UInt32`, `Int64`, `UInt64`
             *   `Float32`, `Float64`
             *   `Utf8` (Strings)
