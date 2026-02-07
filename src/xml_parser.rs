@@ -3345,4 +3345,58 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_text_concatenation_mixed_content() -> Result<()> {
+        // This XML simulates a scenario where text is interrupted by a child tag
+        // that is NOT in the configuration (e.g., <br/> or <b>).
+        // The parser should skip the child tag but continue accumulating text for the parent field.
+        let xml_content = r#"
+            <data>
+                <row>
+                    <msg>Hello <br/> World</msg>
+                </row>
+                <row>
+                    <msg>Part 1 <b>ignored</b> Part 2</msg>
+                </row>
+            </data>
+            "#;
+
+        let config = config_from_yaml!(
+            r#"
+                tables:
+                    - name: test
+                      xml_path: /data
+                      levels: [row]
+                      fields:
+                        - name: msg
+                          xml_path: /data/row/msg
+                          data_type: Utf8
+                "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("test").unwrap();
+
+        assert_eq!(batch.num_rows(), 2);
+
+        let array = batch
+            .column_by_name("msg")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+
+        // Row 0: "Hello " + (skip <br/>) + " World" -> "Hello  World"
+        // Note: The parser preserves whitespace by default, so we expect double spaces.
+        assert_eq!(array.value(0), "Hello  World");
+
+        // Row 1: "Part 1 " + (skip <b> and its content) + " Part 2"
+        // Since <b> is not in the config, the parser treats it as an unknown child.
+        // Typically, unknown children are skipped entirely (including their content).
+        // Therefore, "ignored" should NOT appear in the output.
+        assert_eq!(array.value(1), "Part 1  Part 2");
+
+        Ok(())
+    }
 }
