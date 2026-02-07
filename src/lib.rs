@@ -8,6 +8,7 @@ pub mod config;
 pub mod errors;
 pub use errors::{Error, Result};
 
+mod path_registry;
 mod xml_parser;
 pub use xml_parser::parse_xml;
 mod xml_path;
