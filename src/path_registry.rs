@@ -1,9 +1,25 @@
 //! Integer-based path indexing for efficient XML path lookups during parsing.
 //!
-//! This module provides a trie-based path registry that assigns integer IDs to
-//! significant XML paths (tables and fields). During parsing, paths are tracked
-//! as a stack of integers instead of strings, enabling O(1) lookups via direct
-//! array indexing instead of hash lookups.
+//! This module keeps the parsing hot path free of string-heavy operations.
+//! The registry compiles all configured XML paths into a trie, assigns each
+//! node a compact integer ID, and allows the parser to operate on those IDs
+//! with direct indexing.
+//
+// Design overview (top-down narrative):
+//
+// 1) Build-time: PathRegistry::from_config
+//    - Convert every table path and field path into a trie of interned atoms.
+//    - Store table/field metadata at the terminal node of each path.
+//    - Use integer IDs so lookups are array indexing rather than hash maps.
+//
+// 2) Run-time: PathTracker
+//    - Maintain a stack of node IDs corresponding to the current XML depth.
+//    - On entering an element, attempt to resolve the child in the registry.
+//      If the current path is not in the registry, mark the subtree as unknown
+//      to skip further lookups until we pop back out.
+//
+// This design intentionally favors predictable O(1) operations during parsing
+// over upfront construction work at startup.
 
 use fxhash::FxHashMap;
 use string_cache::DefaultAtom as Atom;
@@ -13,6 +29,7 @@ use crate::config::Config;
 /// A node ID in the path registry trie.
 ///
 /// Node 0 is always the root node (representing "/").
+/// We keep this as a small integer to allow direct indexing into vectors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct PathNodeId(u32);
 
@@ -28,6 +45,9 @@ impl PathNodeId {
 }
 
 /// Information about what a path node represents in the configuration.
+///
+/// This is the "semantic payload" for a trie node. It tells the parser whether
+/// a path is a table boundary and which fields are mapped to it.
 #[derive(Debug, Clone, Default)]
 pub struct PathNodeInfo {
     /// If this path represents a table, store the table index.
@@ -53,9 +73,9 @@ impl PathNodeInfo {
 
 /// Registry for efficient path lookups during XML parsing.
 ///
-/// The registry is built from the configuration and creates a trie structure
-/// where each node represents a path segment. Nodes are assigned integer IDs
-/// for fast array-based lookups.
+/// The registry is a trie keyed by interned element names. Each node has:
+/// - a map of child name -> child ID
+/// - PathNodeInfo metadata for table/field mapping
 pub struct PathRegistry {
     /// For each node, map child element name to child node ID.
     children: Vec<FxHashMap<Atom, PathNodeId>>,
@@ -66,21 +86,24 @@ pub struct PathRegistry {
 impl PathRegistry {
     /// Builds a path registry from the configuration.
     ///
-    /// This processes all table and field paths from the config and builds
-    /// a trie structure with integer node IDs.
+    /// We do all string parsing here, so the runtime parser never touches raw
+    /// strings for configured paths. This is the main performance lever.
     pub fn from_config(config: &Config) -> Self {
         let mut registry = Self {
-            children: vec![FxHashMap::default()],     // Start with root node
-            node_info: vec![PathNodeInfo::default()], // Root node info
+            children: vec![FxHashMap::default()],     // Root node
+            node_info: vec![PathNodeInfo::default()], // Root info
         };
 
-        // Register all table paths
+        // Phase 1: register table paths
+        // The table boundary must be known so the parser can push/pop row scopes.
         for (table_idx, table_config) in config.tables.iter().enumerate() {
             let node_id = registry.get_or_create_path(&table_config.xml_path);
             registry.node_info[node_id.index()].table_index = Some(table_idx);
         }
 
-        // Register all field paths
+        // Phase 2: register field paths
+        // We allow multiple fields to map to the same node (e.g., different
+        // tables that share a path shape).
         for (table_idx, table_config) in config.tables.iter().enumerate() {
             for (field_idx, field_config) in table_config.fields.iter().enumerate() {
                 let node_id = registry.get_or_create_path(&field_config.xml_path);
@@ -94,6 +117,10 @@ impl PathRegistry {
     }
 
     /// Gets or creates a path in the trie, returning its node ID.
+    ///
+    /// We intentionally parse paths by splitting on "/".
+    /// - Leading "/" is ignored.
+    /// - Empty segments are ignored (double slashes, trailing slash).
     fn get_or_create_path(&mut self, path_str: &str) -> PathNodeId {
         let parts: Vec<&str> = path_str
             .trim_start_matches('/')
@@ -112,17 +139,18 @@ impl PathRegistry {
     }
 
     /// Gets or creates a child node for the given parent and name.
+    ///
+    /// This is the only place we mutate the trie. By isolating that logic, we
+    /// avoid duplicating bookkeeping for new nodes.
     fn get_or_create_child(&mut self, parent: PathNodeId, name: Atom) -> PathNodeId {
         if let Some(&child_id) = self.children[parent.index()].get(&name) {
             return child_id;
         }
 
-        // Create new node
+        // Create a new node and wire it into the trie.
         let new_id = PathNodeId(self.children.len() as u32);
         self.children.push(FxHashMap::default());
         self.node_info.push(PathNodeInfo::default());
-
-        // Link parent to child
         self.children[parent.index()].insert(name, new_id);
 
         new_id
@@ -164,9 +192,13 @@ impl PathRegistry {
 
 /// Tracks the current position in the path trie during parsing.
 ///
-/// This maintains a stack of node IDs corresponding to the current XML nesting level.
-/// When entering an element, we push the child node ID (if it exists in config).
-/// When leaving an element, we pop from the stack.
+/// The parser operates on streaming XML events. We maintain a stack that mirrors
+/// the XML nesting depth. Each entry records:
+/// - the node ID (if known)
+/// - whether this path exists in the registry
+///
+/// If a path is unknown, we keep pushing "unknown" entries until we exit that
+/// subtree. This avoids repeated registry lookups for irrelevant branches.
 #[derive(Debug)]
 pub struct PathTracker {
     /// Stack of (node_id, is_known_path) pairs representing current XML nesting.
@@ -181,7 +213,7 @@ impl PathTracker {
     /// Creates a new path tracker starting at the root.
     pub fn new() -> Self {
         Self {
-            node_stack: vec![(PathNodeId::ROOT, true)], // Start at root
+            node_stack: vec![(PathNodeId::ROOT, true)],
             cached_atom: None,
         }
     }
@@ -203,7 +235,8 @@ impl PathTracker {
         let (current_node, current_is_known) = self.node_stack.last().copied().unwrap();
 
         if !current_is_known {
-            // Parent path is not in config, so children can't be either
+            // Parent path is not in config, so children can't be either.
+            // We still push to keep depth aligned with XML nesting.
             self.node_stack.push((PathNodeId::ROOT, false));
             return None;
         }
@@ -212,7 +245,7 @@ impl PathTracker {
             self.node_stack.push((child_id, true));
             Some(child_id)
         } else {
-            // Path not in config
+            // Path not in config; mark as unknown and keep depth aligned.
             self.node_stack.push((PathNodeId::ROOT, false));
             None
         }
@@ -236,11 +269,7 @@ impl PathTracker {
     #[inline]
     pub fn current(&self) -> Option<PathNodeId> {
         let (node_id, is_known) = self.node_stack.last().copied().unwrap();
-        if is_known {
-            Some(node_id)
-        } else {
-            None
-        }
+        if is_known { Some(node_id) } else { None }
     }
 
     /// Returns the current node ID, or ROOT if unknown.
@@ -265,7 +294,8 @@ impl PathTracker {
 
     /// Gets or creates a cached atom for the given string.
     ///
-    /// This can be used to avoid repeated interning of the same string.
+    /// This is a micro-optimization for cases where the same element name is
+    /// parsed repeatedly in a tight loop.
     #[inline]
     #[allow(dead_code)]
     pub fn intern(&mut self, s: &str) -> Atom {
