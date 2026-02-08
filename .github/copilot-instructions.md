@@ -48,6 +48,53 @@ cargo bench --bench parse_benchmark -- --baseline <name>
 - Add or update tests when fixing bugs or adding features.
 - Avoid touching generated artifacts under `target/`.
 
+### Literate Programming
+
+**Goal:** Code must explain reasoning and intent, not only implementation.
+
+**Rules**
+
+1. **Explain Why**
+
+   * Comments describe purpose, assumptions, constraints, and tradeoffs.
+   * Do not comment obvious syntax behavior.
+
+2. **Top-Down Narrative**
+
+   * Structure files as logical phases that read from high-level intent to detailed steps.
+   * Use clear section headers for each conceptual step.
+
+3. **Inline Context**
+
+   * Place explanations immediately seeable above the code they describe.
+   * Avoid distant or centralized explanations.
+
+4. **Avoid Over-Abstraction**
+
+   * Prefer readable inline logic with good documentation over splitting sequential logic into many small functions.
+   * Introduce functions only for reuse, meaningful abstraction, or independent conceptual units.
+
+5. **Self-Contained Logic**
+
+   * Avoid introducing shared utilities for trivial operations.
+   * Inline simple logic when doing so improves readability and reduces cross-file navigation.
+
+**Apply When**
+
+* Implementing algorithms, workflows, integrations, or business/domain logic
+* Multi-step processes where reasoning is not obvious
+
+**Avoid Over-Documenting**
+
+* Trivial utilities
+* Obvious wrappers
+* Simple getters/setters
+* Standard boilerplate patterns
+
+**Expected Outcome**
+Each file should read as a short narrative:
+section intent → reasoning → implementation.
+
 ## YAML configuration notes
 
 - `tables` define record batches and map XML paths to Arrow fields.
