@@ -1,3 +1,15 @@
+//! XML-to-Arrow parsing pipeline.
+//!
+//! This module is intentionally organized as a top-down narrative of the parsing flow:
+//! 1) Build per-table and per-field builders that accumulate values into Arrow arrays.
+//! 2) Stream XML events and track the current path using integer IDs (via PathRegistry).
+//! 3) On element boundaries, push/pop table context and finalize rows deterministically.
+//! 4) After streaming, finish builders into RecordBatches and return an ordered map.
+//!
+//! The guiding goals are: single-pass parsing, predictable O(1) lookups, and minimal
+//! allocation in the hot path.
+//! This means we front-load configuration validation and path compilation so the
+//! event loop can focus on direct indexing and appends.
 use std::io::BufRead;
 use std::marker::PhantomData;
 use std::str::FromStr;
@@ -23,6 +35,10 @@ use crate::errors::Error;
 use crate::errors::Result;
 use crate::path_registry::{PathNodeId, PathRegistry, PathTracker};
 
+// === Field-level accumulation ===
+// The FieldBuilder owns the value buffer and the Arrow builder for one field.
+// It encapsulates conversion, null handling, and optional scale/offset transforms.
+///
 /// Builds Arrow arrays for a single field based on parsed XML data.
 ///
 /// This struct manages the accumulation of values from the XML and their conversion
@@ -300,6 +316,10 @@ fn create_array_builder(data_type: DType) -> Result<Box<dyn ArrayBuilder>> {
     }
 }
 
+// === Table-level batching ===
+// A TableBuilder owns per-field builders plus index builders for nested levels.
+// It finalizes rows into a RecordBatch in a single, ordered pass.
+///
 /// Builds an Arrow RecordBatch for a single table defined in the configuration.
 ///
 /// This struct manages the building of a single Arrow `RecordBatch` by collecting
