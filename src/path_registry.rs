@@ -113,6 +113,12 @@ impl PathRegistry {
             }
         }
 
+        // Phase 3: register optional stop paths so the parser can resolve them
+        // without string lookups in the hot loop.
+        for stop_path in &config.parser_options.stop_at_paths {
+            registry.get_or_create_path(stop_path);
+        }
+
         registry
     }
 
@@ -136,6 +142,26 @@ impl PathRegistry {
         }
 
         current_node
+    }
+
+    /// Resolves a path string to an existing node ID without creating new nodes.
+    ///
+    /// Returns `None` if the path doesn't exist in the registry.
+    pub fn resolve_path(&self, path_str: &str) -> Option<PathNodeId> {
+        let parts: Vec<&str> = path_str
+            .trim_start_matches('/')
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let mut current_node = PathNodeId::ROOT;
+
+        for part in parts {
+            let atom = Atom::from(part);
+            current_node = self.get_child(current_node, &atom)?;
+        }
+
+        Some(current_node)
     }
 
     /// Gets or creates a child node for the given parent and name.
