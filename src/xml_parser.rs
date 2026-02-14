@@ -430,6 +430,8 @@ struct XmlToArrowConverter {
     builder_stack: Vec<TableStackEntry>,
     /// Path registry for efficient path lookups.
     registry: PathRegistry,
+    /// Optional path node that triggers early termination after its closing tag.
+    stop_node_id: Option<PathNodeId>,
 }
 
 impl XmlToArrowConverter {
@@ -439,6 +441,12 @@ impl XmlToArrowConverter {
 
         // Build path registry for efficient lookups
         let registry = PathRegistry::from_config(config);
+
+        let stop_node_id = config
+            .parser_options
+            .stop_at_path
+            .as_deref()
+            .and_then(|path| registry.resolve_path(path));
 
         let mut table_builders = Vec::with_capacity(config.tables.len());
         for table_config in &config.tables {
@@ -451,6 +459,7 @@ impl XmlToArrowConverter {
             table_builders,
             builder_stack,
             registry,
+            stop_node_id,
         })
     }
 
@@ -602,11 +611,13 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
     // Use specialized parsing logic based on whether attribute parsing is required.
     // This avoids unnecessary attribute processing and Empty event handling
     // when attributes are not needed, improving performance.
+    let stop_node_id = xml_to_arrow_converter.stop_node_id;
     if config.requires_attribute_parsing() {
         process_xml_events::<_, true>(
             &mut reader,
             &mut path_tracker,
             &mut xml_to_arrow_converter,
+            stop_node_id,
             PhantomData,
         )?;
     } else {
@@ -614,6 +625,7 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
             &mut reader,
             &mut path_tracker,
             &mut xml_to_arrow_converter,
+            stop_node_id,
             PhantomData,
         )?;
     }
@@ -626,6 +638,7 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
     reader: &mut Reader<B>,
     path_tracker: &mut PathTracker,
     xml_to_arrow_converter: &mut XmlToArrowConverter,
+    stop_node_id: Option<PathNodeId>,
     _marker: PhantomData<bool>,
 ) -> Result<()> {
     let mut buf = Vec::with_capacity(4096);
@@ -687,7 +700,7 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
             }
             Event::End(_) => {
                 // Pop from our element stack
-                if let Some((_node_id, is_table)) = element_stack.pop() {
+                if let Some((node_id, is_table)) = element_stack.pop() {
                     if is_table {
                         xml_to_arrow_converter.end_table()?;
                     }
@@ -709,6 +722,14 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                             if path_tracker.current() == Some(PathNodeId::ROOT) {
                                 xml_to_arrow_converter.end_current_row()?;
                             }
+                        }
+                    }
+
+                    // Stop after closing the configured path, so header-only reads
+                    // can exit without scanning the remainder of the XML.
+                    if let (Some(stop_node_id), Some(node_id)) = (stop_node_id, node_id) {
+                        if node_id == stop_node_id {
+                            break;
                         }
                     }
                 }
@@ -905,6 +926,59 @@ mod tests {
             StringArray
         );
         assert_array_values!(items_batch, "value", vec![10.5, 20.5, 30.5], Float64Array);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_stop_at_path_header_only() -> Result<()> {
+        let xml_content = r#"
+        <report>
+            <header>
+                <title>Header Title</title>
+                <created_by>Unit Test</created_by>
+            </header>
+            <data>
+                <item><value>1</value></item>
+                <item><value>2</value></item>
+            </data>
+        </report>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+            parser_options:
+                stop_at_path: /report/header
+            tables:
+                - name: header
+                  xml_path: /report
+                  levels: [header]
+                  fields:
+                    - name: title
+                      xml_path: /report/header/title
+                      data_type: Utf8
+                    - name: created_by
+                      xml_path: /report/header/created_by
+                      data_type: Utf8
+                - name: data
+                  xml_path: /report/data
+                  levels: [item]
+                  fields:
+                    - name: value
+                      xml_path: /report/data/item/value
+                      data_type: Int32
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+
+        let header_batch = record_batches.get("header").unwrap();
+        assert_eq!(header_batch.num_rows(), 1);
+        assert_array_values!(header_batch, "title", vec!["Header Title"], StringArray);
+        assert_array_values!(header_batch, "created_by", vec!["Unit Test"], StringArray);
+
+        let data_batch = record_batches.get("data").unwrap();
+        assert_eq!(data_batch.num_rows(), 0);
 
         Ok(())
     }
