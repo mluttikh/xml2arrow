@@ -76,6 +76,7 @@ dependencies = [
  "arrow-ipc",
  "arrow-json",
  "arrow-ord",
+ "arrow-pyarrow",
  "arrow-row",
  "arrow-schema",
  "arrow-select",
@@ -227,6 +228,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "arrow-pyarrow"
+version = "57.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fbd810e3997bae72f58cda57231ccb0a2fda07911ca1b0a5718cbf9379abb297"
+dependencies = [
+ "arrow-array",
+ "arrow-data",
+ "arrow-schema",
+ "pyo3",
+]
+
+[[package]]
 name = "arrow-row"
 version = "57.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -244,6 +257,9 @@ name = "arrow-schema"
 version = "57.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d27609cd7dd45f006abae27995c2729ef6f4b9361cde1ddd019dc31a5aa017e0"
+dependencies = [
+ "bitflags",
+]
 
 [[package]]
 name = "arrow-select"
