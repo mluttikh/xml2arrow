@@ -326,7 +326,7 @@ impl Default for PathTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, DType, FieldConfig, TableConfig};
+    use crate::config::{Config, DType, FieldConfig, RowScope, TableConfig};
 
     fn create_test_config() -> Config {
         Config {
@@ -334,6 +334,7 @@ mod tests {
                 TableConfig {
                     name: "items".to_string(),
                     xml_path: "/root/items".to_string(),
+                    row_scope: RowScope::Child,
                     levels: vec!["item".to_string()],
                     fields: vec![
                         FieldConfig {
@@ -357,6 +358,7 @@ mod tests {
                 TableConfig {
                     name: "metadata".to_string(),
                     xml_path: "/root/metadata".to_string(),
+                    row_scope: RowScope::Child,
                     levels: vec![],
                     fields: vec![FieldConfig {
                         name: "version".to_string(),
@@ -473,6 +475,7 @@ mod tests {
             tables: vec![TableConfig {
                 name: "root".to_string(),
                 xml_path: "/".to_string(),
+                row_scope: RowScope::Child,
                 levels: vec![],
                 fields: vec![FieldConfig {
                     name: "value".to_string(),
@@ -499,6 +502,7 @@ mod tests {
             tables: vec![TableConfig {
                 name: "items".to_string(),
                 xml_path: "/root/items".to_string(),
+                row_scope: RowScope::Child,
                 levels: vec!["item".to_string()],
                 fields: vec![FieldConfig {
                     name: "id".to_string(),

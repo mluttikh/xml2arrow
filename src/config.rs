@@ -124,6 +124,22 @@ impl Config {
     }
 }
 
+#[derive(Debug, Copy, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub enum RowScope {
+    /// Each direct child element of the table path is a row.
+    Child,
+    /// The table element itself is a single row.
+    #[serde(rename = "Self")]
+    Self_,
+}
+
+impl Default for RowScope {
+    fn default() -> Self {
+        RowScope::Child
+    }
+}
+
 /// Configuration for an XML table to be parsed into an Arrow record batch.
 ///
 /// This struct defines how an XML structure should be interpreted as a table, including
@@ -135,6 +151,12 @@ pub struct TableConfig {
     pub name: String,
     /// The XML path to the table elements. For example `/data/dataset/table`.
     pub xml_path: String,
+    /// Controls where row boundaries are derived for this table.
+    ///
+    /// - `Child` (default): each direct child element of `xml_path` becomes one row.
+    /// - `Self`: the element at `xml_path` represents a single row.
+    #[serde(default)]
+    pub row_scope: RowScope,
     /// The levels of nesting for this table. This is used to create the indices for nested tables.
     /// For example if the xml_path is `/data/dataset/table/item/properties` the levels should
     /// be `["table", "properties"]`.
@@ -148,6 +170,7 @@ impl TableConfig {
         Self {
             name: name.to_string(),
             xml_path: xml_path.to_string(),
+            row_scope: RowScope::default(),
             levels,
             fields,
         }

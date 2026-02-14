@@ -30,7 +30,7 @@ use quick_xml::events::attributes::Attributes;
 use string_cache::DefaultAtom as Atom;
 
 use crate::Config;
-use crate::config::{DType, FieldConfig, TableConfig};
+use crate::config::{DType, FieldConfig, RowScope, TableConfig};
 use crate::errors::Error;
 use crate::errors::Result;
 use crate::path_registry::{PathNodeId, PathRegistry, PathTracker};
@@ -460,6 +460,14 @@ impl XmlToArrowConverter {
         self.registry.is_table_path(node_id)
     }
 
+    /// Resolve a table's row scope by its path node.
+    #[inline]
+    fn row_scope_for_node(&self, node_id: PathNodeId) -> Option<RowScope> {
+        self.registry
+            .get_table_index(node_id)
+            .map(|table_idx| self.table_builders[table_idx].table_config.row_scope)
+    }
+
     /// Check if there's a root-level table (xml_path: /) that has fields defined.
     fn has_root_table_with_fields(&self) -> bool {
         if let Some(table_idx) = self.registry.get_table_index(PathNodeId::ROOT) {
@@ -687,8 +695,15 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
             }
             Event::End(_) => {
                 // Pop from our element stack
-                if let Some((_node_id, is_table)) = element_stack.pop() {
+                if let Some((node_id, is_table)) = element_stack.pop() {
                     if is_table {
+                        if let Some(node_id) = node_id {
+                            if xml_to_arrow_converter.row_scope_for_node(node_id)
+                                == Some(RowScope::Self_)
+                            {
+                                xml_to_arrow_converter.end_current_row()?;
+                            }
+                        }
                         xml_to_arrow_converter.end_table()?;
                     }
 
@@ -696,9 +711,15 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                     path_tracker.leave();
 
                     // Check if parent is a table - need to end row
-                    if let Some(&(_parent_node_id, parent_is_table)) = element_stack.last() {
+                    if let Some(&(parent_node_id, parent_is_table)) = element_stack.last() {
                         if parent_is_table {
-                            xml_to_arrow_converter.end_current_row()?;
+                            if let Some(parent_node_id) = parent_node_id {
+                                if xml_to_arrow_converter.row_scope_for_node(parent_node_id)
+                                    == Some(RowScope::Child)
+                                {
+                                    xml_to_arrow_converter.end_current_row()?;
+                                }
+                            }
                         }
                     } else {
                         // Check root table case
@@ -707,7 +728,12 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                             .is_table_path(PathNodeId::ROOT)
                         {
                             if path_tracker.current() == Some(PathNodeId::ROOT) {
-                                xml_to_arrow_converter.end_current_row()?;
+                                if xml_to_arrow_converter
+                                    .row_scope_for_node(PathNodeId::ROOT)
+                                    .is_some()
+                                {
+                                    xml_to_arrow_converter.end_current_row()?;
+                                }
                             }
                         }
                     }
@@ -969,6 +995,46 @@ mod tests {
         let metadata_batch = record_batches.get("metadata").unwrap();
         assert_eq!(metadata_batch.num_rows(), 1);
         assert_array_values!(metadata_batch, "version", vec!["1.0"], StringArray);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_row_scope_self_single_row_table() -> Result<()> {
+        let xml_content = r#"
+        <report>
+            <header>
+                <title>Title</title>
+                <comment>Comment</comment>
+            </header>
+            <data>
+                <sensor>ignored</sensor>
+            </data>
+        </report>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: header
+                  xml_path: /report/header
+                  row_scope: Self
+                  levels: []
+                  fields:
+                    - name: title
+                      xml_path: /report/header/title
+                      data_type: Utf8
+                    - name: comment
+                      xml_path: /report/header/comment
+                      data_type: Utf8
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let header_batch = record_batches.get("header").unwrap();
+        assert_eq!(header_batch.num_rows(), 1);
+        assert_array_values!(header_batch, "title", vec!["Title"], StringArray);
+        assert_array_values!(header_batch, "comment", vec!["Comment"], StringArray);
 
         Ok(())
     }
