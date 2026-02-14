@@ -1,152 +1,133 @@
-# AI Agents Guide
+# AI Agents Guide: xml2arrow
 
-This file helps AI assistants work effectively in this repository. Keep changes minimal, focus on correctness and performance, and verify behavior with tests and benchmarks when relevant.
+This file helps AI assistants work effectively in this repository.
 
-## Project overview
+**Core Philosophy:**
+- **Zero-Copy Hot Paths:** The parsing loop must avoid allocation.
+- **O(1) Lookups:** Use integer-based `PathNodeId`, never string matching during parsing.
+- **Correctness:** XML hierarchy and Arrow schema alignment are paramount.
 
-- `xml2arrow` is a Rust crate that converts XML data into Apache Arrow tables.
-- XML parsing uses `quick-xml`, and Arrow structures use the Rust Arrow crate (see `README.md`).
-- Configuration is driven by YAML mappings that define tables, fields, XML paths, and Arrow data types.
+## Project Overview
 
-## Public API surface
+- **Crate:** `xml2arrow` converts XML data to Apache Arrow tables using a streaming, single-pass approach.
+- **Stack:** Rust, `quick-xml` (parsing), `arrow` (data structures), `pyo3` (Python bindings).
+- **Configuration:** driven by `Config` (YAML) which maps XML paths to Arrow fields.
 
-The crate root (`src/lib.rs`) re-exports everything that is public. Internal modules (`path_registry`, `xml_path`) are private.
+## Public API Surface
 
-- `parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<String, RecordBatch>>` — main entry point; streams XML events and returns named Arrow record batches.
-- `Config` — top-level configuration; holds a list of `TableConfig` and `ParserOptions`. Can be loaded from a YAML file via `Config::from_yaml_file`.
-- `TableConfig` — defines one output table: its name, XML path, optional nesting levels, and fields.
-- `FieldConfig` — maps an XML path to a named Arrow column with a data type, nullability, and optional scale/offset.
-- `FieldConfigBuilder` — builder for constructing `FieldConfig` programmatically.
-- `DType` — enum of supported Arrow data types (Boolean, Float32, Float64, Int8, UInt8, Int16, UInt16, Int32, UInt32, Int64, UInt64, Utf8).
-- `ParserOptions` — parser options such as `trim_text`.
-- `Error`, `Result` — crate error type and result alias.
+Treat `src/lib.rs` exports as the public API. Avoid breaking changes here.
+- `parse_xml`: Main entry point.
+- `Config`, `TableConfig`, `FieldConfig`: Configuration structs.
+- `DType`: Supported Arrow types.
 
-When modifying any of these types, treat them as public API: avoid breaking changes and update `README.md` accordingly.
+## Architecture & Data Flow (Read Carefully)
 
-## Architecture / data flow
+The converter operates in **phases** to ensure performance:
 
-The crate is a single-pass, streaming XML-to-Arrow converter. The modules are layered as follows:
+1.  **Setup Phase (Allocations Allowed):**
+    -   `Config` is loaded and validated (`config.rs`).
+    -   `PathRegistry` compiles all XML strings into a trie, assigning a unique `PathNodeId` (u32) to every relevant path (`path_registry.rs`).
 
-1. **Configuration** (`config.rs`): The user provides a `Config` (from YAML or built programmatically) that declares tables, fields, XML paths, and Arrow data types.
-2. **Path registry** (`path_registry.rs`): At startup, `PathRegistry::from_config` builds a trie from all configured XML paths and assigns each node an integer `PathNodeId`. This enables O(1) lookups during parsing instead of string-based hash matching.
-3. **Path tracking** (`path_registry.rs` — `PathTracker`): During parsing, a `PathTracker` maintains a stack of `PathNodeId`s that mirrors the current XML nesting depth. As `quick-xml` emits `Start`/`End` events, the tracker pushes/pops IDs and resolves whether the current path is known to the registry.
-4. **XML event loop** (`xml_parser.rs` — `process_xml_events`): Streams XML events from `quick-xml::Reader`. On each event:
-   - `Start` → enters the path in the tracker; if the path is a table boundary, pushes a new `TableStackEntry`.
-   - `Text` / `CData` → sets the current value on the active `FieldBuilder` via the `XmlToArrowConverter`.
-   - `End` → pops the path; if leaving a table row, finalises the row (appends values or nulls to all field builders).
-   - Attribute parsing is toggled at compile time via a const generic (`PARSE_ATTRIBUTES`) to avoid overhead when no fields use `@`-prefixed paths.
-5. **Arrow conversion** (`xml_parser.rs` — `XmlToArrowConverter`, `TableBuilder`, `FieldBuilder`):
-   - `XmlToArrowConverter` holds a `Vec<TableBuilder>` (one per configured table) and a `builder_stack` for nested table scoping.
-   - Each `TableBuilder` owns `FieldBuilder`s that accumulate values into Arrow array builders (`StringBuilder`, `Float64Builder`, etc.).
-   - On `finish()`, each `TableBuilder` drains its builders into a `RecordBatch`. The converter collects all batches into an `IndexMap<String, RecordBatch>` keyed by table name.
-6. **XML path** (`xml_path.rs`): Legacy string-based path type retained for backward compatibility and tests. Not used in the main parsing hot path.
+2.  **Streaming Phase (Hot Path - NO Allocations):**
+    -   `xml_parser.rs` iterates over `quick-xml` events.
+    -   **Path Tracking:** `PathTracker` maintains a stack of `PathNodeId`. It uses `PathRegistry` to resolve children via integer indexing—**never string comparison**.
+    -   **Value Extraction:** When a `Text` event occurs, if the current `PathNodeId` maps to a field, the text is appended to the active `FieldBuilder`.
 
-**Key performance details:**
-- Parsing is single-pass and streaming — no DOM is built.
-- Path lookups use integer IDs from the trie, not string comparisons.
-- `string_cache::Atom` is used for interned element names; `fxhash` provides fast hashing in internal maps.
-- `indexmap` preserves table insertion order in the output.
+3.  **Finalization Phase:**
+    -   `TableBuilder` drains field builders into Arrow `RecordBatch`es.
 
-## Repository map
+## Critical Implementation Rules
 
-- `src/`: crate implementation
-- `tests/`: test suite
-- `benches/`: Criterion benchmarks
-- `README.md`: usage, YAML mapping, and examples
-- `Cargo.toml`: crate metadata and dependencies
-- `target/`: build output (do not edit)
+When writing code, you **MUST** adhere to these rules:
 
-## Common commands
+1.  **Performance Constraints (Hot Path):**
+    -   Inside `process_xml_events` and `PathTracker::enter`:
+        -   **NEVER** clone `String` or `Vec`.
+        -   **NEVER** use `HashMap` lookups with string keys. Use `PathNodeId`.
+        -   **NEVER** perform heap allocation unless pushing to an Arrow builder.
+    -   Reuse buffers (e.g., `attr_name_buffer` in `process_xml_events`).
 
-```/dev/null/commands.sh#L1-6
-# Build
-cargo build
+2.  **Error Handling:**
+    -   Use the custom `Error` enum in `errors.rs`.
+    -   If modifying `Error`, you **MUST** update the `From<Error> for PyErr` impl in `errors.rs` (guarded by `#[cfg(feature = "python")]`).
 
-# Tests
-cargo test
+3.  **Testing:**
+    -   Use `rstest` for unit tests (`#[rstest]`).
+    -   If fixing a bug, add a reproduction case in `tests/integration_tests.rs`.
+    -   If modifying the parser, verify performance isn't degraded.
+    
+## Common Workflows
 
-# Benchmarks (Criterion)
+### 1. Adding a New Data Type
+If asked to support a new Arrow type (e.g., `Date32`):
+1.  Add variant to `DType` enum in `config.rs`.
+2.  Update `DType::as_arrow_type` match arm.
+3.  Update `create_array_builder` in `xml_parser.rs` to initialize the correct Arrow builder.
+4.  Update `FieldBuilder::append_current_value` in `xml_parser.rs` to parse string input into the new type.
+5.  Add a test case in `xml_parser.rs` `mod tests`.
+
+### 2. Modifying Configuration Logic
+1.  Modify the struct in `config.rs`.
+2.  **Crucial:** Update `Config::validate()` to enforce constraints (e.g., scale/offset rules).
+3.  Run `cargo test` to ensure YAML deserialization still works. 
+
+## Repository Map
+
+- `src/config.rs`: Structs for YAML config. **Validation logic lives here.**
+- `src/path_registry.rs`: The integer-based path trie. **Performance critical.**
+- `src/xml_parser.rs`: The main event loop and Arrow building logic. **Performance critical.**
+- `src/errors.rs`: Error types and Python/PyO3 bindings.
+- `tests/`: End-to-end integration tests.
+
+## Development Commands
+
+```bash
+# Check code including Python feature
+cargo check --features python
+
+# Run all tests
+cargo test --features python
+
+# Run benchmarks
 cargo bench
-```
 
-### Benchmark baselines (Criterion)
-
-```/dev/null/commands.sh#L1-6
-# Save a baseline
-cargo bench --bench parse_benchmark -- --save-baseline <name>
-
-# Compare to a baseline
-cargo bench --bench parse_benchmark -- --baseline <name>
+# Compare benchmarks (if modifying parser)
+cargo bench --bench parse_benchmark -- --save-baseline before_changes
+# ... make changes ...
+cargo bench --bench parse_benchmark -- --baseline before_changes
 ```
 
 ## Feature flags
+- `python`: Enables PyO3 bindings.
+  - Code guarded by `#[cfg(feature = "python")]` is strictly for Python interop.
+  - Ensure `From<Error>` conversions in `errors.rs` are exhaustive.
 
-- `python` (optional): Enables PyO3 bindings for Python interop.
-  - All Python-specific code is guarded by `#[cfg(feature = "python")]` and lives in `src/errors.rs`.
-  - This includes custom Python exception types (`Xml2ArrowError`, `XmlParsingError`, `YamlParsingError`, etc.) and the `From<Error> for PyErr` conversion.
-  - Build: `cargo build --features python`
-  - Test: `cargo test --features python`
-  - When adding or modifying variants in the `Error` enum, update the corresponding `From<Error> for PyErr` implementation and add a matching `create_exception!` call.
+## 📝 Literate Programming & Readability
 
-## Development guidance for AI agents
+This project follows a "Literate Programming" approach. You must treat code as a document meant for human logic verification. Follow these rules for all contributions:
 
-- Prefer small, targeted changes. Avoid refactors unless they are required.
-- Preserve performance-sensitive behavior; benchmark changes that affect XML parsing or Arrow conversion.
-- Update `README.md` if you change public behavior, configuration schema, or examples.
-- Add or update tests when fixing bugs or adding features.
-- Avoid touching generated artifacts under `target/`.
+### 1. Document the "Why," Not the "How"
+- **Constraint:** Do not comment on obvious Rust syntax (e.g., `i += 1; // increment i` is forbidden).
+- **Requirement:** Explain the *intent* and *edge cases*. If a logic block handles a specific XML quirk or Arrow memory constraint, document that reasoning explicitly.
 
-### Literate Programming
+### 2. Top-Down Narrative Structure
+- **Requirement:** Organize functions and modules as a logical story. 
+- **Structure:** Start with high-level intent (Public API) → move to middle-ware logic (Coordination) → end with low-level details (Utilities/Helpers).
+- **Visuals:** Use clear section headers (e.g., `// --- PHASE 1: SETUP ---`) to separate distinct conceptual steps in long functions like `process_xml_events`.
 
-**Goal:** Code must explain reasoning and intent, not only implementation.
+### 3. Inline Context over External Documentation
+- **Requirement:** Keep the reasoning immediately adjacent to the implementation. A developer should not have to leave the file to understand why a specific parsing branch was taken.
 
-**Rules**
+### 4. Strategic Abstraction
+- **Rule:** Favor **readable inline logic** over "clever" abstractions. 
+- **Guideline:** Only move code into a separate function if:
+    1. It is reused in multiple places.
+    2. It represents a distinct, independent unit of work (e.g., string-to-float parsing).
+    3. It simplifies the "main narrative" of the caller.
+- **Note:** Avoid "function sprawl" where the logic is fragmented into 20 tiny functions that are only called once.
 
-1. **Explain Why**
+### 5. Self-Contained Logic
+- **Constraint:** Avoid creating generic `utils.rs` files for simple logic. If a helper is only relevant to `xml_parser.rs`, keep it as a private helper in that file. This reduces "mental context switching."
 
-   * Comments describe purpose, assumptions, constraints, and tradeoffs.
-   * Do not comment obvious syntax behavior.
-
-2. **Top-Down Narrative**
-
-   * Structure files as logical phases that read from high-level intent to detailed steps.
-   * Use clear section headers for each conceptual step.
-
-3. **Inline Context**
-
-   * Place explanations immediately seeable above the code they describe.
-   * Avoid distant or centralized explanations.
-
-4. **Avoid Over-Abstraction**
-
-   * Prefer readable inline logic with good documentation over splitting sequential logic into many small functions.
-   * Introduce functions only for reuse, meaningful abstraction, or independent conceptual units.
-
-5. **Self-Contained Logic**
-
-   * Avoid introducing shared utilities for trivial operations.
-   * Inline simple logic when doing so improves readability and reduces cross-file navigation.
-
-**Apply When**
-
-* Implementing algorithms, workflows, integrations, or business/domain logic
-* Multi-step processes where reasoning is not obvious
-
-**Avoid Over-Documenting**
-
-* Trivial utilities
-* Obvious wrappers
-* Simple getters/setters
-* Standard boilerplate patterns
-
-**Expected Outcome**
-Each file should read as a short narrative:
-section intent → reasoning → implementation.
-
-## YAML configuration notes
-
-- `tables` define record batches and map XML paths to Arrow fields.
-- Field definitions include `name`, `xml_path`, `data_type`, and optional `nullable`, `scale`, `offset`.
-- `levels` can define nested index levels for hierarchical XML structures.
-
-For details and full examples, see `README.md`.
+**Expected Outcome:** Every file should be readable as a short technical essay: 
+`[Section Intent]` → `[Architectural Reasoning]` → `[Implementation]`.
