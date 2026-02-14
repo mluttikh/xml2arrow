@@ -26,7 +26,7 @@ approx = "0.5.1"
 criterion = "0.5"
 
 [features]
-python = ["pyo3"]
+python = ["pyo3", "arrow/pyarrow"]
 
 [dependencies.pyo3]
 version = "0.26"

@@ -86,7 +86,7 @@ If asked to support a new Arrow type (e.g., `Date32`):
 cargo check --features python
 
 # Run all tests
-cargo test --features python
+cargo test
 
 # Run benchmarks
 cargo bench
