@@ -430,8 +430,8 @@ struct XmlToArrowConverter {
     builder_stack: Vec<TableStackEntry>,
     /// Path registry for efficient path lookups.
     registry: PathRegistry,
-    /// Optional path node that triggers early termination after its closing tag.
-    stop_node_id: Option<PathNodeId>,
+    /// Optional path nodes that trigger early termination after their closing tags.
+    stop_node_ids: Vec<PathNodeId>,
 }
 
 impl XmlToArrowConverter {
@@ -442,11 +442,12 @@ impl XmlToArrowConverter {
         // Build path registry for efficient lookups
         let registry = PathRegistry::from_config(config);
 
-        let stop_node_id = config
+        let stop_node_ids = config
             .parser_options
-            .stop_at_path
-            .as_deref()
-            .and_then(|path| registry.resolve_path(path));
+            .stop_at_paths
+            .iter()
+            .filter_map(|path| registry.resolve_path(path))
+            .collect::<Vec<_>>();
 
         let mut table_builders = Vec::with_capacity(config.tables.len());
         for table_config in &config.tables {
@@ -459,7 +460,7 @@ impl XmlToArrowConverter {
             table_builders,
             builder_stack,
             registry,
-            stop_node_id,
+            stop_node_ids,
         })
     }
 
@@ -611,13 +612,13 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
     // Use specialized parsing logic based on whether attribute parsing is required.
     // This avoids unnecessary attribute processing and Empty event handling
     // when attributes are not needed, improving performance.
-    let stop_node_id = xml_to_arrow_converter.stop_node_id;
+    let stop_node_ids = xml_to_arrow_converter.stop_node_ids.clone();
     if config.requires_attribute_parsing() {
         process_xml_events::<_, true>(
             &mut reader,
             &mut path_tracker,
             &mut xml_to_arrow_converter,
-            stop_node_id,
+            &stop_node_ids,
             PhantomData,
         )?;
     } else {
@@ -625,7 +626,7 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
             &mut reader,
             &mut path_tracker,
             &mut xml_to_arrow_converter,
-            stop_node_id,
+            &stop_node_ids,
             PhantomData,
         )?;
     }
@@ -638,7 +639,7 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
     reader: &mut Reader<B>,
     path_tracker: &mut PathTracker,
     xml_to_arrow_converter: &mut XmlToArrowConverter,
-    stop_node_id: Option<PathNodeId>,
+    stop_node_ids: &[PathNodeId],
     _marker: PhantomData<bool>,
 ) -> Result<()> {
     let mut buf = Vec::with_capacity(4096);
@@ -727,8 +728,10 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
 
                     // Stop after closing the configured path, so header-only reads
                     // can exit without scanning the remainder of the XML.
-                    if let (Some(stop_node_id), Some(node_id)) = (stop_node_id, node_id) {
-                        if node_id == stop_node_id {
+                    if let Some(node_id) = node_id {
+                        if !stop_node_ids.is_empty()
+                            && stop_node_ids.iter().any(|stop_id| *stop_id == node_id)
+                        {
                             break;
                         }
                     }
@@ -931,7 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_stop_at_path_header_only() -> Result<()> {
+    fn test_parse_stop_at_paths_header_only() -> Result<()> {
         let xml_content = r#"
         <report>
             <header>
@@ -948,7 +951,8 @@ mod tests {
         let config = config_from_yaml!(
             r#"
             parser_options:
-                stop_at_path: /report/header
+                stop_at_paths:
+                    - /report/header
             tables:
                 - name: header
                   xml_path: /report

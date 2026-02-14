@@ -14,16 +14,16 @@ pub struct ParserOptions {
     /// Whether to trim whitespace from text nodes. Defaults to false.
     #[serde(default)]
     pub trim_text: bool,
-    /// Optional XML path where parsing should stop after the closing tag.
+    /// Optional XML paths where parsing should stop after the closing tag.
     #[serde(default)]
-    pub stop_at_path: Option<String>,
+    pub stop_at_paths: Vec<String>,
 }
 
 impl Default for ParserOptions {
     fn default() -> Self {
         Self {
             trim_text: false,
-            stop_at_path: None,
+            stop_at_paths: Vec::new(),
         }
     }
 }

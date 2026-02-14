@@ -113,9 +113,9 @@ impl PathRegistry {
             }
         }
 
-        // Phase 3: register an optional stop path so the parser can resolve it
+        // Phase 3: register optional stop paths so the parser can resolve them
         // without string lookups in the hot loop.
-        if let Some(stop_path) = config.parser_options.stop_at_path.as_deref() {
+        for stop_path in &config.parser_options.stop_at_paths {
             registry.get_or_create_path(stop_path);
         }
 
