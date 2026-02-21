@@ -32,8 +32,8 @@ The YAML configuration defines the mapping between your XML structure and Arrow 
 
 ```yaml
 parser_options:
-  trim_text: <true|false>        # Whether to trim whitespace from text nodes (default: false)
-  stop_at_paths: [<xml_path>]    # Stop parsing after any listed closing tag (optional)
+  trim_text: <true|false>      # Whether to trim whitespace from text nodes (default: false)
+  stop_at_paths: [<xml_path>]  # Stop parsing after any listed closing tag (optional)
 tables:
   - name: <table_name>         # The name of the resulting Arrow table
     xml_path: <xml_path>       # The XML path to the *parent* element of the table's row elements
