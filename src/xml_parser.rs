@@ -11,7 +11,6 @@
 //! This means we front-load configuration validation and path compilation so the
 //! event loop can focus on direct indexing and appends.
 use std::io::BufRead;
-use std::marker::PhantomData;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -24,6 +23,7 @@ use arrow::compute::kernels::numeric;
 use arrow::datatypes::{DataType, Field, Float32Type, Float64Type, Schema};
 use indexmap::IndexMap;
 use quick_xml::Reader;
+use quick_xml::encoding::Decoder;
 use quick_xml::escape;
 use quick_xml::events::Event;
 use quick_xml::events::attributes::Attributes;
@@ -619,7 +619,6 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
             &mut path_tracker,
             &mut xml_to_arrow_converter,
             &stop_node_ids,
-            PhantomData,
         )?;
     } else {
         process_xml_events::<_, false>(
@@ -627,7 +626,6 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
             &mut path_tracker,
             &mut xml_to_arrow_converter,
             &stop_node_ids,
-            PhantomData,
         )?;
     }
 
@@ -640,7 +638,6 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
     path_tracker: &mut PathTracker,
     xml_to_arrow_converter: &mut XmlToArrowConverter,
     stop_node_ids: &[PathNodeId],
-    _marker: PhantomData<bool>,
 ) -> Result<()> {
     let mut buf = Vec::with_capacity(4096);
     let mut attr_name_buffer = String::with_capacity(64);
@@ -669,6 +666,7 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                 if PARSE_ATTRIBUTES {
                     if node_id.is_some() {
                         parse_attributes(
+                            reader.decoder(),
                             e.attributes(),
                             path_tracker,
                             xml_to_arrow_converter,
@@ -749,6 +747,7 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
 
 #[inline]
 fn parse_attributes(
+    decoder: Decoder,
     attributes: Attributes,
     path_tracker: &mut PathTracker,
     xml_to_arrow_converter: &mut XmlToArrowConverter,
@@ -766,10 +765,8 @@ fn parse_attributes(
         let atom = Atom::from(attr_name_buffer.as_str());
         if let Some(attr_node_id) = path_tracker.enter_atom(atom, &xml_to_arrow_converter.registry)
         {
-            xml_to_arrow_converter.set_field_value_for_node(
-                attr_node_id,
-                std::str::from_utf8(attribute.value.as_ref())?,
-            );
+            let value = attribute.decode_and_unescape_value(decoder)?;
+            xml_to_arrow_converter.set_field_value_for_node(attr_node_id, &value);
         }
         path_tracker.leave();
     }
@@ -1289,6 +1286,56 @@ mod tests {
             vec!["Content 1", "Content 2"],
             StringArray
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_nested_parent_indices_three_levels() -> Result<()> {
+        let xml_content = r#"
+        <root>
+            <group>
+                <item><value>1</value></item>
+                <item><value>2</value></item>
+            </group>
+            <group>
+                <item><value>3</value></item>
+                <item><value>4</value></item>
+                <item><value>5</value></item>
+            </group>
+            <group>
+                <item><value>6</value></item>
+            </group>
+        </root>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: groups
+                  xml_path: /root
+                  levels: [group]
+                  fields: []
+                - name: items
+                  xml_path: /root/group
+                  levels: [group, item]
+                  fields:
+                    - name: value
+                      xml_path: /root/group/item/value
+                      data_type: Int32
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        assert_eq!(batch.num_rows(), 6);
+
+        // Each item's <group> index should reflect which group it belongs to,
+        // not reset to 0 for every new group.
+        assert_array_values!(batch, "<group>", vec![0u32, 0, 1, 1, 1, 2], UInt32Array);
+        assert_array_values!(batch, "<item>", vec![0u32, 1, 0, 1, 2, 0], UInt32Array);
+        assert_array_values!(batch, "value", vec![1i32, 2, 3, 4, 5, 6], Int32Array);
 
         Ok(())
     }
@@ -3420,6 +3467,76 @@ mod tests {
         assert_array_values!(batch, "version", vec!["2.0"], StringArray);
         assert_array_values!(batch, "encoding", vec!["utf-8"], StringArray);
         assert_array_values!(batch, "data", vec!["content"], StringArray);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_attribute_xml_entities_unescaped() -> Result<()> {
+        let xml_content = r#"
+        <items>
+            <item id="AT&amp;T" label="2 &lt; 3" note="&quot;quoted&quot;" path="a&apos;b"/>
+        </items>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: items
+                  xml_path: /items
+                  levels: [item]
+                  fields:
+                    - name: id
+                      xml_path: /items/item/@id
+                      data_type: Utf8
+                    - name: label
+                      xml_path: /items/item/@label
+                      data_type: Utf8
+                    - name: note
+                      xml_path: /items/item/@note
+                      data_type: Utf8
+                    - name: path
+                      xml_path: /items/item/@path
+                      data_type: Utf8
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        assert_array_values!(batch, "id", vec!["AT&T"], StringArray);
+        assert_array_values!(batch, "label", vec!["2 < 3"], StringArray);
+        assert_array_values!(batch, "note", vec!["\"quoted\""], StringArray);
+        assert_array_values!(batch, "path", vec!["a'b"], StringArray);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_attribute_numeric_entities_unescaped() -> Result<()> {
+        let xml_content = r#"<items><item symbol="&#65;&#66;&#67;" euro="&#x20AC;"/></items>"#;
+
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: items
+                  xml_path: /items
+                  levels: [item]
+                  fields:
+                    - name: symbol
+                      xml_path: /items/item/@symbol
+                      data_type: Utf8
+                    - name: euro
+                      xml_path: /items/item/@euro
+                      data_type: Utf8
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        assert_array_values!(batch, "symbol", vec!["ABC"], StringArray); // decimal refs
+        assert_array_values!(batch, "euro", vec!["€"], StringArray); // hex ref
 
         Ok(())
     }
