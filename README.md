@@ -31,6 +31,9 @@ A Python version of this library is also available on GitHub: [https://github.co
 The YAML configuration defines the mapping between your XML structure and Arrow tables and fields.
 
 ```yaml
+parser_options:
+  trim_text: <true|false>        # Whether to trim whitespace from text nodes (default: false)
+  stop_at_paths: [<xml_path>]    # Stop parsing after any listed closing tag (optional)
 tables:
   - name: <table_name>         # The name of the resulting Arrow table
     xml_path: <xml_path>       # The XML path to the *parent* element of the table's row elements
@@ -47,6 +50,9 @@ tables:
   - name: ...                  # Define additional tables as needed
 ```
 
+*   **`parser_options`:** Optional parsing controls.
+    *   **`trim_text` (Optional):** Whether to trim whitespace from text nodes (defaults to `false`).
+    *   **`stop_at_paths` (Optional):** XML paths where parsing should stop after any closing tag.
 *   **`tables`:** A list of table configurations. Each entry defines a separate Arrow table.
     *   **`name`:** The name of the resulting Arrow `RecordBatch` (table).
     *   **`xml_path`:** An XPath-like string specifying the parent element of the row elements. For example, for `<library><book>...</book><book>...</book></library>`, the `xml_path` would be `/library`.
