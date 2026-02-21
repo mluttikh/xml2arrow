@@ -209,11 +209,11 @@ tables:
       data_type: Float32
       nullable: false
     - name: description
-      xml_path: report/monitoring_stations/monitoring_station/metadata/description
+      xml_path: /report/monitoring_stations/monitoring_station/metadata/description
       data_type: Utf8
       nullable: false
     - name: install_date
-      xml_path: report/monitoring_stations/monitoring_station/metadata/install_date
+      xml_path: /report/monitoring_stations/monitoring_station/metadata/install_date
       data_type: Utf8
       nullable: false
   - name: measurements
