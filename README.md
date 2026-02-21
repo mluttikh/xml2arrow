@@ -4,6 +4,7 @@
 [![docs.rs](https://docs.rs/xml2arrow/badge.svg)](https://docs.rs/xml2arrow)
 [![Python](https://img.shields.io/badge/python-xml2arrow-blue.svg?style=flat&logo=python)](https://github.com/mluttikh/xml2arrow-python)
 [![License](https://img.shields.io/crates/l/xml2arrow)](LICENSE)
+
 # xml2arrow
 
 A Rust crate for efficiently converting XML data to Apache Arrow format.
