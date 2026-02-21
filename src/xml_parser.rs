@@ -1291,6 +1291,56 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_nested_parent_indices_three_levels() -> Result<()> {
+        let xml_content = r#"
+        <root>
+            <group>
+                <item><value>1</value></item>
+                <item><value>2</value></item>
+            </group>
+            <group>
+                <item><value>3</value></item>
+                <item><value>4</value></item>
+                <item><value>5</value></item>
+            </group>
+            <group>
+                <item><value>6</value></item>
+            </group>
+        </root>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: groups
+                  xml_path: /root
+                  levels: [group]
+                  fields: []
+                - name: items
+                  xml_path: /root/group
+                  levels: [group, item]
+                  fields:
+                    - name: value
+                      xml_path: /root/group/item/value
+                      data_type: Int32
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("items").unwrap();
+
+        assert_eq!(batch.num_rows(), 6);
+
+        // Each item's <group> index should reflect which group it belongs to,
+        // not reset to 0 for every new group.
+        assert_array_values!(batch, "<group>", vec![0u32, 0, 1, 1, 1, 2], UInt32Array);
+        assert_array_values!(batch, "<item>", vec![0u32, 1, 0, 1, 2, 0], UInt32Array);
+        assert_array_values!(batch, "value", vec![1i32, 2, 3, 4, 5, 6], Int32Array);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_structure_deeply_nested() -> Result<()> {
         let xml_content = r#"
         <level1>
