@@ -323,40 +323,22 @@ parent station by row position, enabling a join on `stations.<station> = measure
 
 ## ⚡ Performance
 
-`xml2arrow` is optimized for high-volume data processing. Benchmarks are managed using the **Criterion.rs** framework.
+`xml2arrow` is designed for single-pass, low-allocation parsing. The core of this
+is a trie-based path registry that replaces string comparisons in the hot loop with
+direct integer indexing.
 
-### Running Benchmarks
-
-You can run all configured benchmarks with the following command:
+Benchmarks are managed with [Criterion.rs](https://github.com/bheisler/criterion.rs).
 
 ```bash
+# Run all benchmarks
 cargo bench
+
+# Save a named baseline before making changes
+cargo bench --bench parse_benchmark -- --save-baseline before
+
+# Compare against it after
+cargo bench --bench parse_benchmark -- --baseline before
+
+# Open the interactive HTML report
+open target/criterion/report/index.html
 ```
-
-### Benchmark Comparison and Baselines
-
-Criterion.rs allows you to save performance data (a **baseline**) and compare future runs against it to track optimizations or regressions.
-
-| Task | Command | Description |
-| :--- | :--- | :--- |
-| **Save a Baseline** | `cargo bench --bench parse_benchmark -- --save-baseline <name>` | Runs the benchmark and saves the results in the `target/criterion/<name>` directory. |
-| **Compare to Baseline** | `cargo bench --bench parse_benchmark -- --baseline <name>` | Runs the benchmark again and compares the new results against the saved baseline `<name>`. |
-| **View Reports** | `open target/criterion/report/index.html` | After any run, a detailed interactive HTML report is generated for analysis.  |
-
-### Example Comparison Workflow
-
-1.  **Establish Initial Baseline:**
-
-    ```bash
-    cargo bench --bench parse_benchmark -- --save-baseline v1.0.0
-    ```
-
-2.  *...Make changes/optimizations to the code...*
-
-3.  **Compare New Code against Baseline:**
-
-    ```bash
-    cargo bench --bench parse_benchmark -- --baseline v1.0.0
-    ```
-
-The output will clearly indicate the difference in performance (time, confidence intervals) between the two runs.
