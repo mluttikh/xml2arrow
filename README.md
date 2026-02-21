@@ -21,11 +21,12 @@ attribute-heavy XML into flat, typed tables ready for analytics pipelines.
 
 ## Features
 
-- 🚀 **High-performance** XML parsing using [quick-xml](https://github.com/tafia/quick-xml)
-- 📊 **Flexible Mapping:** Map complex XML structures to Apache Arrow with YAML
-- 🔄 **Nested Structure Support:** Handle deeply nested XML hierarchies
-- 🎯 **Customizable Type Conversion:** Automatically convert data types and apply unit conversion.
-- 💡 **Attribute & Element Extraction:** Seamlessly extract XML attributes or elements
+- 🚀 **High-performance** single-pass XML parsing via [quick-xml](https://github.com/tafia/quick-xml)
+- 📊 **Declarative mapping** from XML structures to Arrow tables using a YAML config file
+- 🔄 **Nested structure support** with parent–child index columns linking related tables
+- 🎯 **Type conversion** including automatic scale and offset transforms for float fields
+- 💡 **Attribute and element extraction** using `@`-prefixed path segments for attributes
+- ⏹️ **Early termination** via `stop_at_paths` for efficiently reading only part of a file
 
 ## Usage
 
