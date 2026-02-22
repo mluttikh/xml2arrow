@@ -4,7 +4,8 @@
 [![docs.rs](https://docs.rs/xml2arrow/badge.svg)](https://docs.rs/xml2arrow)
 [![Python](https://img.shields.io/badge/python-xml2arrow-blue.svg?style=flat&logo=python)](https://github.com/mluttikh/xml2arrow-python)
 [![License](https://img.shields.io/crates/l/xml2arrow)](LICENSE)
-# XML2ARROW
+
+# xml2arrow
 
 A Rust crate for efficiently converting XML data to Apache Arrow format.
 
@@ -12,86 +13,147 @@ A Python version of this library is also available on GitHub: [https://github.co
 
 ## Overview
 
-`xml2arrow` provides a high-performance solution for transforming XML documents into Apache Arrow tables. It leverages the [quick-xml](https://github.com/tafia/quick-xml) parser for efficient XML processing and the [arrow](https://github.com/apache/arrow-rs) crate for building Arrow data structures. This makes it ideal for handling large XML datasets and integrating them into data processing pipelines that utilize the Arrow ecosystem.
+`xml2arrow` transforms XML documents into Apache Arrow `RecordBatch`es. It uses
+[quick-xml](https://github.com/tafia/quick-xml) for single-pass streaming XML
+parsing and the [arrow](https://github.com/apache/arrow-rs) crate for building
+columnar data structures. The mapping from XML paths to Arrow fields is defined
+in a YAML configuration file, making it straightforward to extract nested or
+attribute-heavy XML into flat, typed tables ready for analytics pipelines.
+
+## Installation
+
+Add the following to your `Cargo.toml`:
+
+```toml
+[dependencies]
+xml2arrow = "0.14.0"
+```
 
 ## Features
 
-- 🚀 **High-performance** XML parsing using [quick-xml](https://github.com/tafia/quick-xml)
-- 📊 **Flexible Mapping:** Map complex XML structures to Apache Arrow with YAML
-- 🔄 **Nested Structure Support:** Handle deeply nested XML hierarchies
-- 🎯 **Customizable Type Conversion:** Automatically convert data types and apply unit conversion.
-- 💡 **Attribute & Element Extraction:** Seamlessly extract XML attributes or elements
+- 🚀 **High-performance** single-pass XML parsing via [quick-xml](https://github.com/tafia/quick-xml)
+- 📊 **Declarative mapping** from XML structures to Arrow tables using a YAML config file
+- 🔄 **Nested structure support** with parent–child index columns linking related tables
+- 🎯 **Type conversion** including automatic scale and offset transforms for float fields
+- 💡 **Attribute and element extraction** using `@`-prefixed path segments for attributes
+- ⏹️ **Early termination** via `stop_at_paths` for efficiently reading only part of a file
 
 ## Usage
 
-`xml2arrow` converts XML data to Apache Arrow format using a YAML configuration file.
+### 1. Write a configuration file
 
-### 1. Configuration File (YAML):
-
-The YAML configuration defines the mapping between your XML structure and Arrow tables and fields.
+The YAML configuration defines which parts of the XML document become tables and
+how their fields are typed. The full schema is:
 
 ```yaml
 parser_options:
-  trim_text: <true|false>      # Whether to trim whitespace from text nodes (default: false)
-  stop_at_paths: [<xml_path>]  # Stop parsing after any listed closing tag (optional)
+  trim_text: <true|false>      # Trim whitespace from text nodes (default: false)
+  stop_at_paths: [<xml_path>]  # Stop parsing after these closing tags (optional,
+                               # useful for reading only a file header)
 tables:
-  - name: <table_name>         # The name of the resulting Arrow table
-    xml_path: <xml_path>       # The XML path to the *parent* element of the table's row elements
-    levels:                    # Index levels for nested XML structures.
-    - <level1>
-    - <level2> 
+  - name: <table_name>         # Name of the resulting Arrow RecordBatch
+    xml_path: <xml_path>       # Path to the element whose children are rows.
+                               # Use "/" to treat the whole document as one row.
+    levels: [<level>, ...]     # Parent-link index columns — see "Nested tables"
     fields:
-    - name: <field_name>       # The name of the Arrow field
-      xml_path: <field_path>   # The XML path to the field within a row
-      data_type: <data_type>   # The Arrow data type (see below)
-      nullable: <true|false>   # Whether the field can be null
-      scale: <number>          # Optional scaling factor for floats. 
-      offset: <number>         # Optional offset for numeric floats
-  - name: ...                  # Define additional tables as needed
+      - name: <field_name>     # Arrow column name
+        xml_path: <field_path> # Path to the element or attribute holding the value.
+                               # Prefix the last segment with @ for attributes
+                               # (e.g. /library/book/@id)
+        data_type: <type>      # Arrow data type — see supported types below
+        nullable: <true|false> # Whether the field can be null (default: false)
+                               # If false, missing/empty tags cause a ParseError.
+        scale: <number>        # Multiply float values by this factor (optional)
+        offset: <number>       # Add this value to float values after scaling (optional)
+                               # value = (value * scale) + offset
 ```
 
-*   **`parser_options`:** Optional parsing controls.
-    *   **`trim_text` (Optional):** Whether to trim whitespace from text nodes (defaults to `false`).
-    *   **`stop_at_paths` (Optional):** XML paths where parsing should stop after any closing tag.
-*   **`tables`:** A list of table configurations. Each entry defines a separate Arrow table.
-    *   **`name`:** The name of the resulting Arrow `RecordBatch` (table).
-    *   **`xml_path`:** An XPath-like string specifying the parent element of the row elements. For example, for `<library><book>...</book><book>...</book></library>`, the `xml_path` would be `/library`.
-    *   **`levels`:** An array of strings representing parent tables for creating indexes in nested structures. For `/library/shelves/shelf/books/book`, use `levels: ["shelves", "books"]`. This creates indexes named `<shelves>` and `<books>`.
-    *   **`fields`:** A list of field configurations (columns) for the Arrow table.
-        *   **`name`:** The name of the field in the Arrow schema.
-        *   **`xml_path`:** An XPath-like string selecting the field's value. Use `@` to select attributes (e.g., `/library/book/@id`).
-        *   **`data_type`:** The Arrow data type. Supported types:
-            *   `Boolean` (`false`, `true`, `0`, `1`, `yes`, `no`, `on`, `off`, `t`, `f`, `y`, `n` — case-insensitive, surrounding whitespace ignored)
-            *   `Int8`, `UInt8`, `Int16`, `UInt16`, `Int32`, `UInt32`, `Int64`, `UInt64`
-            *   `Float32`, `Float64`
-            *   `Utf8` (Strings)
-        *   **`nullable` (Optional):** Whether the field can be null (defaults to `false`).
-        *   **`scale` (Optional):** A scaling factor for float fields.
-        *   **`offset` (Optional):** An offset value for float fields.
+**Supported data types:** `Boolean`, `Int8`, `UInt8`, `Int16`, `UInt16`, `Int32`,
+`UInt32`, `Int64`, `UInt64`, `Float32`, `Float64`, `Utf8`
 
-### 2. Parsing the XML
+`Boolean` fields accept (case-insensitively): `true`, `false`, `1`, `0`, `yes`,
+`no`, `on`, `off`, `t`, `f`, `y`, `n`.
+
+### 2. Nested tables and `levels`
+
+When your XML has a parent–child relationship between tables, `levels` creates the
+index columns that link child rows back to their parent rows. Each string in the
+list names an element at a nesting boundary above the row element, and generates
+a zero-based `UInt32` column named `<level>` in the output.
+
+*Note: If a table is defined purely to establish a structural hierarchy (i.e., it
+has levels defined but an empty fields list), it acts only as a boundary and will
+be excluded from the final output map.*
+
+For example, given stations that each have multiple measurements:
+
+```xml
+<report>
+  <monitoring_stations>
+    <monitoring_station>   <!-- boundary → produces <station> index -->
+      <measurements>
+        <measurement>      <!-- row element for the measurements table -->
+          ...
+        </measurement>
+      </measurements>
+    </monitoring_station>
+  </monitoring_stations>
+</report>
+```
+
+```yaml
+- name: measurements
+  xml_path: /report/monitoring_stations/monitoring_station/measurements
+  levels: [station, measurement]
+  fields: [...]
+```
+
+This produces a `<station>` column (which parent station each measurement belongs
+to) and a `<measurement>` column (the per-station row counter), letting you join
+the `measurements` table back to the `stations` table on `<station>`.
+
+### 3. Parse the XML
+
 ```rust
 use std::fs::File;
 use std::io::BufReader;
 use xml2arrow::{Config, parse_xml};
 
-fn main() -> Result<(), Box<dyn std::error::Error>>{
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_yaml_file("config.yaml")?;
 
     let file = File::open("data.xml")?;
     let reader = BufReader::new(file);
     let record_batches = parse_xml(reader, &config)?;
 
-    // Process the record batches...
+    for (name, batch) in &record_batches {
+        println!("Table '{}': {} rows, {} columns", name, batch.num_rows(), batch.num_columns());
+
+        // Access a column by name
+        if let Some(col) = batch.column_by_name("temperature") {
+            println!("temperature column has {} values", col.len());
+        }
+    }
+
     Ok(())
 }
 ```
 
+`parse_xml` returns an `IndexMap<String, RecordBatch>` whose keys are the table
+names defined in your config. The `RecordBatch` type is the standard Arrow
+in-memory columnar representation and can be passed directly to libraries such as
+[DataFusion](https://github.com/apache/datafusion),
+[Polars](https://github.com/pola-rs/polars), or written to Parquet via
+[parquet](https://crates.io/crates/parquet).
+
+---
+
 ## Example
 
-This example demonstrates how to convert meteorological station data from XML to Arrow format.
+This example extracts meteorological station data from a nested XML document into
+three linked Arrow tables.
 
-### 1. XML Data (`stations.xml`)
+### XML data (`stations.xml`)
 
 ```xml
 <report>
@@ -130,7 +192,7 @@ This example demonstrates how to convert meteorological station data from XML to
       <location>
         <latitude>11.891496388319311</latitude>
         <longitude>135.09336983543022</longitude>
-        <elevation unit="m">174.53349357280004</elevation>
+        <elevation>174.53349357280004</elevation>
       </location>
       <measurements>
         <measurement>
@@ -167,7 +229,7 @@ This example demonstrates how to convert meteorological station data from XML to
 </report>
 ```
 
-### 2. Configuration File (`stations.yaml`)
+### Configuration (`stations.yaml`)
 
 ```yaml
 tables:
@@ -175,99 +237,65 @@ tables:
     xml_path: /
     levels: []
     fields:
-    - name: title
-      xml_path: /report/header/title
-      data_type: Utf8
-      nullable: false
-    - name: created_by
-      xml_path: /report/header/created_by
-      data_type: Utf8
-      nullable: false
-    - name: creation_time
-      xml_path: /report/header/creation_time
-      data_type: Utf8
-      nullable: false
+      - name: title
+        xml_path: /report/header/title
+        data_type: Utf8
+      - name: created_by
+        xml_path: /report/header/created_by
+        data_type: Utf8
+      - name: creation_time
+        xml_path: /report/header/creation_time
+        data_type: Utf8
+
   - name: stations
     xml_path: /report/monitoring_stations
     levels:
-    - station
+      - station
     fields:
-    - name: id
-      xml_path: /report/monitoring_stations/monitoring_station/@id  # Path to an attribute
-      data_type: Utf8
-      nullable: false
-    - name: latitude
-      xml_path: /report/monitoring_stations/monitoring_station/location/latitude
-      data_type: Float32
-      nullable: false
-    - name: longitude
-      xml_path: /report/monitoring_stations/monitoring_station/location/longitude
-      data_type: Float32
-      nullable: false
-    - name: elevation
-      xml_path: /report/monitoring_stations/monitoring_station/location/elevation
-      data_type: Float32
-      nullable: false
-    - name: description
-      xml_path: /report/monitoring_stations/monitoring_station/metadata/description
-      data_type: Utf8
-      nullable: false
-    - name: install_date
-      xml_path: /report/monitoring_stations/monitoring_station/metadata/install_date
-      data_type: Utf8
-      nullable: false
+      - name: id
+        xml_path: /report/monitoring_stations/monitoring_station/@id
+        data_type: Utf8
+      - name: latitude
+        xml_path: /report/monitoring_stations/monitoring_station/location/latitude
+        data_type: Float32
+      - name: longitude
+        xml_path: /report/monitoring_stations/monitoring_station/location/longitude
+        data_type: Float32
+      - name: elevation
+        xml_path: /report/monitoring_stations/monitoring_station/location/elevation
+        data_type: Float32
+      - name: description
+        xml_path: /report/monitoring_stations/monitoring_station/metadata/description
+        data_type: Utf8
+      - name: install_date
+        xml_path: /report/monitoring_stations/monitoring_station/metadata/install_date
+        data_type: Utf8
+
   - name: measurements
     xml_path: /report/monitoring_stations/monitoring_station/measurements
     levels:
-    - station  # Link to the 'stations' table by element order
-    - measurement
+      - station    # Links each measurement back to its parent station
+      - measurement
     fields:
-    - name: timestamp
-      xml_path: /report/monitoring_stations/monitoring_station/measurements/measurement/timestamp
-      data_type: Utf8
-      nullable: false
-    - name: temperature
-      xml_path: /report/monitoring_stations/monitoring_station/measurements/measurement/temperature
-      data_type: Float64
-      nullable: false
-      offset: 273.15  # Convert from Celsius to Kelvin
-    - name: pressure
-      xml_path: /report/monitoring_stations/monitoring_station/measurements/measurement/pressure
-      data_type: Float64
-      nullable: false
-      scale: 100.0    # Convert from hPa to Pa
-    - name: humidity
-      xml_path: /report/monitoring_stations/monitoring_station/measurements/measurement/humidity
-      data_type: Float64
-      nullable: false
+      - name: timestamp
+        xml_path: /report/monitoring_stations/monitoring_station/measurements/measurement/timestamp
+        data_type: Utf8
+      - name: temperature
+        xml_path: /report/monitoring_stations/monitoring_station/measurements/measurement/temperature
+        data_type: Float64
+        offset: 273.15   # Convert °C → K
+      - name: pressure
+        xml_path: /report/monitoring_stations/monitoring_station/measurements/measurement/pressure
+        data_type: Float64
+        scale: 100.0     # Convert hPa → Pa
+      - name: humidity
+        xml_path: /report/monitoring_stations/monitoring_station/measurements/measurement/humidity
+        data_type: Float64
 ```
 
-### 3. Parsing the XML
+### Output
 
-```rust
-use std::fs::File;
-use std::io::BufReader;
-use xml2arrow::{Config, parse_xml};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::from_yaml_file("stations.yaml")?;
-
-    let file = File::open("stations.xml")?;
-    let reader = BufReader::new(file);
-    let record_batches = parse_xml(reader, &config)?;
-
-    // Accessing the record batches (example)
-    for (name, batch) in record_batches {
-        // Process the record batches...
-    }
-
-    Ok(())
-}
-```
-
-### 4. Expected Record Batches (Conceptual)
-
-```
+```text
 - report:
  ┌─────────────────────────────┬──────────────────────────┬──────────────────────┐
  │ title                       ┆ created_by               ┆ creation_time        │
@@ -276,6 +304,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
  ╞═════════════════════════════╪══════════════════════════╪══════════════════════╡
  │ Meteorological Station Data ┆ National Weather Service ┆ 2024-12-30T13:59:15Z │
  └─────────────────────────────┴──────────────────────────┴──────────────────────┘
+
 - stations:
  ┌───────────┬───────┬────────────┬────────────┬────────────┬────────────────────────┬──────────────┐
  │ <station> ┆ id    ┆ latitude   ┆ longitude  ┆ elevation  ┆ description            ┆ install_date │
@@ -287,6 +316,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
  │ 1         ┆ MS002 ┆ 11.891497  ┆ 135.093369 ┆ 174.533493 ┆ Located in the Desert  ┆ 2024-01-17   │
  │           ┆       ┆            ┆            ┆            ┆ area, us…              ┆              │
  └───────────┴───────┴────────────┴────────────┴────────────┴────────────────────────┴──────────────┘
+
 - measurements:
  ┌───────────┬───────────────┬──────────────────────┬─────────────┬───────────────┬───────────┐
  │ <station> ┆ <measurement> ┆ timestamp            ┆ temperature ┆ pressure      ┆ humidity  │
@@ -302,42 +332,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
  └───────────┴───────────────┴──────────────────────┴─────────────┴───────────────┴───────────┘
 ```
 
+The `<station>` index in the `measurements` table links each measurement to its
+parent station by row position, enabling a join on `stations.<station> = measurements.<station>`.
+
+---
+
 ## ⚡ Performance
 
-`xml2arrow` is optimized for high-volume data processing. Benchmarks are managed using the **Criterion.rs** framework.
+`xml2arrow` is designed for single-pass, low-allocation parsing. The core of this
+is a trie-based path registry that replaces string comparisons in the hot loop with
+direct integer indexing.
 
-### Running Benchmarks
+Benchmarks were measured on an Apple M1 Pro using [Criterion.rs](https://github.com/bheisler/criterion.rs):
 
-You can run all configured benchmarks with the following command:
+| Benchmark                          | File size | Throughput     |
+| :--------------------------------- | --------: | :------------- |
+| 1K measurements, 2 sensors (small) |    413 KB | ~298 MiB/s     |
+| 10K measurements, 5 sensors (medium) |    10 MB | ~308 MiB/s     |
+| 100K measurements, 10 sensors (large) |  202 MB | ~307 MiB/s     |
+| 200K measurements, 5 sensors (xlarge) |  203 MB | ~307 MiB/s     |
+
+Throughput stays consistent from sub-megabyte to 200 MB files, reflecting the
+predictable cost of the single-pass design.
 
 ```bash
+# Run all benchmarks
 cargo bench
+
+# Save a named baseline before making changes
+cargo bench --bench parse_benchmark -- --save-baseline before
+
+# Compare against it after
+cargo bench --bench parse_benchmark -- --baseline before
+
+# Open the interactive HTML report
+open target/criterion/report/index.html
 ```
-
-### Benchmark Comparison and Baselines
-
-Criterion.rs allows you to save performance data (a **baseline**) and compare future runs against it to track optimizations or regressions.
-
-| Task | Command | Description |
-| :--- | :--- | :--- |
-| **Save a Baseline** | `cargo bench --bench parse_benchmark -- --save-baseline <name>` | Runs the benchmark and saves the results in the `target/criterion/<name>` directory. |
-| **Compare to Baseline** | `cargo bench --bench parse_benchmark -- --baseline <name>` | Runs the benchmark again and compares the new results against the saved baseline `<name>`. |
-| **View Reports** | `open target/criterion/report/index.html` | After any run, a detailed interactive HTML report is generated for analysis.  |
-
-### Example Comparison Workflow
-
-1.  **Establish Initial Baseline:**
-
-    ```bash
-    cargo bench --bench parse_benchmark -- --save-baseline v1.0.0
-    ```
-
-2.  *...Make changes/optimizations to the code...*
-
-3.  **Compare New Code against Baseline:**
-
-    ```bash
-    cargo bench --bench parse_benchmark -- --baseline v1.0.0
-    ```
-
-The output will clearly indicate the difference in performance (time, confidence intervals) between the two runs.
