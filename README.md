@@ -16,8 +16,8 @@ A Python version of this library is also available on GitHub: [https://github.co
 `xml2arrow` transforms XML documents into Apache Arrow `RecordBatch`es. It uses
 [quick-xml](https://github.com/tafia/quick-xml) for single-pass streaming XML
 parsing and the [arrow](https://github.com/apache/arrow-rs) crate for building
-columnar data structures. The mapping from XML paths to Arrow fields is defined in
-a YAML configuration file, making it straightforward to extract nested or
+columnar data structures. The mapping from XML paths to Arrow fields is defined
+in a YAML configuration file, making it straightforward to extract nested or
 attribute-heavy XML into flat, typed tables ready for analytics pipelines.
 
 ## Installation
@@ -26,7 +26,7 @@ Add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-xml2arrow = "0.15.0"
+xml2arrow = "0.14.0"
 ```
 
 ## Features
@@ -78,8 +78,8 @@ tables:
 
 When your XML has a parent–child relationship between tables, `levels` creates the
 index columns that link child rows back to their parent rows. Each string in the
-list names an element at a nesting boundary above the row element, and generates a
-zero-based `UInt32` column named `<level>` in the output.
+list names an element at a nesting boundary above the row element, and generates
+a zero-based `UInt32` column named `<level>` in the output.
 
 *Note: If a table is defined purely to establish a structural hierarchy (i.e., it
 has levels defined but an empty fields list), it acts only as a boundary and will
@@ -295,7 +295,7 @@ tables:
 
 ### Output
 
-```
+```text
 - report:
  ┌─────────────────────────────┬──────────────────────────┬──────────────────────┐
  │ title                       ┆ created_by               ┆ creation_time        │
