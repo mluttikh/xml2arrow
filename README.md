@@ -20,6 +20,15 @@ columnar data structures. The mapping from XML paths to Arrow fields is defined 
 a YAML configuration file, making it straightforward to extract nested or
 attribute-heavy XML into flat, typed tables ready for analytics pipelines.
 
+## Installation
+
+Add the following to your `Cargo.toml`:
+
+```toml
+[dependencies]
+xml2arrow = "0.15.0"
+```
+
 ## Features
 
 - 🚀 **High-performance** single-pass XML parsing via [quick-xml](https://github.com/tafia/quick-xml)
@@ -53,8 +62,10 @@ tables:
                                # (e.g. /library/book/@id)
         data_type: <type>      # Arrow data type — see supported types below
         nullable: <true|false> # Whether the field can be null (default: false)
+                               # If false, missing/empty tags cause a ParseError.
         scale: <number>        # Multiply float values by this factor (optional)
         offset: <number>       # Add this value to float values after scaling (optional)
+                               # value = (value * scale) + offset
 ```
 
 **Supported data types:** `Boolean`, `Int8`, `UInt8`, `Int16`, `UInt16`, `Int32`,
@@ -69,6 +80,10 @@ When your XML has a parent–child relationship between tables, `levels` creates
 index columns that link child rows back to their parent rows. Each string in the
 list names an element at a nesting boundary above the row element, and generates a
 zero-based `UInt32` column named `<level>` in the output.
+
+*Note: If a table is defined purely to establish a structural hierarchy (i.e., it
+has levels defined but an empty fields list), it acts only as a boundary and will
+be excluded from the final output map.*
 
 For example, given stations that each have multiple measurements:
 
@@ -328,7 +343,17 @@ parent station by row position, enabling a join on `stations.<station> = measure
 is a trie-based path registry that replaces string comparisons in the hot loop with
 direct integer indexing.
 
-Benchmarks are managed with [Criterion.rs](https://github.com/bheisler/criterion.rs).
+Benchmarks were measured on an Apple M1 Pro using [Criterion.rs](https://github.com/bheisler/criterion.rs):
+
+| Benchmark                          | File size | Throughput     |
+| :--------------------------------- | --------: | :------------- |
+| 1K measurements, 2 sensors (small) |    413 KB | ~298 MiB/s     |
+| 10K measurements, 5 sensors (medium) |    10 MB | ~308 MiB/s     |
+| 100K measurements, 10 sensors (large) |  202 MB | ~307 MiB/s     |
+| 200K measurements, 5 sensors (xlarge) |  203 MB | ~307 MiB/s     |
+
+Throughput stays consistent from sub-megabyte to 200 MB files, reflecting the
+predictable cost of the single-pass design.
 
 ```bash
 # Run all benchmarks
