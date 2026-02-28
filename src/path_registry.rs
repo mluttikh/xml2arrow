@@ -11,6 +11,9 @@
 //    - Convert every table path and field path into a trie of interned atoms.
 //    - Store table/field metadata at the terminal node of each path.
 //    - Use integer IDs so lookups are array indexing rather than hash maps.
+//    - Paths starting with `/?xml/` represent the XML declaration (e.g.
+//      `/?xml/@version`). These are registered like normal paths but resolved
+//      via a dedicated lookup at parse time when an `Event::Decl` is seen.
 //
 // 2) Run-time: PathTracker
 //    - Maintain a stack of node IDs corresponding to the current XML depth.
@@ -25,6 +28,10 @@ use fxhash::FxHashMap;
 use string_cache::DefaultAtom as Atom;
 
 use crate::config::Config;
+
+/// The synthetic element name used in the path trie for the XML declaration.
+/// Fields like `/?xml/@version` are registered under this node as a child of ROOT.
+pub(crate) const XML_DECL_NODE_NAME: &str = "?xml";
 
 /// A node ID in the path registry trie.
 ///
@@ -213,6 +220,39 @@ impl PathRegistry {
     #[allow(dead_code)]
     pub fn root_info(&self) -> &PathNodeInfo {
         &self.node_info[0]
+    }
+
+    /// Returns the node ID for the `?xml` declaration node if it exists in the trie.
+    ///
+    /// This is used by the parser to resolve declaration attribute fields
+    /// (e.g. `/?xml/@version`) when an `Event::Decl` is encountered.
+    pub fn get_decl_node_id(&self) -> Option<PathNodeId> {
+        let atom = Atom::from(XML_DECL_NODE_NAME);
+        self.get_child(PathNodeId::ROOT, &atom)
+    }
+
+    /// Collects all declaration attribute children (`@version`, `@encoding`, `@standalone`)
+    /// under the `?xml` node that have field mappings.
+    ///
+    /// Returns a list of (attribute_name, node_id) pairs. This is called once during
+    /// setup so the parser can inject declaration values without trie lookups in the hot path.
+    pub fn collect_decl_field_nodes(&self) -> Vec<(&'static str, PathNodeId)> {
+        let decl_id = match self.get_decl_node_id() {
+            Some(id) => id,
+            None => return Vec::new(),
+        };
+
+        let attrs = ["@version", "@encoding", "@standalone"];
+        let mut result = Vec::new();
+        for attr_name in &attrs {
+            let atom = Atom::from(*attr_name);
+            if let Some(child_id) = self.get_child(decl_id, &atom) {
+                if self.get_node_info(child_id).has_fields() {
+                    result.push((*attr_name, child_id));
+                }
+            }
+        }
+        result
     }
 }
 

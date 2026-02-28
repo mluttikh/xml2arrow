@@ -45,10 +45,25 @@ impl Config {
     /// Validates the configuration by checking all field configurations.
     ///
     /// Returns an error if any field uses an unsupported combination (e.g., scale/offset on non-float types).
+    /// Also validates that XML declaration fields (`/?xml/...`) are only used on root-level tables.
     pub fn validate(&self) -> Result<()> {
         for table in &self.tables {
             for field in &table.fields {
                 field.validate()?;
+            }
+
+            // Declaration fields (/?xml/@version etc.) only make sense on the root table,
+            // because the XML declaration is document-level metadata, not per-element data.
+            let has_decl_fields = table
+                .fields
+                .iter()
+                .any(|f| f.xml_path.starts_with("/?xml/"));
+            if has_decl_fields && table.xml_path != "/" {
+                return Err(Error::ParseError(format!(
+                    "Table '{}' uses XML declaration fields (/?xml/...) but has xml_path '{}'. \
+                     Declaration fields are only allowed on root-level tables (xml_path: /)",
+                    table.name, table.xml_path
+                )));
             }
         }
         Ok(())
@@ -114,6 +129,8 @@ impl Config {
     ///
     /// This method iterates through all tables and their fields in the configuration and returns
     /// `true` if any field's XML path contains the "@" symbol, indicating that it targets an attribute.
+    /// Declaration fields (`/?xml/@...`) are excluded because they are handled separately via
+    /// the `Event::Decl` event rather than element attributes.
     ///
     /// # Returns
     ///
@@ -121,12 +138,23 @@ impl Config {
     pub fn requires_attribute_parsing(&self) -> bool {
         for table in &self.tables {
             for field in &table.fields {
-                if field.xml_path.contains('@') {
+                if field.xml_path.contains('@') && !field.xml_path.starts_with("/?xml/") {
                     return true;
                 }
             }
         }
         false
+    }
+
+    /// Checks if the configuration contains any fields targeting the XML declaration.
+    ///
+    /// Declaration fields use the synthetic path prefix `/?xml/` (e.g. `/?xml/@version`,
+    /// `/?xml/@encoding`, `/?xml/@standalone`). When present, the parser will extract
+    /// values from the `Event::Decl` event instead of ignoring it.
+    pub fn requires_declaration_parsing(&self) -> bool {
+        self.tables
+            .iter()
+            .any(|t| t.fields.iter().any(|f| f.xml_path.starts_with("/?xml/")))
     }
 }
 

@@ -25,8 +25,8 @@ use indexmap::IndexMap;
 use quick_xml::Reader;
 use quick_xml::encoding::Decoder;
 use quick_xml::escape;
-use quick_xml::events::Event;
 use quick_xml::events::attributes::Attributes;
+use quick_xml::events::{BytesDecl, Event};
 use string_cache::DefaultAtom as Atom;
 
 use crate::Config;
@@ -432,6 +432,11 @@ struct XmlToArrowConverter {
     registry: PathRegistry,
     /// Optional path nodes that trigger early termination after their closing tags.
     stop_node_ids: Vec<PathNodeId>,
+    /// Pre-resolved declaration attribute field mappings.
+    /// Each entry maps a declaration attribute name (`@version`, `@encoding`, `@standalone`)
+    /// to its node ID in the path registry. Populated once during setup so the parser
+    /// can inject declaration values without trie lookups in the hot path.
+    decl_field_nodes: Vec<(&'static str, PathNodeId)>,
 }
 
 impl XmlToArrowConverter {
@@ -456,11 +461,16 @@ impl XmlToArrowConverter {
 
         let builder_stack = Vec::new();
 
+        // Pre-resolve declaration field nodes so the event loop can set
+        // values directly by node ID without any string matching.
+        let decl_field_nodes = registry.collect_decl_field_nodes();
+
         Ok(Self {
             table_builders,
             builder_stack,
             registry,
             stop_node_ids,
+            decl_field_nodes,
         })
     }
 
@@ -609,16 +619,20 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
         xml_to_arrow_converter.start_table(PathNodeId::ROOT)?;
     }
 
+    // Pre-clone data needed by the event loop to avoid borrow conflicts.
+    let stop_node_ids = xml_to_arrow_converter.stop_node_ids.clone();
+    let decl_field_nodes = xml_to_arrow_converter.decl_field_nodes.clone();
+
     // Use specialized parsing logic based on whether attribute parsing is required.
     // This avoids unnecessary attribute processing and Empty event handling
     // when attributes are not needed, improving performance.
-    let stop_node_ids = xml_to_arrow_converter.stop_node_ids.clone();
     if config.requires_attribute_parsing() {
         process_xml_events::<_, true>(
             &mut reader,
             &mut path_tracker,
             &mut xml_to_arrow_converter,
             &stop_node_ids,
+            &decl_field_nodes,
         )?;
     } else {
         process_xml_events::<_, false>(
@@ -626,6 +640,7 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
             &mut path_tracker,
             &mut xml_to_arrow_converter,
             &stop_node_ids,
+            &decl_field_nodes,
         )?;
     }
 
@@ -638,6 +653,7 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
     path_tracker: &mut PathTracker,
     xml_to_arrow_converter: &mut XmlToArrowConverter,
     stop_node_ids: &[PathNodeId],
+    decl_field_nodes: &[(&'static str, PathNodeId)],
 ) -> Result<()> {
     let mut buf = Vec::with_capacity(4096);
     let mut attr_name_buffer = String::with_capacity(64);
@@ -735,12 +751,54 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                     }
                 }
             }
+            // --- XML DECLARATION ---
+            // The declaration (`<?xml version="1.0" ...?>`) fires once before any
+            // elements. We extract version/encoding/standalone only when the config
+            // has fields targeting the `/?xml/@...` synthetic path. Because this
+            // runs at most once per document it has zero cost on the hot path.
+            Event::Decl(decl) if !decl_field_nodes.is_empty() => {
+                process_xml_declaration(&decl, decl_field_nodes, xml_to_arrow_converter)?;
+            }
             Event::Eof => {
                 break;
             }
             _ => (),
         }
         buf.clear();
+    }
+    Ok(())
+}
+
+/// Extracts values from the XML declaration and sets them on the corresponding field builders.
+///
+/// The XML declaration has three possible pseudo-attributes: `version`, `encoding`,
+/// and `standalone`. We match each against the pre-resolved `decl_field_nodes` list
+/// (built during setup) and inject the value into the converter. This runs at most
+/// once per document, so allocations here are acceptable.
+fn process_xml_declaration(
+    decl: &BytesDecl<'_>,
+    decl_field_nodes: &[(&'static str, PathNodeId)],
+    xml_to_arrow_converter: &mut XmlToArrowConverter,
+) -> Result<()> {
+    for &(attr_name, node_id) in decl_field_nodes {
+        let value = match attr_name {
+            "@version" => {
+                let raw = decl.version()?;
+                Some(String::from_utf8_lossy(&raw).into_owned())
+            }
+            "@encoding" => decl
+                .encoding()
+                .and_then(|r| r.ok())
+                .map(|raw| String::from_utf8_lossy(&raw).into_owned()),
+            "@standalone" => decl
+                .standalone()
+                .and_then(|r| r.ok())
+                .map(|raw| String::from_utf8_lossy(&raw).into_owned()),
+            _ => None,
+        };
+        if let Some(val) = value {
+            xml_to_arrow_converter.set_field_value_for_node(node_id, &val);
+        }
     }
     Ok(())
 }
@@ -3356,6 +3414,374 @@ mod tests {
         let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("test").unwrap();
         assert_array_values!(batch, "value", vec![42i32], Int32Array);
+
+        Ok(())
+    }
+
+    // --- XML DECLARATION EXTRACTION TESTS ---
+    // These tests verify the `/?xml/@version`, `/?xml/@encoding`, and `/?xml/@standalone`
+    // synthetic paths that let users extract data from the XML declaration.
+
+    #[test]
+    fn test_decl_parse_all_attributes() -> Result<()> {
+        // Extract all three declaration pseudo-attributes into a root-level table.
+        let xml_content = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <data>
+            <row><value>42</value></row>
+        </data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: metadata
+                  xml_path: /
+                  levels: []
+                  fields:
+                    - name: xml_version
+                      xml_path: /?xml/@version
+                      data_type: Utf8
+                    - name: xml_encoding
+                      xml_path: /?xml/@encoding
+                      data_type: Utf8
+                    - name: xml_standalone
+                      xml_path: /?xml/@standalone
+                      data_type: Utf8
+                - name: rows
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: Int32
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+
+        // Verify the declaration metadata table
+        let meta = record_batches.get("metadata").unwrap();
+        assert_eq!(meta.num_rows(), 1);
+        assert_array_values!(meta, "xml_version", vec!["1.0"], StringArray);
+        assert_array_values!(meta, "xml_encoding", vec!["UTF-8"], StringArray);
+        assert_array_values!(meta, "xml_standalone", vec!["yes"], StringArray);
+
+        // Verify the data table still works alongside declaration fields
+        let rows = record_batches.get("rows").unwrap();
+        assert_array_values!(rows, "value", vec![42i32], Int32Array);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_decl_parse_version_only() -> Result<()> {
+        // Only extract the version attribute from the declaration.
+        let xml_content = r#"<?xml version="1.1"?>
+        <root><item>hello</item></root>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: doc
+                  xml_path: /
+                  levels: []
+                  fields:
+                    - name: version
+                      xml_path: /?xml/@version
+                      data_type: Utf8
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("doc").unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert_array_values!(batch, "version", vec!["1.1"], StringArray);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_decl_parse_encoding_missing_is_null() -> Result<()> {
+        // When the declaration doesn't include encoding, nullable fields should get null.
+        let xml_content = r#"<?xml version="1.0"?>
+        <root><item>hello</item></root>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: doc
+                  xml_path: /
+                  levels: []
+                  fields:
+                    - name: version
+                      xml_path: /?xml/@version
+                      data_type: Utf8
+                    - name: encoding
+                      xml_path: /?xml/@encoding
+                      data_type: Utf8
+                      nullable: true
+                    - name: standalone
+                      xml_path: /?xml/@standalone
+                      data_type: Utf8
+                      nullable: true
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("doc").unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert_array_values!(batch, "version", vec!["1.0"], StringArray);
+        assert_array_values_option!(batch, "encoding", vec![None::<&str>], StringArray);
+        assert_array_values_option!(batch, "standalone", vec![None::<&str>], StringArray);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_decl_parse_no_declaration_present() -> Result<()> {
+        // XML without a declaration: nullable fields should be null, data should still parse.
+        let xml_content = r#"<root><item>hello</item></root>"#;
+
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: doc
+                  xml_path: /
+                  levels: []
+                  fields:
+                    - name: version
+                      xml_path: /?xml/@version
+                      data_type: Utf8
+                      nullable: true
+                    - name: encoding
+                      xml_path: /?xml/@encoding
+                      data_type: Utf8
+                      nullable: true
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("doc").unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert_array_values_option!(batch, "version", vec![None::<&str>], StringArray);
+        assert_array_values_option!(batch, "encoding", vec![None::<&str>], StringArray);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_decl_parse_with_doctype_and_comments() -> Result<()> {
+        // Verify declaration extraction works alongside DOCTYPE and comments.
+        let xml_content = r#"<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE s1 PUBLIC "http://www.ibm.com/example.dtd" "example.dtd">
+<!-- This is a comment -->
+<s1><value>123</value></s1>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: doc
+                  xml_path: /
+                  levels: []
+                  fields:
+                    - name: version
+                      xml_path: /?xml/@version
+                      data_type: Utf8
+                    - name: encoding
+                      xml_path: /?xml/@encoding
+                      data_type: Utf8
+                    - name: standalone
+                      xml_path: /?xml/@standalone
+                      data_type: Utf8
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let batch = record_batches.get("doc").unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert_array_values!(batch, "version", vec!["1.0"], StringArray);
+        assert_array_values!(batch, "encoding", vec!["UTF-8"], StringArray);
+        assert_array_values!(batch, "standalone", vec!["no"], StringArray);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_decl_parse_with_nested_data_tables() -> Result<()> {
+        // Declaration fields on root table alongside a separate nested data table.
+        let xml_content = r#"<?xml version="1.0" encoding="UTF-8"?>
+        <data>
+            <item><name>Alice</name><score>95</score></item>
+            <item><name>Bob</name><score>87</score></item>
+        </data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: metadata
+                  xml_path: /
+                  levels: []
+                  fields:
+                    - name: xml_version
+                      xml_path: /?xml/@version
+                      data_type: Utf8
+                    - name: xml_encoding
+                      xml_path: /?xml/@encoding
+                      data_type: Utf8
+                - name: items
+                  xml_path: /data
+                  levels: [item]
+                  fields:
+                    - name: name
+                      xml_path: /data/item/name
+                      data_type: Utf8
+                    - name: score
+                      xml_path: /data/item/score
+                      data_type: Int32
+            "#
+        );
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+
+        let meta = record_batches.get("metadata").unwrap();
+        assert_eq!(meta.num_rows(), 1);
+        assert_array_values!(meta, "xml_version", vec!["1.0"], StringArray);
+        assert_array_values!(meta, "xml_encoding", vec!["UTF-8"], StringArray);
+
+        let items = record_batches.get("items").unwrap();
+        assert_eq!(items.num_rows(), 2);
+        assert_array_values!(items, "name", vec!["Alice", "Bob"], StringArray);
+        assert_array_values!(items, "score", vec![95i32, 87], Int32Array);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_decl_does_not_require_attribute_parsing() -> Result<()> {
+        // Declaration fields use the /?xml/ prefix which should NOT trigger
+        // the attribute-parsing code path (PARSE_ATTRIBUTES=true). This verifies
+        // the requires_attribute_parsing exclusion logic.
+        let xml_content = r#"<?xml version="1.0" encoding="UTF-8"?>
+        <data><row><value>1</value></row></data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: doc
+                  xml_path: /
+                  levels: []
+                  fields:
+                    - name: version
+                      xml_path: /?xml/@version
+                      data_type: Utf8
+                - name: rows
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: Int32
+            "#
+        );
+
+        // Config should NOT require attribute parsing (only declaration fields)
+        assert!(!config.requires_attribute_parsing());
+        assert!(config.requires_declaration_parsing());
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let doc = record_batches.get("doc").unwrap();
+        assert_array_values!(doc, "version", vec!["1.0"], StringArray);
+        let rows = record_batches.get("rows").unwrap();
+        assert_array_values!(rows, "value", vec![1i32], Int32Array);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_decl_parse_non_root_table_rejected() {
+        // Declaration fields on a non-root table should be rejected during validation.
+        let yaml_str = r#"
+            tables:
+                - name: items
+                  xml_path: /data
+                  levels: [item]
+                  fields:
+                    - name: version
+                      xml_path: /?xml/@version
+                      data_type: Utf8
+        "#;
+
+        let result = serde_yaml::from_str::<Config>(yaml_str);
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        let validation = config.validate();
+        assert!(validation.is_err());
+        let err_msg = format!("{:?}", validation.unwrap_err());
+        assert!(
+            err_msg.contains("Declaration fields are only allowed on root-level tables"),
+            "Unexpected error message: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_decl_parse_with_element_attributes_combined() -> Result<()> {
+        // Combine declaration fields with element attribute parsing.
+        // This exercises the case where PARSE_ATTRIBUTES=true is needed for
+        // element attributes while declaration fields are also present.
+        let xml_content = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <data>
+            <item id="A1"><value>10</value></item>
+            <item id="B2"><value>20</value></item>
+        </data>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: metadata
+                  xml_path: /
+                  levels: []
+                  fields:
+                    - name: version
+                      xml_path: /?xml/@version
+                      data_type: Utf8
+                    - name: standalone
+                      xml_path: /?xml/@standalone
+                      data_type: Utf8
+                - name: items
+                  xml_path: /data
+                  levels: [item]
+                  fields:
+                    - name: id
+                      xml_path: /data/item/@id
+                      data_type: Utf8
+                    - name: value
+                      xml_path: /data/item/value
+                      data_type: Int32
+            "#
+        );
+
+        // Config should require attribute parsing (for @id)
+        assert!(config.requires_attribute_parsing());
+        assert!(config.requires_declaration_parsing());
+
+        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+
+        let meta = record_batches.get("metadata").unwrap();
+        assert_eq!(meta.num_rows(), 1);
+        assert_array_values!(meta, "version", vec!["1.0"], StringArray);
+        assert_array_values!(meta, "standalone", vec!["yes"], StringArray);
+
+        let items = record_batches.get("items").unwrap();
+        assert_eq!(items.num_rows(), 2);
+        assert_array_values!(items, "id", vec!["A1", "B2"], StringArray);
+        assert_array_values!(items, "value", vec![10i32, 20], Int32Array);
 
         Ok(())
     }
