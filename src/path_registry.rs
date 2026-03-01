@@ -73,9 +73,35 @@ impl PathNodeInfo {
 
 /// Registry for efficient path lookups during XML parsing.
 ///
-/// The registry is a trie keyed by interned element names. Each node has:
-/// - a map of child name -> child ID
-/// - PathNodeInfo metadata for table/field mapping
+/// The registry compiles all configured XML paths into a trie of interned strings (`Atom`).
+/// Each node in the trie is assigned a compact integer ID (`PathNodeId`), allowing the parser
+/// to operate entirely on IDs using direct array indexing, avoiding string hashing in the hot loop.
+///
+/// # Architecture Visualization
+///
+/// Given a configuration representing meteorological stations, with tables at `/report`
+/// and `/report/monitoring_stations/monitoring_station`, and a field at `@id`,
+/// the registry builds a logical tree structure like this:
+///
+/// ```text
+/// [ID: 0] (ROOT)
+///   │
+///   └── "report" ─────────▶ [ID: 1] ── (Metadata: Table 0 boundary)
+///                             │
+///                             ├── "header" ──▶ [ID: 2]
+///                             │                  │
+///                             │                  └── "title" ──▶ [ID: 3] ── (Metadata: Field 0, Table 0)
+///                             │
+///                             └── "monitoring_stations" ──▶ [ID: 4]
+///                                                             │
+///                                                             └── "monitoring_station" ──▶ [ID: 5] ── (Metadata: Table 1 boundary)
+///                                                                                            │
+///                                                                                            └── "@id" ──▶ [ID: 6] ── (Metadata: Field 0, Table 1)
+/// ```
+///
+/// Under the hood, this tree is flattened into parallel vectors to ensure cache-friendly, O(1) lookups:
+/// * `children`: Uses the node's `PathNodeId` as an index to find a map of `child_name -> child_id`.
+/// * `node_info`: Uses the node's `PathNodeId` as an index to retrieve `PathNodeInfo` (whether this node is a table boundary or contains fields).
 pub struct PathRegistry {
     /// For each node, map child element name to child node ID.
     children: Vec<FxHashMap<Atom, PathNodeId>>,
