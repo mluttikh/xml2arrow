@@ -333,6 +333,10 @@ struct TableBuilder {
     /// Builders for each field in the table, indexed by field position.
     field_builders: Vec<FieldBuilder>,
     /// The current row index for this table.
+    ///
+    /// This increments every time `save_row` is called. Critically, this value
+    /// is also read by any ACTIVE CHILD TABLES on the stack to populate their
+    /// parent index columns (the foreign keys defined in `levels`).
     row_index: usize,
 }
 
@@ -371,13 +375,20 @@ impl TableBuilder {
     }
 
     fn save_row(&mut self, indices: &[u32]) -> Result<()> {
+        // 1. Write the parent foreign keys.
+        // The `indices` slice contains the row_index of each ancestor table,
+        // in order of hierarchy. These align 1:1 with the `levels` defined
+        // in this table's configuration.
         for (index, index_builder) in indices.iter().zip(&mut self.index_builders) {
             index_builder.append_value(*index)
         }
 
+        // 2. Write the actual field values for this table.
         for field_builder in self.field_builders.iter_mut() {
             field_builder.append_current_value()?;
         }
+
+        // 3. Advance this table's primary key.
         self.row_index += 1;
         Ok(())
     }
@@ -516,6 +527,13 @@ impl XmlToArrowConverter {
         Ok(())
     }
 
+    /// Collects the current row indices from all active ancestor tables on the stack.
+    ///
+    /// This is the core mechanism for relational nesting. When a nested child table
+    /// (e.g., `measurements`) finishes a row, it needs foreign keys linking it back
+    /// to its parents (e.g., `station`). Because the parent tables are still open
+    /// on the `builder_stack`, their `row_index` represents the exact parent row
+    /// this child belongs to.
     fn parent_row_indices(&self) -> Vec<u32> {
         let mut indices = Vec::with_capacity(self.builder_stack.len());
         for entry in self.builder_stack.iter() {
