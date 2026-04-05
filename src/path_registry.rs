@@ -54,6 +54,9 @@ pub struct PathNodeInfo {
     pub table_index: Option<usize>,
     /// Field indices: (table_idx, field_idx) pairs for fields at this path.
     pub field_indices: Vec<(usize, usize)>,
+    /// Whether any child of this node has an attribute path (starts with "@").
+    /// Used to skip attribute parsing for elements that have no attribute fields configured.
+    pub has_attribute_children: bool,
 }
 
 impl PathNodeInfo {
@@ -139,7 +142,16 @@ impl PathRegistry {
             }
         }
 
-        // Phase 3: register optional stop paths so the parser can resolve them
+        // Phase 3: mark nodes that have attribute children so the parser can
+        // skip attribute iteration for elements with no attribute fields.
+        for node_id_idx in 0..registry.children.len() {
+            let has_attr_child = registry.children[node_id_idx]
+                .keys()
+                .any(|name| name.as_ref().starts_with('@'));
+            registry.node_info[node_id_idx].has_attribute_children = has_attr_child;
+        }
+
+        // Phase 4: register optional stop paths so the parser can resolve them
         // without string lookups in the hot loop.
         for stop_path in &config.parser_options.stop_at_paths {
             registry.get_or_create_path(stop_path);
@@ -232,6 +244,12 @@ impl PathRegistry {
     #[inline]
     pub fn get_table_index(&self, node_id: PathNodeId) -> Option<usize> {
         self.node_info[node_id.index()].table_index
+    }
+
+    /// Returns true if the given node has any attribute children in the trie.
+    #[inline]
+    pub fn has_attribute_children(&self, node_id: PathNodeId) -> bool {
+        self.node_info[node_id.index()].has_attribute_children
     }
 
     /// Returns the root node info.
