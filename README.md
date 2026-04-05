@@ -347,10 +347,10 @@ Benchmarks were measured on an Apple M1 Pro using [Criterion.rs](https://github.
 
 | Benchmark                          | File size | Throughput     |
 | :--------------------------------- | --------: | :------------- |
-| 1K measurements, 2 sensors (small) |    413 KB | ~298 MiB/s     |
-| 10K measurements, 5 sensors (medium) |    10 MB | ~308 MiB/s     |
-| 100K measurements, 10 sensors (large) |  202 MB | ~307 MiB/s     |
-| 200K measurements, 5 sensors (xlarge) |  203 MB | ~307 MiB/s     |
+| 1K measurements, 2 sensors (small) |    413 KB | ~345 MiB/s     |
+| 10K measurements, 5 sensors (medium) |    10 MB | ~352 MiB/s     |
+| 100K measurements, 10 sensors (large) |  202 MB | ~354 MiB/s     |
+| 200K measurements, 5 sensors (xlarge) |  203 MB | ~356 MiB/s     |
 
 Throughput stays consistent from sub-megabyte to 200 MB files, reflecting the
 predictable cost of the single-pass design.
