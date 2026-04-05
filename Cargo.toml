@@ -36,3 +36,9 @@ optional = true
 [[bench]]
 name = "parse_benchmark"
 harness = false
+
+[profile.bench]
+debug = true
+
+[profile.release]
+debug = true

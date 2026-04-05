@@ -100,10 +100,24 @@ where
 }
 
 fn parse_boolean_token(value: &str) -> Option<bool> {
-    match value {
-        "false" | "0" | "no" | "n" | "f" | "off" => Some(false),
-        "true" | "1" | "yes" | "y" | "t" | "on" => Some(true),
-        _ => None,
+    if value.eq_ignore_ascii_case("false")
+        || value == "0"
+        || value.eq_ignore_ascii_case("no")
+        || value.eq_ignore_ascii_case("n")
+        || value.eq_ignore_ascii_case("f")
+        || value.eq_ignore_ascii_case("off")
+    {
+        Some(false)
+    } else if value.eq_ignore_ascii_case("true")
+        || value == "1"
+        || value.eq_ignore_ascii_case("yes")
+        || value.eq_ignore_ascii_case("y")
+        || value.eq_ignore_ascii_case("t")
+        || value.eq_ignore_ascii_case("on")
+    {
+        Some(true)
+    } else {
+        None
     }
 }
 
@@ -227,8 +241,7 @@ impl FieldBuilder {
                             )));
                         }
                     } else {
-                        let normalized = trimmed.to_ascii_lowercase();
-                        match parse_boolean_token(normalized.as_str()) {
+                        match parse_boolean_token(trimmed) {
                             Some(val) => builder.append_value(val),
                             None => {
                                 return Err(Error::ParseError(format!(
@@ -443,6 +456,8 @@ struct XmlToArrowConverter {
     registry: PathRegistry,
     /// Optional path nodes that trigger early termination after their closing tags.
     stop_node_ids: Vec<PathNodeId>,
+    /// Reusable buffer for collecting parent row indices, avoiding per-row allocation.
+    parent_indices_buffer: Vec<u32>,
 }
 
 impl XmlToArrowConverter {
@@ -472,6 +487,7 @@ impl XmlToArrowConverter {
             builder_stack,
             registry,
             stop_node_ids,
+            parent_indices_buffer: Vec::new(),
         })
     }
 
@@ -488,14 +504,6 @@ impl XmlToArrowConverter {
         } else {
             false
         }
-    }
-
-    /// Returns a mutable reference to the current table builder, if any.
-    #[inline]
-    fn current_table_builder_mut(&mut self) -> Option<&mut TableBuilder> {
-        self.builder_stack
-            .last()
-            .map(|entry| &mut self.table_builders[entry.table_idx])
     }
 
     /// Sets a field value for the current table using path node information.
@@ -520,22 +528,8 @@ impl XmlToArrowConverter {
     }
 
     fn end_current_row(&mut self) -> Result<()> {
-        let indices = self.parent_row_indices();
-        if let Some(table_builder) = self.current_table_builder_mut() {
-            table_builder.end_row(&indices)?;
-        }
-        Ok(())
-    }
-
-    /// Collects the current row indices from all active ancestor tables on the stack.
-    ///
-    /// This is the core mechanism for relational nesting. When a nested child table
-    /// (e.g., `measurements`) finishes a row, it needs foreign keys linking it back
-    /// to its parents (e.g., `station`). Because the parent tables are still open
-    /// on the `builder_stack`, their `row_index` represents the exact parent row
-    /// this child belongs to.
-    fn parent_row_indices(&self) -> Vec<u32> {
-        let mut indices = Vec::with_capacity(self.builder_stack.len());
+        // Collect parent indices into reusable buffer to avoid per-row allocation.
+        self.parent_indices_buffer.clear();
         for entry in self.builder_stack.iter() {
             // Skip the root table (xml_path: /) when collecting parent indices.
             // The root table is special - it represents the document root and shouldn't
@@ -543,9 +537,13 @@ impl XmlToArrowConverter {
             if entry.node_id == PathNodeId::ROOT {
                 continue;
             }
-            indices.push(self.table_builders[entry.table_idx].row_index as u32);
+            self.parent_indices_buffer
+                .push(self.table_builders[entry.table_idx].row_index as u32);
         }
-        indices
+        if let Some(entry) = self.builder_stack.last() {
+            self.table_builders[entry.table_idx].end_row(&self.parent_indices_buffer)?;
+        }
+        Ok(())
     }
 
     fn start_table(&mut self, node_id: PathNodeId) -> Result<()> {
@@ -630,7 +628,7 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
     // Use specialized parsing logic based on whether attribute parsing is required.
     // This avoids unnecessary attribute processing and Empty event handling
     // when attributes are not needed, improving performance.
-    let stop_node_ids = xml_to_arrow_converter.stop_node_ids.clone();
+    let stop_node_ids = std::mem::take(&mut xml_to_arrow_converter.stop_node_ids);
     if config.requires_attribute_parsing() {
         process_xml_events::<_, true>(
             &mut reader,
@@ -696,23 +694,23 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
             Event::GeneralRef(e) => {
                 if let Some(node_id) = path_tracker.current() {
                     let text = e.into_inner();
-                    let text = String::from_utf8_lossy(&text);
-                    let text = escape::resolve_predefined_entity(&text).unwrap_or_default();
+                    let text = std::str::from_utf8(&text)?;
+                    let text = escape::resolve_predefined_entity(text).unwrap_or_default();
                     xml_to_arrow_converter.set_field_value_for_node(node_id, &text);
                 }
             }
             Event::Text(e) => {
                 if let Some(node_id) = path_tracker.current() {
                     let text = e.into_inner();
-                    let text = String::from_utf8_lossy(&text);
-                    xml_to_arrow_converter.set_field_value_for_node(node_id, &text);
+                    let text = std::str::from_utf8(&text)?;
+                    xml_to_arrow_converter.set_field_value_for_node(node_id, text);
                 }
             }
             Event::CData(e) => {
                 if let Some(node_id) = path_tracker.current() {
                     let text = e.into_inner();
-                    let text = String::from_utf8_lossy(&text);
-                    xml_to_arrow_converter.set_field_value_for_node(node_id, &text);
+                    let text = std::str::from_utf8(&text)?;
+                    xml_to_arrow_converter.set_field_value_for_node(node_id, text);
                 }
             }
             Event::End(_) => {
