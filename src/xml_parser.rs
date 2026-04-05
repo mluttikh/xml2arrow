@@ -297,22 +297,18 @@ impl FieldBuilder {
                 self.has_value,
                 &self.field_config,
             )?,
-            DataType::Float32 if self.has_transform => {
-                append_f32_with_transform(
-                    &mut self.array_builder,
-                    value,
-                    self.has_value,
-                    &self.field_config,
-                )?
-            }
-            DataType::Float64 if self.has_transform => {
-                append_f64_with_transform(
-                    &mut self.array_builder,
-                    value,
-                    self.has_value,
-                    &self.field_config,
-                )?
-            }
+            DataType::Float32 if self.has_transform => append_f32_with_transform(
+                &mut self.array_builder,
+                value,
+                self.has_value,
+                &self.field_config,
+            )?,
+            DataType::Float64 if self.has_transform => append_f64_with_transform(
+                &mut self.array_builder,
+                value,
+                self.has_value,
+                &self.field_config,
+            )?,
             DataType::Float32 => append_numeric::<arrow::datatypes::Float32Type>(
                 &mut self.array_builder,
                 value,
@@ -373,12 +369,7 @@ impl FieldBuilder {
     }
 
     pub fn finish(&mut self) -> Result<Arc<dyn Array>> {
-        let array = self.array_builder.finish();
-        // Scale/offset transforms are now applied inline during parsing
-        // (see append_float_with_transform), so no post-processing needed.
-        // Validation that scale/offset is only used with float types
-        // is handled by Config::validate() at startup.
-        Ok(array)
+        Ok(self.array_builder.finish())
     }
 }
 
@@ -753,10 +744,7 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
 
                 if PARSE_ATTRIBUTES {
                     if let Some(id) = node_id {
-                        if xml_to_arrow_converter
-                            .registry
-                            .has_attribute_children(id)
-                        {
+                        if xml_to_arrow_converter.registry.has_attribute_children(id) {
                             parse_attributes(
                                 reader.decoder(),
                                 e.attributes(),
@@ -783,10 +771,7 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
 
                 if PARSE_ATTRIBUTES {
                     if let Some(id) = node_id {
-                        if xml_to_arrow_converter
-                            .registry
-                            .has_attribute_children(id)
-                        {
+                        if xml_to_arrow_converter.registry.has_attribute_children(id) {
                             parse_attributes(
                                 reader.decoder(),
                                 e.attributes(),
