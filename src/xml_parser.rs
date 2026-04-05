@@ -183,25 +183,32 @@ fn append_f32_with_transform(
     Ok(())
 }
 
-fn parse_boolean_token(value: &str) -> Option<bool> {
-    if value.eq_ignore_ascii_case("false")
-        || value == "0"
-        || value.eq_ignore_ascii_case("no")
-        || value.eq_ignore_ascii_case("n")
-        || value.eq_ignore_ascii_case("f")
-        || value.eq_ignore_ascii_case("off")
+/// Parses a boolean token from a string, trimming whitespace first.
+/// Returns `Ok(Some(bool))` for valid tokens, `Ok(None)` for empty/whitespace-only input,
+/// or `Err(())` for unrecognized values.
+fn parse_boolean_token(value: &str) -> std::result::Result<Option<bool>, ()> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.eq_ignore_ascii_case("false")
+        || trimmed == "0"
+        || trimmed.eq_ignore_ascii_case("no")
+        || trimmed.eq_ignore_ascii_case("n")
+        || trimmed.eq_ignore_ascii_case("f")
+        || trimmed.eq_ignore_ascii_case("off")
     {
-        Some(false)
-    } else if value.eq_ignore_ascii_case("true")
-        || value == "1"
-        || value.eq_ignore_ascii_case("yes")
-        || value.eq_ignore_ascii_case("y")
-        || value.eq_ignore_ascii_case("t")
-        || value.eq_ignore_ascii_case("on")
+        Ok(Some(false))
+    } else if trimmed.eq_ignore_ascii_case("true")
+        || trimmed == "1"
+        || trimmed.eq_ignore_ascii_case("yes")
+        || trimmed.eq_ignore_ascii_case("y")
+        || trimmed.eq_ignore_ascii_case("t")
+        || trimmed.eq_ignore_ascii_case("on")
     {
-        Some(true)
+        Ok(Some(true))
     } else {
-        None
+        Err(())
     }
 }
 
@@ -328,25 +335,20 @@ impl FieldBuilder {
                     .downcast_mut::<BooleanBuilder>()
                     .expect("BooleanBuilder");
                 if self.has_value {
-                    let trimmed = value.trim();
-                    if trimmed.is_empty() {
-                        if self.field_config.nullable {
-                            builder.append_null();
-                        } else {
+                    match parse_boolean_token(value) {
+                        Ok(Some(val)) => builder.append_value(val),
+                        Ok(None) if self.field_config.nullable => builder.append_null(),
+                        Ok(None) => {
                             return Err(Error::ParseError(format!(
                                 "Missing value for non-nullable field '{}' at path {}",
                                 self.field_config.name, self.field_config.xml_path
                             )));
                         }
-                    } else {
-                        match parse_boolean_token(trimmed) {
-                            Some(val) => builder.append_value(val),
-                            None => {
-                                return Err(Error::ParseError(format!(
-                                    "Failed to parse value '{}' as boolean for field '{}' at path {}: expected one of 'true', 'false', '1', '0', 'yes', 'no', 'on', 'off', 't', 'f', 'y', or 'n'",
-                                    value, self.field_config.name, self.field_config.xml_path
-                                )));
-                            }
+                        Err(()) => {
+                            return Err(Error::ParseError(format!(
+                                "Failed to parse value '{}' as boolean for field '{}' at path {}: expected one of 'true', 'false', '1', '0', 'yes', 'no', 'on', 'off', 't', 'f', 'y', or 'n'",
+                                value, self.field_config.name, self.field_config.xml_path
+                            )));
                         }
                     }
                 } else if self.field_config.nullable {
