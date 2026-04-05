@@ -274,9 +274,6 @@ pub struct PathTracker {
     /// Stack of (node_id, is_known_path) pairs representing current XML nesting.
     /// is_known_path is true if the node exists in the registry (path is in config).
     node_stack: Vec<(PathNodeId, bool)>,
-    /// Cached atom for reuse during lookups to avoid repeated interning.
-    #[allow(dead_code)]
-    cached_atom: Option<Atom>,
 }
 
 impl PathTracker {
@@ -284,7 +281,6 @@ impl PathTracker {
     pub fn new() -> Self {
         Self {
             node_stack: vec![(PathNodeId::ROOT, true)],
-            cached_atom: None,
         }
     }
 
@@ -360,23 +356,6 @@ impl PathTracker {
             .last()
             .map(|(_, known)| *known)
             .unwrap_or(false)
-    }
-
-    /// Gets or creates a cached atom for the given string.
-    ///
-    /// This is a micro-optimization for cases where the same element name is
-    /// parsed repeatedly in a tight loop.
-    #[inline]
-    #[allow(dead_code)]
-    pub fn intern(&mut self, s: &str) -> Atom {
-        if let Some(ref atom) = self.cached_atom {
-            if atom.as_ref() == s {
-                return atom.clone();
-            }
-        }
-        let atom = Atom::from(s);
-        self.cached_atom = Some(atom.clone());
-        atom
     }
 
     /// Returns the depth of the current path (number of segments from root).
