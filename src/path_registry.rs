@@ -375,47 +375,35 @@ impl Default for PathTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, DType, FieldConfig, TableConfig};
+    use crate::config::{DType, FieldConfigBuilder, TableConfig};
+    use crate::config_from_yaml;
 
     fn create_test_config() -> Config {
         Config {
             tables: vec![
-                TableConfig {
-                    name: "items".to_string(),
-                    xml_path: "/root/items".to_string(),
-                    levels: vec!["item".to_string()],
-                    fields: vec![
-                        FieldConfig {
-                            name: "name".to_string(),
-                            xml_path: "/root/items/item/name".to_string(),
-                            data_type: DType::Utf8,
-                            nullable: false,
-                            scale: None,
-                            offset: None,
-                        },
-                        FieldConfig {
-                            name: "value".to_string(),
-                            xml_path: "/root/items/item/value".to_string(),
-                            data_type: DType::Float64,
-                            nullable: false,
-                            scale: None,
-                            offset: None,
-                        },
+                TableConfig::new(
+                    "items",
+                    "/root/items",
+                    vec!["item".to_string()],
+                    vec![
+                        FieldConfigBuilder::new("name", "/root/items/item/name", DType::Utf8)
+                            .build()
+                            .unwrap(),
+                        FieldConfigBuilder::new("value", "/root/items/item/value", DType::Float64)
+                            .build()
+                            .unwrap(),
                     ],
-                },
-                TableConfig {
-                    name: "metadata".to_string(),
-                    xml_path: "/root/metadata".to_string(),
-                    levels: vec![],
-                    fields: vec![FieldConfig {
-                        name: "version".to_string(),
-                        xml_path: "/root/metadata/version".to_string(),
-                        data_type: DType::Utf8,
-                        nullable: false,
-                        scale: None,
-                        offset: None,
-                    }],
-                },
+                ),
+                TableConfig::new(
+                    "metadata",
+                    "/root/metadata",
+                    vec![],
+                    vec![
+                        FieldConfigBuilder::new("version", "/root/metadata/version", DType::Utf8)
+                            .build()
+                            .unwrap(),
+                    ],
+                ),
             ],
             parser_options: Default::default(),
         }
@@ -518,22 +506,18 @@ mod tests {
 
     #[test]
     fn test_root_table_path() {
-        let config = Config {
-            tables: vec![TableConfig {
-                name: "root".to_string(),
-                xml_path: "/".to_string(),
-                levels: vec![],
-                fields: vec![FieldConfig {
-                    name: "value".to_string(),
-                    xml_path: "/data/value".to_string(),
-                    data_type: DType::Utf8,
-                    nullable: false,
-                    scale: None,
-                    offset: None,
-                }],
-            }],
-            parser_options: Default::default(),
-        };
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: root
+                  xml_path: /
+                  levels: []
+                  fields:
+                    - name: value
+                      xml_path: /data/value
+                      data_type: Utf8
+            "#
+        );
 
         let registry = PathRegistry::from_config(&config);
 
@@ -544,22 +528,18 @@ mod tests {
 
     #[test]
     fn test_attribute_paths() {
-        let config = Config {
-            tables: vec![TableConfig {
-                name: "items".to_string(),
-                xml_path: "/root/items".to_string(),
-                levels: vec!["item".to_string()],
-                fields: vec![FieldConfig {
-                    name: "id".to_string(),
-                    xml_path: "/root/items/item/@id".to_string(),
-                    data_type: DType::Utf8,
-                    nullable: false,
-                    scale: None,
-                    offset: None,
-                }],
-            }],
-            parser_options: Default::default(),
-        };
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: items
+                  xml_path: /root/items
+                  levels: [item]
+                  fields:
+                    - name: id
+                      xml_path: /root/items/item/@id
+                      data_type: Utf8
+            "#
+        );
 
         let registry = PathRegistry::from_config(&config);
         let mut tracker = PathTracker::new();

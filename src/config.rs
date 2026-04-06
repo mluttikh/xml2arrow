@@ -380,28 +380,19 @@ mod tests {
                 parser_options: Default::default(),
                 tables: vec![
                     TableConfig::new("table1", "/path/to", vec![], vec![
-                        match FieldConfigBuilder::new("string_field", "/path/to/string_field", DType::Utf8)
+                        FieldConfigBuilder::new("string_field", "/path/to/string_field", DType::Utf8)
                             .nullable(true)
                             .build()
-                        {
-                            Ok(f) => f,
-                            Err(e) => panic!("Failed to build field config: {:?}", e),
-                        },
-                        match FieldConfigBuilder::new("int32_field", "/path/to/int32_field", DType::Int32)
+                            .unwrap(),
+                        FieldConfigBuilder::new("int32_field", "/path/to/int32_field", DType::Int32)
                             .build()
-                        {
-                            Ok(f) => f,
-                            Err(e) => panic!("Failed to build field config: {:?}", e),
-                        },
-                        match FieldConfigBuilder::new("float64_field", "/path/to/float64_field", DType::Float64)
+                            .unwrap(),
+                        FieldConfigBuilder::new("float64_field", "/path/to/float64_field", DType::Float64)
                             .nullable(true)
                             .scale(1.0e-9)
                             .offset(1.0e-3)
                             .build()
-                        {
-                            Ok(f) => f,
-                            Err(e) => panic!("Failed to build field config: {:?}", e),
-                        },
+                            .unwrap(),
                         ]
                     ),
                 ],
@@ -518,65 +509,58 @@ mod tests {
 
     #[test]
     fn test_config_requires_attr_parsing_with_attributes() {
-        let config = Config {
-            tables: vec![TableConfig::new(
-                "test",
-                "/root",
-                vec![],
-                vec![
-                    match FieldConfigBuilder::new("id", "/root/item/@id", DType::Int32).build() {
-                        Ok(f) => f,
-                        Err(e) => panic!("Failed to build field config: {:?}", e),
-                    },
-                ],
-            )],
-            parser_options: Default::default(),
-        };
-
+        let config: Config = serde_yaml::from_str(
+            r#"
+            tables:
+              - name: test
+                xml_path: /root
+                levels: []
+                fields:
+                  - name: id
+                    xml_path: /root/item/@id
+                    data_type: Int32
+            "#,
+        )
+        .unwrap();
         assert!(config.requires_attribute_parsing());
     }
 
     #[test]
     fn test_config_requires_attr_parsing_without_attributes() {
-        let config = Config {
-            tables: vec![TableConfig::new(
-                "test",
-                "/root",
-                vec![],
-                vec![
-                    match FieldConfigBuilder::new("id", "/root/item/id", DType::Int32).build() {
-                        Ok(f) => f,
-                        Err(e) => panic!("Failed to build field config: {:?}", e),
-                    },
-                ],
-            )],
-            parser_options: Default::default(),
-        };
-
+        let config: Config = serde_yaml::from_str(
+            r#"
+            tables:
+              - name: test
+                xml_path: /root
+                levels: []
+                fields:
+                  - name: id
+                    xml_path: /root/item/id
+                    data_type: Int32
+            "#,
+        )
+        .unwrap();
         assert!(!config.requires_attribute_parsing());
     }
 
     #[test]
     fn test_config_requires_attr_parsing_mixed() {
-        let config = Config {
-            tables: vec![TableConfig::new(
-                "test",
-                "/root",
-                vec![],
-                vec![
-                    match FieldConfigBuilder::new("id", "/root/item/id", DType::Int32).build() {
-                        Ok(f) => f,
-                        Err(e) => panic!("Failed to build field config: {:?}", e),
-                    },
-                    match FieldConfigBuilder::new("type", "/root/item/@type", DType::Utf8).build() {
-                        Ok(f) => f,
-                        Err(e) => panic!("Failed to build field config: {:?}", e),
-                    },
-                ],
-            )],
-            parser_options: Default::default(),
-        };
-
+        let config: Config = serde_yaml::from_str(
+            r#"
+            tables:
+              - name: test
+                xml_path: /root
+                levels: []
+                fields:
+                  - name: id
+                    xml_path: /root/item/id
+                    data_type: Int32
+                  - name: type
+                    xml_path: /root/item/@type
+                    data_type: Utf8
+            "#,
+        )
+        .unwrap();
         assert!(config.requires_attribute_parsing());
     }
 
