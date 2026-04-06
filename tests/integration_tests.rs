@@ -3,6 +3,9 @@
 //! These tests verify end-to-end behavior with realistic scenarios including
 //! file-based parsing and large file handling.
 
+#[macro_use]
+mod common;
+
 use std::fs::File;
 use std::io::{BufReader, Write};
 
@@ -10,50 +13,17 @@ use arrow::array::{Array, Float64Array, Int32Array, StringArray, UInt32Array};
 use tempfile::NamedTempFile;
 use xml2arrow::{Config, parse_xml};
 
-/// Helper macro for asserting array values
-macro_rules! assert_array_values {
-    ($batch:expr, $column_name:expr, $expected_values:expr, $array_type:ty) => {
-        let array = $batch
-            .column_by_name($column_name)
-            .unwrap()
-            .as_any()
-            .downcast_ref::<$array_type>()
-            .unwrap();
-        assert_eq!(
-            array.len(),
-            $expected_values.len(),
-            "Array length mismatch for column '{}'",
-            $column_name
-        );
-        for (i, expected) in $expected_values.iter().enumerate() {
-            assert_eq!(
-                array.value(i),
-                *expected,
-                "Value at index {} mismatch for column '{}'",
-                i,
-                $column_name
-            );
-        }
-    };
-}
+use common::{parse_xml_file, write_xml_tempfile};
 
 #[test]
 fn test_file_parse_basic() {
-    // Create a temporary XML file
-    let mut xml_file = NamedTempFile::new().unwrap();
-    write!(
-        xml_file,
+    let batches = parse_xml_file(
         r#"<?xml version="1.0" encoding="UTF-8"?>
         <data>
             <item><id>1</id><name>First</name></item>
             <item><id>2</id><name>Second</name></item>
             <item><id>3</id><name>Third</name></item>
-        </data>"#
-    )
-    .unwrap();
-
-    // Create config
-    let config: Config = serde_yaml::from_str(
+        </data>"#,
         r#"
         tables:
           - name: items
@@ -67,18 +37,9 @@ fn test_file_parse_basic() {
                 xml_path: /data/item/name
                 data_type: Utf8
         "#,
-    )
-    .unwrap();
+    );
 
-    // Parse from file
-    let file = File::open(xml_file.path()).unwrap();
-    let reader = BufReader::new(file);
-    let result = parse_xml(reader, &config);
-
-    assert!(result.is_ok(), "Parsing from file should succeed");
-    let batches = result.unwrap();
     let batch = batches.get("items").unwrap();
-
     assert_eq!(batch.num_rows(), 3);
     assert_array_values!(batch, "id", &[1, 2, 3], Int32Array);
     assert_array_values!(batch, "name", &["First", "Second", "Third"], StringArray);
@@ -86,23 +47,19 @@ fn test_file_parse_basic() {
 
 #[test]
 fn test_file_parse_large_1k_rows() {
-    // Generate a large XML file with 1000 items
-    let mut xml_file = NamedTempFile::new().unwrap();
-
-    writeln!(xml_file, r#"<?xml version="1.0"?><data>"#).unwrap();
+    let mut xml = String::from(r#"<?xml version="1.0"?><data>"#);
     for i in 0..1000 {
-        writeln!(
-            xml_file,
+        xml.push_str(&format!(
             r#"<item><id>{}</id><value>{:.2}</value><name>Item{}</name></item>"#,
             i,
             i as f64 * 0.01,
             i
-        )
-        .unwrap();
+        ));
     }
-    writeln!(xml_file, "</data>").unwrap();
+    xml.push_str("</data>");
 
-    let config: Config = serde_yaml::from_str(
+    let batches = parse_xml_file(
+        &xml,
         r#"
         tables:
           - name: items
@@ -119,17 +76,9 @@ fn test_file_parse_large_1k_rows() {
                 xml_path: /data/item/name
                 data_type: Utf8
         "#,
-    )
-    .unwrap();
+    );
 
-    let file = File::open(xml_file.path()).unwrap();
-    let reader = BufReader::new(file);
-    let result = parse_xml(reader, &config);
-
-    assert!(result.is_ok(), "Large file parsing should succeed");
-    let batches = result.unwrap();
     let batch = batches.get("items").unwrap();
-
     assert_eq!(batch.num_rows(), 1000);
 
     // Verify first and last values
@@ -154,22 +103,18 @@ fn test_file_parse_large_1k_rows() {
 
 #[test]
 fn test_file_parse_large_10k_rows() {
-    // Generate a larger XML file with 10000 items
-    let mut xml_file = NamedTempFile::new().unwrap();
-
-    writeln!(xml_file, r#"<?xml version="1.0"?><data>"#).unwrap();
+    let mut xml = String::from(r#"<?xml version="1.0"?><data>"#);
     for i in 0..10000 {
-        writeln!(
-            xml_file,
+        xml.push_str(&format!(
             r#"<item><id>{}</id><value>{:.4}</value></item>"#,
             i,
             (i as f64).sin()
-        )
-        .unwrap();
+        ));
     }
-    writeln!(xml_file, "</data>").unwrap();
+    xml.push_str("</data>");
 
-    let config: Config = serde_yaml::from_str(
+    let batches = parse_xml_file(
+        &xml,
         r#"
         tables:
           - name: items
@@ -183,27 +128,15 @@ fn test_file_parse_large_10k_rows() {
                 xml_path: /data/item/value
                 data_type: Float64
         "#,
-    )
-    .unwrap();
+    );
 
-    let file = File::open(xml_file.path()).unwrap();
-    let reader = BufReader::new(file);
-    let result = parse_xml(reader, &config);
-
-    assert!(result.is_ok(), "10K row file parsing should succeed");
-    let batches = result.unwrap();
     let batch = batches.get("items").unwrap();
-
     assert_eq!(batch.num_rows(), 10000);
 }
 
 #[test]
 fn test_file_parse_nested_structure() {
-    // Note: Attributes on the table row boundary element are captured by child tables,
-    // not the parent table. This test uses a structure that works with the parser.
-    let mut xml_file = NamedTempFile::new().unwrap();
-    write!(
-        xml_file,
+    let batches = parse_xml_file(
         r#"<?xml version="1.0"?>
         <company>
             <departments>
@@ -221,11 +154,7 @@ fn test_file_parse_nested_structure() {
                     </employees>
                 </department>
             </departments>
-        </company>"#
-    )
-    .unwrap();
-
-    let config: Config = serde_yaml::from_str(
+        </company>"#,
         r#"
         tables:
           - name: departments
@@ -249,15 +178,7 @@ fn test_file_parse_nested_structure() {
                 xml_path: /company/departments/department/employees/employee/role
                 data_type: Utf8
         "#,
-    )
-    .unwrap();
-
-    let file = File::open(xml_file.path()).unwrap();
-    let reader = BufReader::new(file);
-    let result = parse_xml(reader, &config);
-
-    assert!(result.is_ok());
-    let batches = result.unwrap();
+    );
 
     // Check departments
     let dept_batch = batches.get("departments").unwrap();
@@ -304,45 +225,27 @@ tables:
     )
     .unwrap();
 
-    // Create temporary XML file
-    let mut xml_file = NamedTempFile::new().unwrap();
-    write!(
-        xml_file,
-        r#"<data><item><id>1</id><value>1000</value></item></data>"#
-    )
-    .unwrap();
+    let xml_file = write_xml_tempfile(
+        r#"<data><item><id>1</id><value>1000</value></item></data>"#,
+    );
 
-    // Load config from file
+    // Load config from file (tests Config::from_yaml_file specifically)
     let config = Config::from_yaml_file(yaml_file.path()).unwrap();
 
-    // Parse XML
     let file = File::open(xml_file.path()).unwrap();
     let reader = BufReader::new(file);
-    let result = parse_xml(reader, &config);
-
-    assert!(result.is_ok());
-    let batches = result.unwrap();
+    let batches = parse_xml(reader, &config).unwrap();
     let batch = batches.get("items").unwrap();
 
     assert_eq!(batch.num_rows(), 1);
 
     // Value should be: (1000 * 0.001) + 10.0 = 1.0 + 10.0 = 11.0
-    let value_array = batch
-        .column_by_name("value")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .unwrap();
-    assert!((value_array.value(0) - 11.0).abs() < 1e-10);
+    assert_array_approx_values!(batch, "value", &[11.0], Float64Array, 1e-10);
 }
 
 #[test]
 fn test_file_parse_multiple_tables() {
-    // Test parsing multiple independent tables from a single XML file
-    // Note: Each table needs a proper row boundary element defined by its xml_path
-    let mut xml_file = NamedTempFile::new().unwrap();
-    write!(
-        xml_file,
+    let batches = parse_xml_file(
         r#"<?xml version="1.0"?>
         <root>
             <header>
@@ -355,11 +258,7 @@ fn test_file_parse_multiple_tables() {
                 <record><id>1</id><data>A</data></record>
                 <record><id>2</id><data>B</data></record>
             </records>
-        </root>"#
-    )
-    .unwrap();
-
-    let config: Config = serde_yaml::from_str(
+        </root>"#,
         r#"
         tables:
           - name: header
@@ -383,23 +282,15 @@ fn test_file_parse_multiple_tables() {
                 xml_path: /root/records/record/data
                 data_type: Utf8
         "#,
-    )
-    .unwrap();
+    );
 
-    let file = File::open(xml_file.path()).unwrap();
-    let reader = BufReader::new(file);
-    let result = parse_xml(reader, &config);
-
-    assert!(result.is_ok());
-    let batches = result.unwrap();
-
-    // Check header table - has 1 row (single header/info element)
+    // Check header table
     let header_batch = batches.get("header").unwrap();
     assert_eq!(header_batch.num_rows(), 1);
     assert_array_values!(header_batch, "title", &["Test Document"], StringArray);
     assert_array_values!(header_batch, "version", &["1.0"], StringArray);
 
-    // Check records table - has 2 rows (two record elements)
+    // Check records table
     let records_batch = batches.get("records").unwrap();
     assert_eq!(records_batch.num_rows(), 2);
     assert_array_values!(records_batch, "id", &[1, 2], Int32Array);
@@ -408,9 +299,7 @@ fn test_file_parse_multiple_tables() {
 
 #[test]
 fn test_file_parse_deeply_nested() {
-    let mut xml_file = NamedTempFile::new().unwrap();
-    write!(
-        xml_file,
+    let batches = parse_xml_file(
         r#"<?xml version="1.0"?>
         <root>
             <level1>
@@ -424,11 +313,7 @@ fn test_file_parse_deeply_nested() {
                     </level3>
                 </level2>
             </level1>
-        </root>"#
-    )
-    .unwrap();
-
-    let config: Config = serde_yaml::from_str(
+        </root>"#,
         r#"
         tables:
           - name: deep
@@ -439,26 +324,17 @@ fn test_file_parse_deeply_nested() {
                 xml_path: /root/level1/level2/level3/level4/level5/value
                 data_type: Utf8
         "#,
-    )
-    .unwrap();
+    );
 
-    let file = File::open(xml_file.path()).unwrap();
-    let reader = BufReader::new(file);
-    let result = parse_xml(reader, &config);
-
-    assert!(result.is_ok());
-    let batches = result.unwrap();
     let batch = batches.get("deep").unwrap();
-
     assert_eq!(batch.num_rows(), 1);
     assert_array_values!(batch, "value", &["deep_value"], StringArray);
 }
 
 #[test]
 fn test_file_encoding_utf8_bom() {
-    // UTF-8 BOM (Byte Order Mark)
+    // UTF-8 BOM must be written as raw bytes before the XML content
     let mut xml_file = NamedTempFile::new().unwrap();
-    // Write BOM followed by XML content
     xml_file.write_all(&[0xEF, 0xBB, 0xBF]).unwrap(); // UTF-8 BOM
     write!(
         xml_file,
@@ -483,10 +359,7 @@ fn test_file_encoding_utf8_bom() {
 
     let file = File::open(xml_file.path()).unwrap();
     let reader = BufReader::new(file);
-    let result = parse_xml(reader, &config);
-
-    assert!(result.is_ok(), "Parsing file with BOM should succeed");
-    let batches = result.unwrap();
+    let batches = parse_xml(reader, &config).unwrap();
     let batch = batches.get("items").unwrap();
 
     assert_eq!(batch.num_rows(), 1);
@@ -496,7 +369,7 @@ fn test_file_encoding_utf8_bom() {
 #[test]
 fn test_file_edge_empty() {
     let xml_file = NamedTempFile::new().unwrap();
-    // File is empty
+    // File is empty -- no content written
 
     let config: Config = serde_yaml::from_str(
         r#"
@@ -516,7 +389,6 @@ fn test_file_edge_empty() {
     let reader = BufReader::new(file);
     let result = parse_xml(reader, &config);
 
-    // Empty file should result in empty batches (no rows)
     assert!(result.is_ok());
     let batches = result.unwrap();
     let batch = batches.get("items").unwrap();
@@ -525,8 +397,7 @@ fn test_file_edge_empty() {
 
 #[test]
 fn test_file_edge_whitespace_only() {
-    let mut xml_file = NamedTempFile::new().unwrap();
-    write!(xml_file, "   \n\t\n   ").unwrap();
+    let xml_file = write_xml_tempfile("   \n\t\n   ");
 
     let config: Config = serde_yaml::from_str(
         r#"
@@ -546,17 +417,12 @@ fn test_file_edge_whitespace_only() {
     let reader = BufReader::new(file);
     let result = parse_xml(reader, &config);
 
-    // Whitespace-only file should result in empty batches
     assert!(result.is_ok());
 }
 
 #[test]
 fn test_file_parse_realistic_sensor_data() {
-    // This test uses child elements instead of attributes on the table row element
-    // because attributes on the row boundary element are captured by child tables
-    let mut xml_file = NamedTempFile::new().unwrap();
-    write!(
-        xml_file,
+    let batches = parse_xml_file(
         r#"<?xml version="1.0" encoding="UTF-8"?>
         <sensorData>
             <sensors>
@@ -580,11 +446,7 @@ fn test_file_parse_realistic_sensor_data() {
                     </readings>
                 </sensor>
             </sensors>
-        </sensorData>"#
-    )
-    .unwrap();
-
-    let config: Config = serde_yaml::from_str(
+        </sensorData>"#,
         r#"
         tables:
           - name: sensors
@@ -611,15 +473,7 @@ fn test_file_parse_realistic_sensor_data() {
                 xml_path: /sensorData/sensors/sensor/readings/reading/value
                 data_type: Float64
         "#,
-    )
-    .unwrap();
-
-    let file = File::open(xml_file.path()).unwrap();
-    let reader = BufReader::new(file);
-    let result = parse_xml(reader, &config);
-
-    assert!(result.is_ok());
-    let batches = result.unwrap();
+    );
 
     // Check sensors
     let sensors = batches.get("sensors").unwrap();
