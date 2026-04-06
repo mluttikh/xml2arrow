@@ -15,12 +15,12 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayBuilder, ArrowNumericType, AsArray, BooleanBuilder, Float32Array, Float32Builder,
-    Float64Array, Float64Builder, Int8Builder, Int16Builder, Int32Builder, Int64Builder,
-    RecordBatch, StringBuilder, UInt8Builder, UInt16Builder, UInt32Builder, UInt64Builder,
+    Array, ArrayBuilder, ArrowNumericType, BooleanBuilder, Float32Builder, Float64Builder,
+    Int8Builder, Int16Builder, Int32Builder, Int64Builder, RecordBatch, StringBuilder,
+    UInt8Builder, UInt16Builder, UInt32Builder, UInt64Builder,
 };
-use arrow::compute::kernels::numeric;
-use arrow::datatypes::{DataType, Field, Float32Type, Float64Type, Schema};
+use arrow::datatypes::{DataType, Field, Schema};
+use fxhash::FxHashMap;
 use indexmap::IndexMap;
 use quick_xml::Reader;
 use quick_xml::encoding::Decoder;
@@ -55,6 +55,8 @@ struct FieldBuilder {
     has_value: bool,
     /// Temporary storage for accumulating the current value from potentially multiple XML text nodes.
     current_value: String,
+    /// Whether this field has scale or offset transforms that should be applied inline.
+    has_transform: bool,
 }
 
 /// Helper function to parse a string and append it to a numeric builder.
@@ -99,11 +101,114 @@ where
     Ok(())
 }
 
-fn parse_boolean_token(value: &str) -> Option<bool> {
-    match value {
-        "false" | "0" | "no" | "n" | "f" | "off" => Some(false),
-        "true" | "1" | "yes" | "y" | "t" | "on" => Some(true),
-        _ => None,
+/// Parses a float string and appends it to a Float64Builder with inline scale/offset.
+fn append_f64_with_transform(
+    builder: &mut Box<dyn ArrayBuilder>,
+    value: &str,
+    has_value: bool,
+    field_config: &FieldConfig,
+) -> Result<()> {
+    let builder = builder
+        .as_any_mut()
+        .downcast_mut::<Float64Builder>()
+        .expect("Float64Builder");
+
+    if has_value {
+        match value.parse::<f64>() {
+            Ok(mut val) => {
+                if let Some(scale) = field_config.scale {
+                    val *= scale;
+                }
+                if let Some(offset) = field_config.offset {
+                    val += offset;
+                }
+                builder.append_value(val);
+            }
+            Err(e) => {
+                return Err(Error::ParseError(format!(
+                    "Failed to parse value '{}' as f64 for field '{}' at path {}: {}",
+                    value, field_config.name, field_config.xml_path, e
+                )));
+            }
+        }
+    } else if field_config.nullable {
+        builder.append_null();
+    } else {
+        return Err(Error::ParseError(format!(
+            "Missing value for non-nullable field '{}' at path {}",
+            field_config.name, field_config.xml_path
+        )));
+    }
+    Ok(())
+}
+
+/// Parses a float string and appends it to a Float32Builder with inline scale/offset.
+fn append_f32_with_transform(
+    builder: &mut Box<dyn ArrayBuilder>,
+    value: &str,
+    has_value: bool,
+    field_config: &FieldConfig,
+) -> Result<()> {
+    let builder = builder
+        .as_any_mut()
+        .downcast_mut::<Float32Builder>()
+        .expect("Float32Builder");
+
+    if has_value {
+        match value.parse::<f32>() {
+            Ok(mut val) => {
+                if let Some(scale) = field_config.scale {
+                    val *= scale as f32;
+                }
+                if let Some(offset) = field_config.offset {
+                    val += offset as f32;
+                }
+                builder.append_value(val);
+            }
+            Err(e) => {
+                return Err(Error::ParseError(format!(
+                    "Failed to parse value '{}' as f32 for field '{}' at path {}: {}",
+                    value, field_config.name, field_config.xml_path, e
+                )));
+            }
+        }
+    } else if field_config.nullable {
+        builder.append_null();
+    } else {
+        return Err(Error::ParseError(format!(
+            "Missing value for non-nullable field '{}' at path {}",
+            field_config.name, field_config.xml_path
+        )));
+    }
+    Ok(())
+}
+
+/// Parses a boolean token from a string, trimming whitespace first.
+/// Returns `Ok(Some(bool))` for valid tokens, `Ok(None)` for empty/whitespace-only input,
+/// or `Err(())` for unrecognized values.
+fn parse_boolean_token(value: &str) -> std::result::Result<Option<bool>, ()> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.eq_ignore_ascii_case("false")
+        || trimmed == "0"
+        || trimmed.eq_ignore_ascii_case("no")
+        || trimmed.eq_ignore_ascii_case("n")
+        || trimmed.eq_ignore_ascii_case("f")
+        || trimmed.eq_ignore_ascii_case("off")
+    {
+        Ok(Some(false))
+    } else if trimmed.eq_ignore_ascii_case("true")
+        || trimmed == "1"
+        || trimmed.eq_ignore_ascii_case("yes")
+        || trimmed.eq_ignore_ascii_case("y")
+        || trimmed.eq_ignore_ascii_case("t")
+        || trimmed.eq_ignore_ascii_case("on")
+    {
+        Ok(Some(true))
+    } else {
+        Err(())
     }
 }
 
@@ -115,11 +220,13 @@ impl FieldBuilder {
             field_config.data_type.as_arrow_type(),
             field_config.nullable,
         );
+        let has_transform = field_config.scale.is_some() || field_config.offset.is_some();
         Ok(Self {
             field_config: field_config.clone(),
             field,
             array_builder,
             has_value: false,
+            has_transform,
             current_value: String::with_capacity(128),
         })
     }
@@ -197,6 +304,18 @@ impl FieldBuilder {
                 self.has_value,
                 &self.field_config,
             )?,
+            DataType::Float32 if self.has_transform => append_f32_with_transform(
+                &mut self.array_builder,
+                value,
+                self.has_value,
+                &self.field_config,
+            )?,
+            DataType::Float64 if self.has_transform => append_f64_with_transform(
+                &mut self.array_builder,
+                value,
+                self.has_value,
+                &self.field_config,
+            )?,
             DataType::Float32 => append_numeric::<arrow::datatypes::Float32Type>(
                 &mut self.array_builder,
                 value,
@@ -216,26 +335,20 @@ impl FieldBuilder {
                     .downcast_mut::<BooleanBuilder>()
                     .expect("BooleanBuilder");
                 if self.has_value {
-                    let trimmed = value.trim();
-                    if trimmed.is_empty() {
-                        if self.field_config.nullable {
-                            builder.append_null();
-                        } else {
+                    match parse_boolean_token(value) {
+                        Ok(Some(val)) => builder.append_value(val),
+                        Ok(None) if self.field_config.nullable => builder.append_null(),
+                        Ok(None) => {
                             return Err(Error::ParseError(format!(
                                 "Missing value for non-nullable field '{}' at path {}",
                                 self.field_config.name, self.field_config.xml_path
                             )));
                         }
-                    } else {
-                        let normalized = trimmed.to_ascii_lowercase();
-                        match parse_boolean_token(normalized.as_str()) {
-                            Some(val) => builder.append_value(val),
-                            None => {
-                                return Err(Error::ParseError(format!(
-                                    "Failed to parse value '{}' as boolean for field '{}' at path {}: expected one of 'true', 'false', '1', '0', 'yes', 'no', 'on', 'off', 't', 'f', 'y', or 'n'",
-                                    value, self.field_config.name, self.field_config.xml_path
-                                )));
-                            }
+                        Err(()) => {
+                            return Err(Error::ParseError(format!(
+                                "Failed to parse value '{}' as boolean for field '{}' at path {}: expected one of 'true', 'false', '1', '0', 'yes', 'no', 'on', 'off', 't', 'f', 'y', or 'n'",
+                                value, self.field_config.name, self.field_config.xml_path
+                            )));
                         }
                     }
                 } else if self.field_config.nullable {
@@ -258,44 +371,7 @@ impl FieldBuilder {
     }
 
     pub fn finish(&mut self) -> Result<Arc<dyn Array>> {
-        let mut array = self.array_builder.finish();
-        if let Some(scale) = self.field_config.scale {
-            array = match self.field.data_type() {
-                DataType::Float32 => numeric::mul(
-                    array.as_primitive::<Float32Type>(),
-                    &Float32Array::new_scalar(scale as f32),
-                )?,
-                &DataType::Float64 => numeric::mul(
-                    array.as_primitive::<Float64Type>(),
-                    &Float64Array::new_scalar(scale),
-                )?,
-                _ => {
-                    return Err(Error::UnsupportedConversion(format!(
-                        "Scaling is only supported for Float32 and Float64, but found {:?}",
-                        self.field.data_type()
-                    )));
-                }
-            };
-        }
-        if let Some(offset) = self.field_config.offset {
-            array = match self.field.data_type() {
-                DataType::Float32 => numeric::add(
-                    array.as_primitive::<Float32Type>(),
-                    &Float32Array::new_scalar(offset as f32),
-                )?,
-                &DataType::Float64 => numeric::add(
-                    array.as_primitive::<Float64Type>(),
-                    &Float64Array::new_scalar(offset),
-                )?,
-                _ => {
-                    return Err(Error::UnsupportedConversion(format!(
-                        "Offset is only supported for Float32 and Float64, but found {:?}",
-                        self.field.data_type()
-                    )));
-                }
-            };
-        }
-        Ok(array)
+        Ok(self.array_builder.finish())
     }
 }
 
@@ -333,6 +409,10 @@ struct TableBuilder {
     /// Builders for each field in the table, indexed by field position.
     field_builders: Vec<FieldBuilder>,
     /// The current row index for this table.
+    ///
+    /// This increments every time `save_row` is called. Critically, this value
+    /// is also read by any ACTIVE CHILD TABLES on the stack to populate their
+    /// parent index columns (the foreign keys defined in `levels`).
     row_index: usize,
 }
 
@@ -371,13 +451,20 @@ impl TableBuilder {
     }
 
     fn save_row(&mut self, indices: &[u32]) -> Result<()> {
+        // 1. Write the parent foreign keys.
+        // The `indices` slice contains the row_index of each ancestor table,
+        // in order of hierarchy. These align 1:1 with the `levels` defined
+        // in this table's configuration.
         for (index, index_builder) in indices.iter().zip(&mut self.index_builders) {
             index_builder.append_value(*index)
         }
 
+        // 2. Write the actual field values for this table.
         for field_builder in self.field_builders.iter_mut() {
             field_builder.append_current_value()?;
         }
+
+        // 3. Advance this table's primary key.
         self.row_index += 1;
         Ok(())
     }
@@ -432,6 +519,8 @@ struct XmlToArrowConverter {
     registry: PathRegistry,
     /// Optional path nodes that trigger early termination after their closing tags.
     stop_node_ids: Vec<PathNodeId>,
+    /// Reusable buffer for collecting parent row indices, avoiding per-row allocation.
+    parent_indices_buffer: Vec<u32>,
 }
 
 impl XmlToArrowConverter {
@@ -461,6 +550,7 @@ impl XmlToArrowConverter {
             builder_stack,
             registry,
             stop_node_ids,
+            parent_indices_buffer: Vec::new(),
         })
     }
 
@@ -477,14 +567,6 @@ impl XmlToArrowConverter {
         } else {
             false
         }
-    }
-
-    /// Returns a mutable reference to the current table builder, if any.
-    #[inline]
-    fn current_table_builder_mut(&mut self) -> Option<&mut TableBuilder> {
-        self.builder_stack
-            .last()
-            .map(|entry| &mut self.table_builders[entry.table_idx])
     }
 
     /// Sets a field value for the current table using path node information.
@@ -509,15 +591,8 @@ impl XmlToArrowConverter {
     }
 
     fn end_current_row(&mut self) -> Result<()> {
-        let indices = self.parent_row_indices();
-        if let Some(table_builder) = self.current_table_builder_mut() {
-            table_builder.end_row(&indices)?;
-        }
-        Ok(())
-    }
-
-    fn parent_row_indices(&self) -> Vec<u32> {
-        let mut indices = Vec::with_capacity(self.builder_stack.len());
+        // Collect parent indices into reusable buffer to avoid per-row allocation.
+        self.parent_indices_buffer.clear();
         for entry in self.builder_stack.iter() {
             // Skip the root table (xml_path: /) when collecting parent indices.
             // The root table is special - it represents the document root and shouldn't
@@ -525,9 +600,13 @@ impl XmlToArrowConverter {
             if entry.node_id == PathNodeId::ROOT {
                 continue;
             }
-            indices.push(self.table_builders[entry.table_idx].row_index as u32);
+            self.parent_indices_buffer
+                .push(self.table_builders[entry.table_idx].row_index as u32);
         }
-        indices
+        if let Some(entry) = self.builder_stack.last() {
+            self.table_builders[entry.table_idx].end_row(&self.parent_indices_buffer)?;
+        }
+        Ok(())
     }
 
     fn start_table(&mut self, node_id: PathNodeId) -> Result<()> {
@@ -591,9 +670,6 @@ impl XmlToArrowConverter {
 /// ```
 pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<String, RecordBatch>> {
     let mut reader = Reader::from_reader(reader);
-    // Expand empty elements (e.g., <tag/>) into <tag></tag>.
-    // This simplifies the event loop, handling Event::Empty is no longer needed.
-    reader.config_mut().expand_empty_elements = true;
     if config.parser_options.trim_text {
         reader.config_mut().trim_text(true);
     }
@@ -612,7 +688,7 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
     // Use specialized parsing logic based on whether attribute parsing is required.
     // This avoids unnecessary attribute processing and Empty event handling
     // when attributes are not needed, improving performance.
-    let stop_node_ids = xml_to_arrow_converter.stop_node_ids.clone();
+    let stop_node_ids = std::mem::take(&mut xml_to_arrow_converter.stop_node_ids);
     if config.requires_attribute_parsing() {
         process_xml_events::<_, true>(
             &mut reader,
@@ -642,6 +718,11 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
     let mut buf = Vec::with_capacity(4096);
     let mut attr_name_buffer = String::with_capacity(64);
 
+    // Local atom cache: avoids repeated global interning for the same element names.
+    // XML documents typically have 10-50 unique element names, so this cache has
+    // a near-100% hit rate after the first few elements.
+    let mut atom_cache: FxHashMap<Vec<u8>, Atom> = FxHashMap::default();
+
     // Stack to track (node_id, is_table) for each entered element
     // This avoids redundant lookups on End events
     let mut element_stack: Vec<(Option<PathNodeId>, bool)> = Vec::with_capacity(32);
@@ -649,8 +730,8 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
     loop {
         match reader.read_event_into(&mut buf)? {
             Event::Start(e) => {
-                let node_name = std::str::from_utf8(e.local_name().into_inner())?;
-                let atom = Atom::from(node_name);
+                let name_bytes = e.local_name().into_inner();
+                let atom = get_or_intern_atom(&mut atom_cache, name_bytes)?;
                 let node_id = path_tracker.enter_atom(atom, &xml_to_arrow_converter.registry);
 
                 let is_table = node_id
@@ -664,37 +745,95 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                 element_stack.push((node_id, is_table));
 
                 if PARSE_ATTRIBUTES {
-                    if node_id.is_some() {
-                        parse_attributes(
-                            reader.decoder(),
-                            e.attributes(),
-                            path_tracker,
-                            xml_to_arrow_converter,
-                            &mut attr_name_buffer,
-                        )?;
+                    if let Some(id) = node_id {
+                        if xml_to_arrow_converter.registry.has_attribute_children(id) {
+                            parse_attributes(
+                                reader.decoder(),
+                                e.attributes(),
+                                path_tracker,
+                                xml_to_arrow_converter,
+                                &mut attr_name_buffer,
+                            )?;
+                        }
+                    }
+                }
+            }
+            Event::Empty(e) => {
+                let name_bytes = e.local_name().into_inner();
+                let atom = get_or_intern_atom(&mut atom_cache, name_bytes)?;
+                let node_id = path_tracker.enter_atom(atom, &xml_to_arrow_converter.registry);
+
+                let is_table = node_id
+                    .map(|id| xml_to_arrow_converter.is_table_path(id))
+                    .unwrap_or(false);
+
+                if is_table {
+                    xml_to_arrow_converter.start_table(node_id.unwrap())?;
+                }
+
+                if PARSE_ATTRIBUTES {
+                    if let Some(id) = node_id {
+                        if xml_to_arrow_converter.registry.has_attribute_children(id) {
+                            parse_attributes(
+                                reader.decoder(),
+                                e.attributes(),
+                                path_tracker,
+                                xml_to_arrow_converter,
+                                &mut attr_name_buffer,
+                            )?;
+                        }
+                    }
+                }
+
+                // Immediately close: empty elements have no children or text
+                if is_table {
+                    xml_to_arrow_converter.end_table()?;
+                }
+                path_tracker.leave();
+
+                // Check if parent is a table - need to end row
+                if let Some(&(_parent_node_id, parent_is_table)) = element_stack.last() {
+                    if parent_is_table {
+                        xml_to_arrow_converter.end_current_row()?;
+                    }
+                } else if xml_to_arrow_converter
+                    .registry
+                    .is_table_path(PathNodeId::ROOT)
+                {
+                    if path_tracker.current() == Some(PathNodeId::ROOT) {
+                        xml_to_arrow_converter.end_current_row()?;
+                    }
+                }
+
+                // Check stop paths
+                if let Some(node_id) = node_id {
+                    if !stop_node_ids.is_empty()
+                        && stop_node_ids.iter().any(|stop_id| *stop_id == node_id)
+                    {
+                        break;
                     }
                 }
             }
             Event::GeneralRef(e) => {
                 if let Some(node_id) = path_tracker.current() {
                     let text = e.into_inner();
-                    let text = String::from_utf8_lossy(&text);
-                    let text = escape::resolve_predefined_entity(&text).unwrap_or_default();
+                    let text = std::str::from_utf8(&text)?;
+                    let text = escape::resolve_predefined_entity(text).unwrap_or_default();
                     xml_to_arrow_converter.set_field_value_for_node(node_id, &text);
                 }
             }
             Event::Text(e) => {
                 if let Some(node_id) = path_tracker.current() {
                     let text = e.into_inner();
-                    let text = String::from_utf8_lossy(&text);
-                    xml_to_arrow_converter.set_field_value_for_node(node_id, &text);
+                    let text = std::str::from_utf8(&text)?;
+                    xml_to_arrow_converter.set_field_value_for_node(node_id, text);
                 }
             }
             Event::CData(e) => {
                 if let Some(node_id) = path_tracker.current() {
                     let text = e.into_inner();
-                    let text = String::from_utf8_lossy(&text);
-                    xml_to_arrow_converter.set_field_value_for_node(node_id, &text);
+                    let text = std::str::from_utf8(&text)?;
+                    xml_to_arrow_converter.set_field_value_for_node(node_id, text);
                 }
             }
             Event::End(_) => {
@@ -745,6 +884,19 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
     Ok(())
 }
 
+/// Looks up or creates an interned atom from a byte slice, using a local cache
+/// to avoid repeated global hash set lookups for the same element names.
+#[inline]
+fn get_or_intern_atom(cache: &mut FxHashMap<Vec<u8>, Atom>, name_bytes: &[u8]) -> Result<Atom> {
+    if let Some(atom) = cache.get(name_bytes) {
+        return Ok(atom.clone());
+    }
+    let name_str = std::str::from_utf8(name_bytes)?;
+    let atom = Atom::from(name_str);
+    cache.insert(name_bytes.to_vec(), atom.clone());
+    Ok(atom)
+}
+
 #[inline]
 fn parse_attributes(
     decoder: Decoder,
@@ -781,8 +933,8 @@ mod tests {
     use crate::config_from_yaml;
     use approx::abs_diff_eq;
     use arrow::array::{
-        BooleanArray, Int8Array, Int16Array, Int32Array, Int64Array, StringArray, UInt8Array,
-        UInt16Array, UInt32Array, UInt64Array,
+        BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
+        StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
     };
 
     macro_rules! assert_array_values {
