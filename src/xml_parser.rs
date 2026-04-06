@@ -936,112 +936,187 @@ mod tests {
         BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
         StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
     };
+    use rstest::rstest;
+
+    /// Parse XML from a string using an inline YAML config.
+    /// Panics on error -- intended for tests with known-good inputs.
+    fn parse(xml: &str, yaml_config: &str) -> IndexMap<String, RecordBatch> {
+        let config = config_from_yaml!(yaml_config);
+        parse_xml(xml.as_bytes(), &config).unwrap()
+    }
 
     macro_rules! assert_array_values {
-        ($batch:expr, $column_name:expr, $expected_values:expr, $array_type:ty) => {
+        ($batch:expr, $column_name:expr, $expected_values:expr, $array_type:ty) => {{
             let array = $batch
                 .column_by_name($column_name)
-                .unwrap()
+                .unwrap_or_else(|| panic!("Column '{}' not found in batch", $column_name))
                 .as_any()
                 .downcast_ref::<$array_type>()
-                .unwrap();
-            assert_eq!(array.len(), $expected_values.len());
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Column '{}' could not be downcast to {}",
+                        $column_name,
+                        stringify!($array_type)
+                    )
+                });
+            assert_eq!(
+                array.len(),
+                $expected_values.len(),
+                "Array length mismatch for column '{}'",
+                $column_name
+            );
             for (i, expected) in $expected_values.iter().enumerate() {
-                assert_eq!(array.value(i), *expected, "Value at index {} mismatch", i);
+                assert_eq!(
+                    array.value(i),
+                    *expected,
+                    "Value mismatch at index {} for column '{}'",
+                    i,
+                    $column_name
+                );
             }
-        };
+        }};
     }
 
     macro_rules! assert_array_values_option {
-        ($batch:expr, $column_name:expr, $expected_values:expr, $array_type:ty) => {
+        ($batch:expr, $column_name:expr, $expected_values:expr, $array_type:ty) => {{
             let array = $batch
                 .column_by_name($column_name)
-                .unwrap()
+                .unwrap_or_else(|| panic!("Column '{}' not found in batch", $column_name))
                 .as_any()
                 .downcast_ref::<$array_type>()
-                .unwrap();
-            assert_eq!(array.len(), $expected_values.len());
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Column '{}' could not be downcast to {}",
+                        $column_name,
+                        stringify!($array_type)
+                    )
+                });
+            assert_eq!(
+                array.len(),
+                $expected_values.len(),
+                "Array length mismatch for column '{}'",
+                $column_name
+            );
             for (i, expected) in $expected_values.iter().enumerate() {
                 match expected {
-                    Some(val) => assert_eq!(array.value(i), *val, "Value at index {} mismatch", i),
-                    None => assert!(array.is_null(i), "Expected null at index {}", i),
+                    Some(val) => assert_eq!(
+                        array.value(i),
+                        *val,
+                        "Value mismatch at index {} for column '{}'",
+                        i,
+                        $column_name
+                    ),
+                    None => assert!(
+                        array.is_null(i),
+                        "Expected null at index {} for column '{}'",
+                        i,
+                        $column_name
+                    ),
                 }
             }
-        };
+        }};
     }
 
     macro_rules! assert_array_approx_values {
-        ($batch:expr, $column_name:expr, $expected_values:expr, $array_type:ty, $tolerance:expr) => {
+        ($batch:expr, $column_name:expr, $expected_values:expr, $array_type:ty, $tolerance:expr) => {{
             let array = $batch
                 .column_by_name($column_name)
-                .unwrap()
+                .unwrap_or_else(|| panic!("Column '{}' not found in batch", $column_name))
                 .as_any()
                 .downcast_ref::<$array_type>()
-                .unwrap();
-            assert_eq!(array.len(), $expected_values.len());
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Column '{}' could not be downcast to {}",
+                        $column_name,
+                        stringify!($array_type)
+                    )
+                });
+            assert_eq!(
+                array.len(),
+                $expected_values.len(),
+                "Array length mismatch for column '{}'",
+                $column_name
+            );
             for (i, expected) in $expected_values.iter().enumerate() {
                 assert!(
                     abs_diff_eq!(array.value(i), *expected, epsilon = $tolerance),
-                    "Value at index {} mismatch: Expected {}, got {}",
+                    "Value mismatch at index {} for column '{}': expected {}, got {}",
                     i,
+                    $column_name,
                     expected,
                     array.value(i)
                 );
             }
-        };
+        }};
     }
 
     macro_rules! assert_array_approx_values_option {
-        ($batch:expr, $column_name:expr, $expected_values:expr, $array_type:ty, $tolerance:expr) => {
+        ($batch:expr, $column_name:expr, $expected_values:expr, $array_type:ty, $tolerance:expr) => {{
             let array = $batch
                 .column_by_name($column_name)
-                .unwrap()
+                .unwrap_or_else(|| panic!("Column '{}' not found in batch", $column_name))
                 .as_any()
                 .downcast_ref::<$array_type>()
-                .unwrap();
-            assert_eq!(array.len(), $expected_values.len());
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Column '{}' could not be downcast to {}",
+                        $column_name,
+                        stringify!($array_type)
+                    )
+                });
+            assert_eq!(
+                array.len(),
+                $expected_values.len(),
+                "Array length mismatch for column '{}'",
+                $column_name
+            );
             for (i, expected) in $expected_values.iter().enumerate() {
                 match expected {
                     Some(val) => assert!(
                         abs_diff_eq!(array.value(i), *val, epsilon = $tolerance),
-                        "Value at index {} mismatch: Expected {}, got {}",
+                        "Value mismatch at index {} for column '{}': expected {}, got {}",
                         i,
+                        $column_name,
                         val,
                         array.value(i)
                     ),
-                    None => assert!(array.is_null(i), "Expected null at index {}", i),
+                    None => assert!(
+                        array.is_null(i),
+                        "Expected null at index {} for column '{}'",
+                        i,
+                        $column_name
+                    ),
                 }
             }
-        };
+        }};
     }
 
     #[test]
-    fn test_parse_complex_multiple_tables_nested() -> Result<()> {
-        let xml_content = r#"
-        <?xml version="1.0" encoding="UTF-8"?>
-        <data>
-          <dataset>
-            <table>
-              <item>
-                <name>Item 1</name>
-                <value>10.5</value>
-              </item>
-              <item>
-                <name>Item 2</name>
-                <value>20.5</value>
-              </item>
-            </table>
-            <table>
-              <item>
-                <name>Item 3</name>
-                <value>30.5</value>
-              </item>
-            </table>
-          </dataset>
-        </data>
-        "#;
-
-        let config = config_from_yaml!(
+    fn test_parse_complex_multiple_tables_nested() {
+        let record_batches = parse(
+            r#"
+            <?xml version="1.0" encoding="UTF-8"?>
+            <data>
+              <dataset>
+                <table>
+                  <item>
+                    <name>Item 1</name>
+                    <value>10.5</value>
+                  </item>
+                  <item>
+                    <name>Item 2</name>
+                    <value>20.5</value>
+                  </item>
+                </table>
+                <table>
+                  <item>
+                    <name>Item 3</name>
+                    <value>30.5</value>
+                  </item>
+                </table>
+              </dataset>
+            </data>
+            "#,
             r#"
             tables:
                 - name: tables
@@ -1061,12 +1136,10 @@ mod tests {
                     - name: value
                       xml_path: /data/dataset/table/item/value
                       data_type: Float64
-            "#
+            "#,
         );
 
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
-
-        // Assert items - tables table has no fields so not in output
+        // Tables table has no fields so not in output
         let items_batch = record_batches.get("items").unwrap();
         assert_eq!(items_batch.num_rows(), 3);
         assert_array_values!(items_batch, "<table>", vec![0u32, 0, 1], UInt32Array);
@@ -1078,12 +1151,10 @@ mod tests {
             StringArray
         );
         assert_array_values!(items_batch, "value", vec![10.5, 20.5, 30.5], Float64Array);
-
-        Ok(())
     }
 
     #[test]
-    fn test_parse_stop_at_paths_header_only() -> Result<()> {
+    fn test_parse_stop_at_paths_header_only() {
         let xml_content = r#"
         <report>
             <header>
@@ -1097,7 +1168,8 @@ mod tests {
         </report>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             parser_options:
                 stop_at_paths:
@@ -1123,8 +1195,6 @@ mod tests {
             "#
         );
 
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
-
         let header_batch = record_batches.get("header").unwrap();
         assert_eq!(header_batch.num_rows(), 1);
         assert_array_values!(header_batch, "title", vec!["Header Title"], StringArray);
@@ -1132,12 +1202,10 @@ mod tests {
 
         let data_batch = record_batches.get("data").unwrap();
         assert_eq!(data_batch.num_rows(), 0);
-
-        Ok(())
     }
 
     #[test]
-    fn test_parse_basic_multiple_tables() -> Result<()> {
+    fn test_parse_basic_multiple_tables() {
         let xml_content = r#"
         <?xml version="1.0" encoding="UTF-8"?>
         <root>
@@ -1157,7 +1225,8 @@ mod tests {
         </root>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: items
@@ -1181,8 +1250,6 @@ mod tests {
             "#
         );
 
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
-
         assert_eq!(record_batches.len(), 2);
 
         // Check items table
@@ -1196,12 +1263,10 @@ mod tests {
         let metadata_batch = record_batches.get("metadata").unwrap();
         assert_eq!(metadata_batch.num_rows(), 1);
         assert_array_values!(metadata_batch, "version", vec!["1.0"], StringArray);
-
-        Ok(())
     }
 
     #[test]
-    fn test_parse_dtypes_all_numeric_types() -> Result<()> {
+    fn test_parse_dtypes_all_numeric_types() {
         let xml_content = r#"
         <data>
             <row>
@@ -1219,7 +1284,8 @@ mod tests {
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: numbers
@@ -1260,8 +1326,6 @@ mod tests {
             "#
         );
 
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
-
         let batch = record_batches.get("numbers").unwrap();
         assert_eq!(batch.num_rows(), 1);
         assert_array_values!(batch, "int8", vec![-128i8], Int8Array);
@@ -1280,15 +1344,14 @@ mod tests {
             Float64Array,
             0.0000000001
         );
-
-        Ok(())
     }
 
     #[test]
-    fn test_parse_text_special_characters_escaped() -> Result<()> {
+    fn test_parse_text_special_characters_escaped() {
         let xml_content = r#"<data><row><text>&lt;hello&gt; &amp; "world"</text></row></data>"#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: text_table
@@ -1300,19 +1363,16 @@ mod tests {
                       data_type: Utf8
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("text_table").unwrap();
         assert_array_values!(batch, "text", vec!["<hello> & \"world\""], StringArray);
-
-        Ok(())
     }
 
     #[test]
-    fn test_parse_edge_empty_input() -> Result<()> {
+    fn test_parse_edge_empty_input() {
         let xml_content = r#"<data></data>"#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: empty_table
@@ -1324,16 +1384,12 @@ mod tests {
                       data_type: Utf8
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("empty_table").unwrap();
         assert_eq!(batch.num_rows(), 0);
-
-        Ok(())
     }
 
     #[test]
-    fn test_transform_scale_offset_float64() -> Result<()> {
+    fn test_transform_scale_offset_float64() {
         let xml_content = r#"
         <data>
             <row><value>100</value></row>
@@ -1341,7 +1397,8 @@ mod tests {
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: scaled
@@ -1355,17 +1412,13 @@ mod tests {
                       offset: 10.0
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("scaled").unwrap();
         // value = value * scale + offset = 100 * 0.1 + 10 = 20, 200 * 0.1 + 10 = 30
         assert_array_approx_values!(batch, "value", vec![20.0, 30.0], Float64Array, 0.001);
-
-        Ok(())
     }
 
     #[test]
-    fn test_transform_scale_offset_float32() -> Result<()> {
+    fn test_transform_scale_offset_float32() {
         let xml_content = r#"
         <data>
             <row><value>100</value></row>
@@ -1373,7 +1426,8 @@ mod tests {
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: scaled
@@ -1387,16 +1441,12 @@ mod tests {
                       offset: 10.0
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("scaled").unwrap();
         assert_array_approx_values!(batch, "value", vec![20.0f32, 30.0f32], Float32Array, 0.001);
-
-        Ok(())
     }
 
     #[test]
-    fn test_attr_parse_multiple_attributes() -> Result<()> {
+    fn test_attr_parse_multiple_attributes() {
         let xml_content = r#"
         <data>
             <item id="1" name="First" type="A">Content 1</item>
@@ -1404,7 +1454,8 @@ mod tests {
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: items
@@ -1425,8 +1476,6 @@ mod tests {
                       data_type: Utf8
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("items").unwrap();
         assert_eq!(batch.num_rows(), 2);
         assert_array_values!(batch, "id", vec![1i32, 2], Int32Array);
@@ -1438,12 +1487,10 @@ mod tests {
             vec!["Content 1", "Content 2"],
             StringArray
         );
-
-        Ok(())
     }
 
     #[test]
-    fn test_parse_nested_parent_indices_three_levels() -> Result<()> {
+    fn test_parse_nested_parent_indices_three_levels() {
         let xml_content = r#"
         <root>
             <group>
@@ -1461,7 +1508,8 @@ mod tests {
         </root>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: groups
@@ -1477,8 +1525,6 @@ mod tests {
                       data_type: Int32
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("items").unwrap();
 
         assert_eq!(batch.num_rows(), 6);
@@ -1488,12 +1534,10 @@ mod tests {
         assert_array_values!(batch, "<group>", vec![0u32, 0, 1, 1, 1, 2], UInt32Array);
         assert_array_values!(batch, "<item>", vec![0u32, 1, 0, 1, 2, 0], UInt32Array);
         assert_array_values!(batch, "value", vec![1i32, 2, 3, 4, 5, 6], Int32Array);
-
-        Ok(())
     }
 
     #[test]
-    fn test_parse_structure_deeply_nested() -> Result<()> {
+    fn test_parse_structure_deeply_nested() {
         let xml_content = r#"
         <level1>
             <level2>
@@ -1510,7 +1554,8 @@ mod tests {
         </level1>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: deep
@@ -1522,17 +1567,13 @@ mod tests {
                       data_type: Int32
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("deep").unwrap();
         assert_eq!(batch.num_rows(), 1);
         assert_array_values!(batch, "value", vec![42i32], Int32Array);
-
-        Ok(())
     }
 
     #[test]
-    fn test_parse_structure_deeply_nested_generic() -> Result<()> {
+    fn test_parse_structure_deeply_nested_generic() {
         let xml_content = r#"
         <level1>
             <level2>
@@ -1563,7 +1604,8 @@ mod tests {
         </level1>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: level2s
@@ -1583,20 +1625,16 @@ mod tests {
                       data_type: Int32
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("rows").unwrap();
         assert_eq!(batch.num_rows(), 5);
         assert_array_values!(batch, "<level2>", vec![0u32, 0, 0, 1, 1], UInt32Array);
         assert_array_values!(batch, "<level3>", vec![0u32, 0, 1, 0, 0], UInt32Array);
         assert_array_values!(batch, "<row>", vec![0u32, 1, 0, 0, 1], UInt32Array);
         assert_array_values!(batch, "value", vec![1i32, 2, 3, 4, 5], Int32Array);
-
-        Ok(())
     }
 
     #[test]
-    fn test_parse_indices_nested_row_index() -> Result<()> {
+    fn test_parse_indices_nested_row_index() {
         let xml_content = r#"
         <data>
             <group>
@@ -1609,7 +1647,8 @@ mod tests {
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: groups
@@ -1625,19 +1664,15 @@ mod tests {
                       data_type: Int32
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("items").unwrap();
         assert_eq!(batch.num_rows(), 3);
         assert_array_values!(batch, "<group>", vec![0u32, 0, 1], UInt32Array);
         assert_array_values!(batch, "<item>", vec![0u32, 1, 0], UInt32Array);
         assert_array_values!(batch, "value", vec![1i32, 2, 3], Int32Array);
-
-        Ok(())
     }
 
     #[test]
-    fn test_parse_edge_empty_tags() -> Result<()> {
+    fn test_parse_edge_empty_tags() {
         let xml_content = r#"
         <data>
             <row>
@@ -1651,7 +1686,8 @@ mod tests {
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: test
@@ -1668,18 +1704,14 @@ mod tests {
                       nullable: true
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("test").unwrap();
         assert_eq!(batch.num_rows(), 2);
         assert_array_values_option!(batch, "value", vec![Some("1"), None], StringArray);
         assert_array_values_option!(batch, "empty", vec![None, Some("not empty")], StringArray);
-
-        Ok(())
     }
 
     #[test]
-    fn test_dtype_boolean_valid_values() -> Result<()> {
+    fn test_dtype_boolean_valid_values() {
         let xml_content = r#"
         <data>
             <row><bool>true</bool></row>
@@ -1699,7 +1731,8 @@ mod tests {
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: bools
@@ -1711,8 +1744,6 @@ mod tests {
                       data_type: Boolean
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("bools").unwrap();
         assert_eq!(batch.num_rows(), 14);
         assert_array_values!(
@@ -1724,8 +1755,6 @@ mod tests {
             ],
             BooleanArray
         );
-
-        Ok(())
     }
 
     #[test]
@@ -1817,9 +1846,13 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_transform_scale_unsupported_int32() {
-        let config_result: std::result::Result<Config, _> = serde_yaml::from_str(
+    #[rstest]
+    #[case("Int32", "scale: 0.1")]
+    #[case("Int16", "offset: 10.0")]
+    #[case("Boolean", "scale: 0.1")]
+    #[case("Utf8", "offset: 10.0")]
+    fn test_transform_unsupported_dtype(#[case] dtype: &str, #[case] transform: &str) {
+        let yaml = format!(
             r#"
             tables:
                 - name: test
@@ -1828,38 +1861,23 @@ mod tests {
                   fields:
                     - name: value
                       xml_path: /data/row/value
-                      data_type: Int32
-                      scale: 0.1
-            "#,
+                      data_type: {dtype}
+                      {transform}
+            "#
         );
-        let config = config_result.unwrap();
-        assert!(config.validate().is_err());
+        let config: Config = serde_yaml::from_str(&yaml).unwrap();
+        assert!(
+            config.validate().is_err(),
+            "Expected validation error for {transform} on {dtype}"
+        );
     }
 
     #[test]
-    fn test_transform_offset_unsupported_int16() {
-        let config_result: std::result::Result<Config, _> = serde_yaml::from_str(
-            r#"
-            tables:
-                - name: test
-                  xml_path: /data
-                  levels: [row]
-                  fields:
-                    - name: value
-                      xml_path: /data/row/value
-                      data_type: Int16
-                      offset: 10.0
-            "#,
-        );
-        let config = config_result.unwrap();
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_unicode_parse_non_utf8_bytes() -> Result<()> {
+    fn test_unicode_parse_non_utf8_bytes() {
         let xml_content = r#"<data><row><value>Hello 世界 🌍</value></row></data>"#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: unicode
@@ -1871,16 +1889,12 @@ mod tests {
                       data_type: Utf8
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("unicode").unwrap();
         assert_array_values!(batch, "value", vec!["Hello 世界 🌍"], StringArray);
-
-        Ok(())
     }
 
     #[test]
-    fn test_attr_parse_empty_elements() -> Result<()> {
+    fn test_attr_parse_empty_elements() {
         let xml_content = r#"
         <data>
             <item id="1" />
@@ -1889,7 +1903,8 @@ mod tests {
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: items
@@ -1905,8 +1920,6 @@ mod tests {
                       nullable: true
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("items").unwrap();
         assert_eq!(batch.num_rows(), 3);
         assert_array_values!(batch, "id", vec![1i32, 2, 3], Int32Array);
@@ -1916,8 +1929,6 @@ mod tests {
             vec![None, None, Some("content")],
             StringArray
         );
-
-        Ok(())
     }
 
     #[test]
@@ -2000,11 +2011,18 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_dtype_overflow_int8() -> Result<()> {
-        let xml_content = r#"<data><row><value>128</value></row></data>"#;
-
-        let config = config_from_yaml!(
+    #[rstest]
+    #[case("128", "Int8")]
+    #[case("256", "UInt8")]
+    #[case("32768", "Int16")]
+    #[case("-32769", "Int16")]
+    #[case("65536", "UInt16")]
+    #[case("4294967296", "UInt32")]
+    #[case("9223372036854775808", "Int64")]
+    #[case("18446744073709551616", "UInt64")]
+    fn test_dtype_overflow(#[case] value: &str, #[case] dtype: &str) {
+        let xml_content = format!("<data><row><value>{value}</value></row></data>");
+        let yaml_config = format!(
             r#"
             tables:
                 - name: test
@@ -2013,41 +2031,12 @@ mod tests {
                   fields:
                     - name: value
                       xml_path: /data/row/value
-                      data_type: Int8
+                      data_type: {dtype}
             "#
         );
-
+        let config: Config = serde_yaml::from_str(&yaml_config).unwrap();
         let result = parse_xml(xml_content.as_bytes(), &config);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            Error::ParseError(msg) => assert!(msg.contains("128")),
-            e => panic!("Expected ParseError, got {:?}", e),
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_dtype_overflow_uint32() -> Result<()> {
-        let xml_content = r#"<data><row><value>4294967296</value></row></data>"#;
-
-        let config = config_from_yaml!(
-            r#"
-            tables:
-                - name: test
-                  xml_path: /data
-                  levels: [row]
-                  fields:
-                    - name: value
-                      xml_path: /data/row/value
-                      data_type: UInt32
-            "#
-        );
-
-        let result = parse_xml(xml_content.as_bytes(), &config);
-        assert!(result.is_err());
-
-        Ok(())
+        assert!(result.is_err(), "Expected overflow error for {value} as {dtype}");
     }
 
     #[test]
@@ -2075,7 +2064,7 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_scale_offset_negative_float() -> Result<()> {
+    fn test_transform_scale_offset_negative_float() {
         let xml_content = r#"
         <data>
             <row><value>-100</value></row>
@@ -2083,7 +2072,8 @@ mod tests {
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: scaled
@@ -2097,24 +2087,21 @@ mod tests {
                       offset: -10.0
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("scaled").unwrap();
         // value = value * scale + offset = -100 * -0.5 + -10 = 40, 0 * -0.5 + -10 = -10
         assert_array_approx_values!(batch, "value", vec![40.0, -10.0], Float64Array, 0.001);
-
-        Ok(())
     }
 
     #[test]
-    fn test_nullable_all_null_various_types() -> Result<()> {
+    fn test_nullable_all_null_various_types() {
         let xml_content = r#"
         <data>
             <row></row>
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: nulls
@@ -2139,8 +2126,6 @@ mod tests {
                       nullable: true
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("nulls").unwrap();
         assert_eq!(batch.num_rows(), 1);
         assert_array_values_option!(batch, "int_val", vec![None::<i32>], Int32Array);
@@ -2153,12 +2138,10 @@ mod tests {
         );
         assert_array_values_option!(batch, "str_val", vec![None::<&str>], StringArray);
         assert_array_values_option!(batch, "bool_val", vec![None::<bool>], BooleanArray);
-
-        Ok(())
     }
 
     #[test]
-    fn test_nullable_mixed_null_and_valid() -> Result<()> {
+    fn test_nullable_mixed_null_and_valid() {
         let xml_content = r#"
         <data>
             <row><value>10</value></row>
@@ -2168,7 +2151,8 @@ mod tests {
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: mixed
@@ -2181,8 +2165,6 @@ mod tests {
                       nullable: true
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("mixed").unwrap();
         assert_eq!(batch.num_rows(), 4);
         assert_array_values_option!(
@@ -2191,12 +2173,10 @@ mod tests {
             vec![Some(10i32), None, Some(30), None],
             Int32Array
         );
-
-        Ok(())
     }
 
     #[test]
-    fn test_nullable_all_types_with_nulls() -> Result<()> {
+    fn test_nullable_all_types_with_nulls() {
         let xml_content = r#"
         <data>
             <row>
@@ -2216,7 +2196,8 @@ mod tests {
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: all_nulls
@@ -2273,16 +2254,12 @@ mod tests {
                       nullable: true
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("all_nulls").unwrap();
         assert_eq!(batch.num_rows(), 1);
-
-        Ok(())
     }
 
     #[test]
-    fn test_nullable_empty_vs_missing_element() -> Result<()> {
+    fn test_nullable_empty_vs_missing_element() {
         let xml_content = r#"
         <data>
             <row><value></value></row>
@@ -2290,7 +2267,8 @@ mod tests {
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: test
@@ -2303,134 +2281,16 @@ mod tests {
                       nullable: true
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("test").unwrap();
         assert_eq!(batch.num_rows(), 2);
         // Both empty element and missing element should be null
         assert_array_values_option!(batch, "value", vec![None::<&str>, None], StringArray);
-
-        Ok(())
     }
 
-    #[test]
-    fn test_error_table_not_found_end_row() -> Result<()> {
-        let xml_content = r#"
-        <data>
-            <row><value>1</value></row>
-        </data>
-        "#;
 
-        let config = config_from_yaml!(
-            r#"
-            tables:
-                - name: test
-                  xml_path: /data
-                  levels: [row]
-                  fields:
-                    - name: value
-                      xml_path: /data/row/value
-                      data_type: Int32
-            "#
-        );
-
-        // This should work normally
-        let result = parse_xml(xml_content.as_bytes(), &config);
-        assert!(result.is_ok());
-
-        Ok(())
-    }
 
     #[test]
-    fn test_error_table_not_found_parent_indices() -> Result<()> {
-        let xml_content = r#"
-        <data>
-            <row><value>1</value></row>
-        </data>
-        "#;
-
-        let config = config_from_yaml!(
-            r#"
-            tables:
-                - name: test
-                  xml_path: /data
-                  levels: [row]
-                  fields:
-                    - name: value
-                      xml_path: /data/row/value
-                      data_type: Int32
-            "#
-        );
-
-        // This should work normally
-        let result = parse_xml(xml_content.as_bytes(), &config);
-        assert!(result.is_ok());
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_error_attr_malformed() {
-        let config = config_from_yaml!(
-            r#"
-            tables:
-                - name: test
-                  xml_path: /data
-                  levels: [item]
-                  fields:
-                    - name: id
-                      xml_path: /data/item/@id
-                      data_type: Int32
-            "#
-        );
-
-        // Malformed attribute - this might parse depending on quick-xml behavior
-        let xml_content = r#"<data><item id="></item></data>"#;
-        let result = parse_xml(xml_content.as_bytes(), &config);
-        // The result depends on quick-xml's error handling
-        assert!(result.is_err() || result.is_ok());
-    }
-
-    #[test]
-    fn test_transform_scale_unsupported_boolean() {
-        let config_result: std::result::Result<Config, _> = serde_yaml::from_str(
-            r#"
-            tables:
-                - name: test
-                  xml_path: /data
-                  levels: [row]
-                  fields:
-                    - name: value
-                      xml_path: /data/row/value
-                      data_type: Boolean
-                      scale: 0.1
-            "#,
-        );
-        let config = config_result.unwrap();
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_transform_offset_unsupported_utf8() {
-        let config_result: std::result::Result<Config, _> = serde_yaml::from_str(
-            r#"
-            tables:
-                - name: test
-                  xml_path: /data
-                  levels: [row]
-                  fields:
-                    - name: value
-                      xml_path: /data/row/value
-                      data_type: Utf8
-                      offset: 10.0
-            "#,
-        );
-        let config = config_result.unwrap();
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_cdata_parse_basic() -> Result<()> {
+    fn test_cdata_parse_basic() {
         let xml_content = r#"
         <data>
             <row>
@@ -2439,7 +2299,8 @@ mod tests {
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: cdata
@@ -2451,16 +2312,12 @@ mod tests {
                       data_type: Utf8
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("cdata").unwrap();
         assert_array_values!(batch, "value", vec!["Hello World"], StringArray);
-
-        Ok(())
     }
 
     #[test]
-    fn test_cdata_parse_special_characters() -> Result<()> {
+    fn test_cdata_parse_special_characters() {
         let xml_content = r#"
         <data>
             <row>
@@ -2469,7 +2326,8 @@ mod tests {
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: cdata
@@ -2481,8 +2339,6 @@ mod tests {
                       data_type: Utf8
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("cdata").unwrap();
         assert_array_values!(
             batch,
@@ -2490,12 +2346,10 @@ mod tests {
             vec!["<script>alert('XSS')</script>"],
             StringArray
         );
-
-        Ok(())
     }
 
     #[test]
-    fn test_cdata_parse_mixed_with_text() -> Result<()> {
+    fn test_cdata_parse_mixed_with_text() {
         let xml_content = r#"
         <data>
             <row>
@@ -2504,7 +2358,8 @@ mod tests {
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: cdata
@@ -2516,16 +2371,12 @@ mod tests {
                       data_type: Utf8
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("cdata").unwrap();
         assert_array_values!(batch, "value", vec!["Before <CDATA> After"], StringArray);
-
-        Ok(())
     }
 
     #[test]
-    fn test_cdata_parse_multiple_sections() -> Result<()> {
+    fn test_cdata_parse_multiple_sections() {
         let xml_content = r#"
         <data>
             <row>
@@ -2534,7 +2385,8 @@ mod tests {
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: cdata
@@ -2546,16 +2398,12 @@ mod tests {
                       data_type: Utf8
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("cdata").unwrap();
         assert_array_values!(batch, "value", vec!["Part1Part2"], StringArray);
-
-        Ok(())
     }
 
     #[test]
-    fn test_cdata_parse_numeric_conversion() -> Result<()> {
+    fn test_cdata_parse_numeric_conversion() {
         let xml_content = r#"
         <data>
             <row>
@@ -2564,7 +2412,8 @@ mod tests {
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: cdata
@@ -2576,16 +2425,12 @@ mod tests {
                       data_type: Int32
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("cdata").unwrap();
         assert_array_values!(batch, "value", vec![42i32], Int32Array);
-
-        Ok(())
     }
 
     #[test]
-    fn test_namespace_parse_default() -> Result<()> {
+    fn test_namespace_parse_default() {
         let xml_content = r#"
         <data xmlns="http://example.com/ns">
             <row>
@@ -2594,7 +2439,8 @@ mod tests {
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: ns_test
@@ -2606,16 +2452,12 @@ mod tests {
                       data_type: Int32
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("ns_test").unwrap();
         assert_array_values!(batch, "value", vec![42i32], Int32Array);
-
-        Ok(())
     }
 
     #[test]
-    fn test_namespace_parse_prefixed() -> Result<()> {
+    fn test_namespace_parse_prefixed() {
         let xml_content = r#"
         <ns:data xmlns:ns="http://example.com/ns">
             <ns:row>
@@ -2624,7 +2466,8 @@ mod tests {
         </ns:data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: ns_test
@@ -2636,16 +2479,12 @@ mod tests {
                       data_type: Int32
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("ns_test").unwrap();
         assert_array_values!(batch, "value", vec![42i32], Int32Array);
-
-        Ok(())
     }
 
     #[test]
-    fn test_namespace_parse_multiple() -> Result<()> {
+    fn test_namespace_parse_multiple() {
         let xml_content = r#"
         <data xmlns="http://example.com/default" xmlns:other="http://example.com/other">
             <row>
@@ -2654,7 +2493,8 @@ mod tests {
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: ns_test
@@ -2666,16 +2506,12 @@ mod tests {
                       data_type: Int32
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("ns_test").unwrap();
         assert_array_values!(batch, "value", vec![42i32], Int32Array);
-
-        Ok(())
     }
 
     #[test]
-    fn test_nullable_missing_string_uses_empty() -> Result<()> {
+    fn test_nullable_missing_string_uses_empty() {
         // Test that non-nullable strings get empty string, not error
         let xml_content = r#"
         <data>
@@ -2685,7 +2521,8 @@ mod tests {
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: test
@@ -2702,15 +2539,11 @@ mod tests {
                       nullable: false
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("test").unwrap();
         assert_eq!(batch.num_rows(), 1);
         // Non-nullable string with missing element should be empty string
         assert_array_values!(batch, "value", vec![""], StringArray);
         assert_array_values!(batch, "other", vec!["exists"], StringArray);
-
-        Ok(())
     }
 
     #[test]
@@ -2748,146 +2581,9 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_dtype_overflow_int16() -> Result<()> {
-        let xml_content = r#"<data><row><value>32768</value></row></data>"#;
-
-        let config = config_from_yaml!(
-            r#"
-            tables:
-                - name: test
-                  xml_path: /data
-                  levels: [row]
-                  fields:
-                    - name: value
-                      xml_path: /data/row/value
-                      data_type: Int16
-            "#
-        );
-
-        let result = parse_xml(xml_content.as_bytes(), &config);
-        assert!(result.is_err());
-
-        Ok(())
-    }
 
     #[test]
-    fn test_dtype_overflow_int16_negative() -> Result<()> {
-        let xml_content = r#"<data><row><value>-32769</value></row></data>"#;
-
-        let config = config_from_yaml!(
-            r#"
-            tables:
-                - name: test
-                  xml_path: /data
-                  levels: [row]
-                  fields:
-                    - name: value
-                      xml_path: /data/row/value
-                      data_type: Int16
-            "#
-        );
-
-        let result = parse_xml(xml_content.as_bytes(), &config);
-        assert!(result.is_err());
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_dtype_overflow_uint8() -> Result<()> {
-        let xml_content = r#"<data><row><value>256</value></row></data>"#;
-
-        let config = config_from_yaml!(
-            r#"
-            tables:
-                - name: test
-                  xml_path: /data
-                  levels: [row]
-                  fields:
-                    - name: value
-                      xml_path: /data/row/value
-                      data_type: UInt8
-            "#
-        );
-
-        let result = parse_xml(xml_content.as_bytes(), &config);
-        assert!(result.is_err());
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_dtype_overflow_uint16() -> Result<()> {
-        let xml_content = r#"<data><row><value>65536</value></row></data>"#;
-
-        let config = config_from_yaml!(
-            r#"
-            tables:
-                - name: test
-                  xml_path: /data
-                  levels: [row]
-                  fields:
-                    - name: value
-                      xml_path: /data/row/value
-                      data_type: UInt16
-            "#
-        );
-
-        let result = parse_xml(xml_content.as_bytes(), &config);
-        assert!(result.is_err());
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_dtype_overflow_int64() -> Result<()> {
-        let xml_content = r#"<data><row><value>9223372036854775808</value></row></data>"#;
-
-        let config = config_from_yaml!(
-            r#"
-            tables:
-                - name: test
-                  xml_path: /data
-                  levels: [row]
-                  fields:
-                    - name: value
-                      xml_path: /data/row/value
-                      data_type: Int64
-            "#
-        );
-
-        let result = parse_xml(xml_content.as_bytes(), &config);
-        assert!(result.is_err());
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_dtype_overflow_uint64() -> Result<()> {
-        let xml_content = r#"<data><row><value>18446744073709551616</value></row></data>"#;
-
-        let config = config_from_yaml!(
-            r#"
-            tables:
-                - name: test
-                  xml_path: /data
-                  levels: [row]
-                  fields:
-                    - name: value
-                      xml_path: /data/row/value
-                      data_type: UInt64
-            "#
-        );
-
-        let result = parse_xml(xml_content.as_bytes(), &config);
-        assert!(result.is_err());
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_dtype_invalid_negative_unsigned() -> Result<()> {
+    fn test_dtype_invalid_negative_unsigned() {
         let xml_content = r#"<data><row><value>-1</value></row></data>"#;
 
         let config = config_from_yaml!(
@@ -2905,8 +2601,6 @@ mod tests {
 
         let result = parse_xml(xml_content.as_bytes(), &config);
         assert!(result.is_err());
-
-        Ok(())
     }
 
     #[test]
@@ -2963,10 +2657,11 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_scale_only_float64() -> Result<()> {
+    fn test_transform_scale_only_float64() {
         let xml_content = r#"<data><row><value>100</value></row></data>"#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: scaled
@@ -2979,19 +2674,16 @@ mod tests {
                       scale: 0.5
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("scaled").unwrap();
         assert_array_approx_values!(batch, "value", vec![50.0], Float64Array, 0.001);
-
-        Ok(())
     }
 
     #[test]
-    fn test_transform_scale_only_float32() -> Result<()> {
+    fn test_transform_scale_only_float32() {
         let xml_content = r#"<data><row><value>100</value></row></data>"#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: scaled
@@ -3004,19 +2696,16 @@ mod tests {
                       scale: 0.5
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("scaled").unwrap();
         assert_array_approx_values!(batch, "value", vec![50.0f32], Float32Array, 0.001);
-
-        Ok(())
     }
 
     #[test]
-    fn test_transform_offset_only_float64() -> Result<()> {
+    fn test_transform_offset_only_float64() {
         let xml_content = r#"<data><row><value>100</value></row></data>"#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: offset
@@ -3029,19 +2718,16 @@ mod tests {
                       offset: 50.0
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("offset").unwrap();
         assert_array_approx_values!(batch, "value", vec![150.0], Float64Array, 0.001);
-
-        Ok(())
     }
 
     #[test]
-    fn test_transform_offset_only_float32() -> Result<()> {
+    fn test_transform_offset_only_float32() {
         let xml_content = r#"<data><row><value>100</value></row></data>"#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: offset
@@ -3054,19 +2740,16 @@ mod tests {
                       offset: 50.0
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("offset").unwrap();
         assert_array_approx_values!(batch, "value", vec![150.0f32], Float32Array, 0.001);
-
-        Ok(())
     }
 
     #[test]
-    fn test_transform_scale_negative_value() -> Result<()> {
+    fn test_transform_scale_negative_value() {
         let xml_content = r#"<data><row><value>-100</value></row></data>"#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: scaled
@@ -3079,19 +2762,16 @@ mod tests {
                       scale: 2.0
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("scaled").unwrap();
         assert_array_approx_values!(batch, "value", vec![-200.0], Float64Array, 0.001);
-
-        Ok(())
     }
 
     #[test]
-    fn test_transform_offset_negative_value() -> Result<()> {
+    fn test_transform_offset_negative_value() {
         let xml_content = r#"<data><row><value>-100</value></row></data>"#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: offset
@@ -3104,19 +2784,16 @@ mod tests {
                       offset: -50.0
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("offset").unwrap();
         assert_array_approx_values!(batch, "value", vec![-150.0], Float64Array, 0.001);
-
-        Ok(())
     }
 
     #[test]
-    fn test_transform_scale_zero_value() -> Result<()> {
+    fn test_transform_scale_zero_value() {
         let xml_content = r#"<data><row><value>0</value></row></data>"#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: scaled
@@ -3130,19 +2807,16 @@ mod tests {
                       offset: 50.0
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("scaled").unwrap();
         assert_array_approx_values!(batch, "value", vec![50.0], Float64Array, 0.001);
-
-        Ok(())
     }
 
     #[test]
-    fn test_transform_scale_very_small() -> Result<()> {
+    fn test_transform_scale_very_small() {
         let xml_content = r#"<data><row><value>1000000</value></row></data>"#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: scaled
@@ -3155,19 +2829,16 @@ mod tests {
                       scale: 0.000001
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("scaled").unwrap();
         assert_array_approx_values!(batch, "value", vec![1.0], Float64Array, 0.0001);
-
-        Ok(())
     }
 
     #[test]
-    fn test_transform_scale_very_large() -> Result<()> {
+    fn test_transform_scale_very_large() {
         let xml_content = r#"<data><row><value>0.001</value></row></data>"#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: scaled
@@ -3180,16 +2851,12 @@ mod tests {
                       scale: 1000000.0
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("scaled").unwrap();
         assert_array_approx_values!(batch, "value", vec![1000.0], Float64Array, 0.1);
-
-        Ok(())
     }
 
     #[test]
-    fn test_dtype_float_scientific_notation() -> Result<()> {
+    fn test_dtype_float_scientific_notation() {
         let xml_content = r#"
         <data>
             <row>
@@ -3199,7 +2866,8 @@ mod tests {
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: scientific
@@ -3214,17 +2882,13 @@ mod tests {
                       data_type: Float64
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("scientific").unwrap();
         assert_array_approx_values!(batch, "float32", vec![1.5e10f32], Float32Array, 1e6);
         assert_array_approx_values!(batch, "float64", vec![2.5e-10f64], Float64Array, 1e-15);
-
-        Ok(())
     }
 
     #[test]
-    fn test_dtype_float_very_small() -> Result<()> {
+    fn test_dtype_float_very_small() {
         let xml_content = r#"
         <data>
             <row>
@@ -3233,7 +2897,8 @@ mod tests {
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: small
@@ -3245,16 +2910,12 @@ mod tests {
                       data_type: Float64
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("small").unwrap();
         assert_array_approx_values!(batch, "value", vec![1e-20f64], Float64Array, 1e-25);
-
-        Ok(())
     }
 
     #[test]
-    fn test_dtype_float_very_large() -> Result<()> {
+    fn test_dtype_float_very_large() {
         let xml_content = r#"
         <data>
             <row>
@@ -3263,7 +2924,8 @@ mod tests {
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: large
@@ -3275,16 +2937,12 @@ mod tests {
                       data_type: Float64
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("large").unwrap();
         assert_array_approx_values!(batch, "value", vec![1e20f64], Float64Array, 1e15);
-
-        Ok(())
     }
 
     #[test]
-    fn test_unicode_attr_various_scripts() -> Result<()> {
+    fn test_unicode_attr_various_scripts() {
         let xml_content = r#"
         <data>
             <item name="日本語">Japanese</item>
@@ -3293,7 +2951,8 @@ mod tests {
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: unicode
@@ -3308,8 +2967,6 @@ mod tests {
                       data_type: Utf8
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("unicode").unwrap();
         assert_eq!(batch.num_rows(), 3);
         assert_array_values!(
@@ -3318,12 +2975,10 @@ mod tests {
             vec!["日本語", "العربية", "עברית"],
             StringArray
         );
-
-        Ok(())
     }
 
     #[test]
-    fn test_unicode_text_emojis() -> Result<()> {
+    fn test_unicode_text_emojis() {
         let xml_content = r#"
         <data>
             <row><value>Hello 🌍 World 🚀</value></row>
@@ -3331,7 +2986,8 @@ mod tests {
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: emoji
@@ -3343,8 +2999,6 @@ mod tests {
                       data_type: Utf8
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("emoji").unwrap();
         assert_array_values!(
             batch,
@@ -3352,19 +3006,18 @@ mod tests {
             vec!["Hello 🌍 World 🚀", "😀😃😄😁"],
             StringArray
         );
-
-        Ok(())
     }
 
     #[test]
-    fn test_attr_parse_empty_value() -> Result<()> {
+    fn test_attr_parse_empty_value() {
         let xml_content = r#"
         <data>
             <item id="" name="test">content</item>
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: attrs
@@ -3379,24 +3032,21 @@ mod tests {
                       data_type: Utf8
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("attrs").unwrap();
         assert_array_values!(batch, "id", vec![""], StringArray);
         assert_array_values!(batch, "name", vec!["test"], StringArray);
-
-        Ok(())
     }
 
     #[test]
-    fn test_attr_parse_whitespace_preserved() -> Result<()> {
+    fn test_attr_parse_whitespace_preserved() {
         let xml_content = r#"
         <data>
             <item name="  spaced  ">content</item>
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: attrs
@@ -3408,23 +3058,20 @@ mod tests {
                       data_type: Utf8
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("attrs").unwrap();
         assert_array_values!(batch, "name", vec!["  spaced  "], StringArray);
-
-        Ok(())
     }
 
     #[test]
-    fn test_attr_parse_multiple_on_element() -> Result<()> {
+    fn test_attr_parse_multiple_on_element() {
         let xml_content = r#"
         <data>
             <item a="1" b="2" c="3" d="4" e="5">content</item>
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: attrs
@@ -3438,20 +3085,16 @@ mod tests {
                     - { name: e, xml_path: /data/item/@e, data_type: Int32 }
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("attrs").unwrap();
         assert_array_values!(batch, "a", vec![1i32], Int32Array);
         assert_array_values!(batch, "b", vec![2i32], Int32Array);
         assert_array_values!(batch, "c", vec![3i32], Int32Array);
         assert_array_values!(batch, "d", vec![4i32], Int32Array);
         assert_array_values!(batch, "e", vec![5i32], Int32Array);
-
-        Ok(())
     }
 
     #[test]
-    fn test_parse_xml_features_comments_ignored() -> Result<()> {
+    fn test_parse_xml_features_comments_ignored() {
         let xml_content = r#"
         <!-- This is a comment -->
         <data>
@@ -3464,7 +3107,8 @@ mod tests {
         <!-- Final comment -->
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: test
@@ -3476,23 +3120,20 @@ mod tests {
                       data_type: Int32
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("test").unwrap();
         assert_array_values!(batch, "value", vec![42i32], Int32Array);
-
-        Ok(())
     }
 
     #[test]
-    fn test_parse_xml_features_declaration() -> Result<()> {
+    fn test_parse_xml_features_declaration() {
         let xml_content = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <data>
             <row><value>42</value></row>
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: test
@@ -3504,16 +3145,12 @@ mod tests {
                       data_type: Int32
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("test").unwrap();
         assert_array_values!(batch, "value", vec![42i32], Int32Array);
-
-        Ok(())
     }
 
     #[test]
-    fn test_parse_table_indices_only_excluded() -> Result<()> {
+    fn test_parse_table_indices_only_excluded() {
         // Tables with no fields (only indices) should not appear in output
         let xml_content = r#"
         <data>
@@ -3524,7 +3161,8 @@ mod tests {
         </data>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: groups
@@ -3540,8 +3178,6 @@ mod tests {
                       data_type: Int32
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         // "groups" table should not be in output (no fields)
         assert!(!record_batches.contains_key("groups"));
         // "items" table should be in output
@@ -3551,12 +3187,10 @@ mod tests {
         assert_array_values!(batch, "<group>", vec![0u32, 0], UInt32Array);
         assert_array_values!(batch, "<item>", vec![0u32, 1], UInt32Array);
         assert_array_values!(batch, "value", vec![1i32, 2], Int32Array);
-
-        Ok(())
     }
 
     #[test]
-    fn test_parse_structure_fields_at_root() -> Result<()> {
+    fn test_parse_structure_fields_at_root() {
         // Test fields defined directly at root level (xml_path: /)
         let xml_content = r#"
         <root>
@@ -3565,7 +3199,8 @@ mod tests {
         </root>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: document
@@ -3580,21 +3215,18 @@ mod tests {
                       data_type: Utf8
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("document").unwrap();
         assert_eq!(batch.num_rows(), 1);
         assert_array_values!(batch, "name", vec!["Test Document"], StringArray);
         assert_array_values!(batch, "version", vec!["1.0"], StringArray);
-
-        Ok(())
     }
 
     #[test]
-    fn test_parse_structure_root_with_attributes() -> Result<()> {
+    fn test_parse_structure_root_with_attributes() {
         let xml_content = r#"<root version="2.0" encoding="utf-8"><data>content</data></root>"#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: document
@@ -3612,26 +3244,23 @@ mod tests {
                       data_type: Utf8
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("document").unwrap();
         assert_eq!(batch.num_rows(), 1);
         assert_array_values!(batch, "version", vec!["2.0"], StringArray);
         assert_array_values!(batch, "encoding", vec!["utf-8"], StringArray);
         assert_array_values!(batch, "data", vec!["content"], StringArray);
-
-        Ok(())
     }
 
     #[test]
-    fn test_parse_attribute_xml_entities_unescaped() -> Result<()> {
+    fn test_parse_attribute_xml_entities_unescaped() {
         let xml_content = r#"
         <items>
             <item id="AT&amp;T" label="2 &lt; 3" note="&quot;quoted&quot;" path="a&apos;b"/>
         </items>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: items
@@ -3652,23 +3281,20 @@ mod tests {
                       data_type: Utf8
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("items").unwrap();
 
         assert_array_values!(batch, "id", vec!["AT&T"], StringArray);
         assert_array_values!(batch, "label", vec!["2 < 3"], StringArray);
         assert_array_values!(batch, "note", vec!["\"quoted\""], StringArray);
         assert_array_values!(batch, "path", vec!["a'b"], StringArray);
-
-        Ok(())
     }
 
     #[test]
-    fn test_parse_attribute_numeric_entities_unescaped() -> Result<()> {
+    fn test_parse_attribute_numeric_entities_unescaped() {
         let xml_content = r#"<items><item symbol="&#65;&#66;&#67;" euro="&#x20AC;"/></items>"#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: items
@@ -3683,18 +3309,14 @@ mod tests {
                       data_type: Utf8
             "#
         );
-
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("items").unwrap();
 
         assert_array_values!(batch, "symbol", vec!["ABC"], StringArray); // decimal refs
         assert_array_values!(batch, "euro", vec!["€"], StringArray); // hex ref
-
-        Ok(())
     }
 
     #[test]
-    fn test_parse_structure_root_with_nested_tables() -> Result<()> {
+    fn test_parse_structure_root_with_nested_tables() {
         let xml_content = r#"
         <document>
             <meta>
@@ -3714,7 +3336,8 @@ mod tests {
         </document>
         "#;
 
-        let config = config_from_yaml!(
+        let record_batches = parse(
+            xml_content,
             r#"
             tables:
                 - name: document
@@ -3740,8 +3363,6 @@ mod tests {
             "#
         );
 
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
-
         // Check document table
         let doc_batch = record_batches.get("document").unwrap();
         assert_eq!(doc_batch.num_rows(), 1);
@@ -3753,7 +3374,5 @@ mod tests {
         assert_eq!(items_batch.num_rows(), 2);
         assert_array_values!(items_batch, "name", vec!["Item 1", "Item 2"], StringArray);
         assert_array_values!(items_batch, "price", vec![10.5, 20.5], Float64Array);
-
-        Ok(())
     }
 }
