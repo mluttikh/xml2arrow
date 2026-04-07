@@ -1192,7 +1192,7 @@ mod tests {
                     - name: value
                       xml_path: /report/data/item/value
                       data_type: Int32
-            "#
+            "#,
         );
 
         let header_batch = record_batches.get("header").unwrap();
@@ -1247,7 +1247,7 @@ mod tests {
                     - name: version
                       xml_path: /root/metadata/version
                       data_type: Utf8
-            "#
+            "#,
         );
 
         assert_eq!(record_batches.len(), 2);
@@ -1323,7 +1323,7 @@ mod tests {
                     - name: float64
                       xml_path: /data/row/float64
                       data_type: Float64
-            "#
+            "#,
         );
 
         let batch = record_batches.get("numbers").unwrap();
@@ -1361,7 +1361,7 @@ mod tests {
                     - name: text
                       xml_path: /data/row/text
                       data_type: Utf8
-            "#
+            "#,
         );
         let batch = record_batches.get("text_table").unwrap();
         assert_array_values!(batch, "text", vec!["<hello> & \"world\""], StringArray);
@@ -1382,7 +1382,7 @@ mod tests {
                     - name: value
                       xml_path: /data/row/value
                       data_type: Utf8
-            "#
+            "#,
         );
         let batch = record_batches.get("empty_table").unwrap();
         assert_eq!(batch.num_rows(), 0);
@@ -1410,7 +1410,7 @@ mod tests {
                       data_type: Float64
                       scale: 0.1
                       offset: 10.0
-            "#
+            "#,
         );
         let batch = record_batches.get("scaled").unwrap();
         // value = value * scale + offset = 100 * 0.1 + 10 = 20, 200 * 0.1 + 10 = 30
@@ -1439,7 +1439,7 @@ mod tests {
                       data_type: Float32
                       scale: 0.1
                       offset: 10.0
-            "#
+            "#,
         );
         let batch = record_batches.get("scaled").unwrap();
         assert_array_approx_values!(batch, "value", vec![20.0f32, 30.0f32], Float32Array, 0.001);
@@ -1474,7 +1474,7 @@ mod tests {
                     - name: content
                       xml_path: /data/item
                       data_type: Utf8
-            "#
+            "#,
         );
         let batch = record_batches.get("items").unwrap();
         assert_eq!(batch.num_rows(), 2);
@@ -1523,7 +1523,7 @@ mod tests {
                     - name: value
                       xml_path: /root/group/item/value
                       data_type: Int32
-            "#
+            "#,
         );
         let batch = record_batches.get("items").unwrap();
 
@@ -1565,7 +1565,7 @@ mod tests {
                     - name: value
                       xml_path: /level1/level2/level3/level4/level5/row/value
                       data_type: Int32
-            "#
+            "#,
         );
         let batch = record_batches.get("deep").unwrap();
         assert_eq!(batch.num_rows(), 1);
@@ -1623,7 +1623,7 @@ mod tests {
                     - name: value
                       xml_path: /level1/level2/level3/row/value
                       data_type: Int32
-            "#
+            "#,
         );
         let batch = record_batches.get("rows").unwrap();
         assert_eq!(batch.num_rows(), 5);
@@ -1662,7 +1662,7 @@ mod tests {
                     - name: value
                       xml_path: /data/group/item/value
                       data_type: Int32
-            "#
+            "#,
         );
         let batch = record_batches.get("items").unwrap();
         assert_eq!(batch.num_rows(), 3);
@@ -1702,7 +1702,7 @@ mod tests {
                       xml_path: /data/row/empty
                       data_type: Utf8
                       nullable: true
-            "#
+            "#,
         );
         let batch = record_batches.get("test").unwrap();
         assert_eq!(batch.num_rows(), 2);
@@ -1742,7 +1742,7 @@ mod tests {
                     - name: bool
                       xml_path: /data/row/bool
                       data_type: Boolean
-            "#
+            "#,
         );
         let batch = record_batches.get("bools").unwrap();
         assert_eq!(batch.num_rows(), 14);
@@ -1851,7 +1851,10 @@ mod tests {
     #[case("Int16", "offset: 10.0")]
     #[case("Boolean", "scale: 0.1")]
     #[case("Utf8", "offset: 10.0")]
-    fn test_unsupported_dtype_transform_returns_error(#[case] dtype: &str, #[case] transform: &str) {
+    fn test_unsupported_dtype_transform_returns_error(
+        #[case] dtype: &str,
+        #[case] transform: &str,
+    ) {
         let yaml = format!(
             r#"
             tables:
@@ -1887,7 +1890,7 @@ mod tests {
                     - name: value
                       xml_path: /data/row/value
                       data_type: Utf8
-            "#
+            "#,
         );
         let batch = record_batches.get("unicode").unwrap();
         assert_array_values!(batch, "value", vec!["Hello 世界 🌍"], StringArray);
@@ -1918,7 +1921,7 @@ mod tests {
                       xml_path: /data/item
                       data_type: Utf8
                       nullable: true
-            "#
+            "#,
         );
         let batch = record_batches.get("items").unwrap();
         assert_eq!(batch.num_rows(), 3);
@@ -2036,7 +2039,10 @@ mod tests {
         );
         let config: Config = serde_yaml::from_str(&yaml_config).unwrap();
         let result = parse_xml(xml_content.as_bytes(), &config);
-        assert!(result.is_err(), "Expected overflow error for {value} as {dtype}");
+        assert!(
+            result.is_err(),
+            "Expected overflow error for {value} as {dtype}"
+        );
     }
 
     #[test]
@@ -2085,7 +2091,7 @@ mod tests {
                       data_type: Float64
                       scale: -0.5
                       offset: -10.0
-            "#
+            "#,
         );
         let batch = record_batches.get("scaled").unwrap();
         // value = value * scale + offset = -100 * -0.5 + -10 = 40, 0 * -0.5 + -10 = -10
@@ -2124,7 +2130,7 @@ mod tests {
                       xml_path: /data/row/bool_val
                       data_type: Boolean
                       nullable: true
-            "#
+            "#,
         );
         let batch = record_batches.get("nulls").unwrap();
         assert_eq!(batch.num_rows(), 1);
@@ -2163,7 +2169,7 @@ mod tests {
                       xml_path: /data/row/value
                       data_type: Int32
                       nullable: true
-            "#
+            "#,
         );
         let batch = record_batches.get("mixed").unwrap();
         assert_eq!(batch.num_rows(), 4);
@@ -2252,7 +2258,7 @@ mod tests {
                       xml_path: /data/row/str
                       data_type: Utf8
                       nullable: true
-            "#
+            "#,
         );
         let batch = record_batches.get("all_nulls").unwrap();
         assert_eq!(batch.num_rows(), 1);
@@ -2279,15 +2285,13 @@ mod tests {
                       xml_path: /data/row/value
                       data_type: Utf8
                       nullable: true
-            "#
+            "#,
         );
         let batch = record_batches.get("test").unwrap();
         assert_eq!(batch.num_rows(), 2);
         // Both empty element and missing element should be null
         assert_array_values_option!(batch, "value", vec![None::<&str>, None], StringArray);
     }
-
-
 
     #[test]
     fn test_cdata_basic_text_extracted() {
@@ -2310,7 +2314,7 @@ mod tests {
                     - name: value
                       xml_path: /data/row/value
                       data_type: Utf8
-            "#
+            "#,
         );
         let batch = record_batches.get("cdata").unwrap();
         assert_array_values!(batch, "value", vec!["Hello World"], StringArray);
@@ -2337,7 +2341,7 @@ mod tests {
                     - name: value
                       xml_path: /data/row/value
                       data_type: Utf8
-            "#
+            "#,
         );
         let batch = record_batches.get("cdata").unwrap();
         assert_array_values!(
@@ -2369,7 +2373,7 @@ mod tests {
                     - name: value
                       xml_path: /data/row/value
                       data_type: Utf8
-            "#
+            "#,
         );
         let batch = record_batches.get("cdata").unwrap();
         assert_array_values!(batch, "value", vec!["Before <CDATA> After"], StringArray);
@@ -2396,7 +2400,7 @@ mod tests {
                     - name: value
                       xml_path: /data/row/value
                       data_type: Utf8
-            "#
+            "#,
         );
         let batch = record_batches.get("cdata").unwrap();
         assert_array_values!(batch, "value", vec!["Part1Part2"], StringArray);
@@ -2423,7 +2427,7 @@ mod tests {
                     - name: value
                       xml_path: /data/row/value
                       data_type: Int32
-            "#
+            "#,
         );
         let batch = record_batches.get("cdata").unwrap();
         assert_array_values!(batch, "value", vec![42i32], Int32Array);
@@ -2450,7 +2454,7 @@ mod tests {
                     - name: value
                       xml_path: /data/row/value
                       data_type: Int32
-            "#
+            "#,
         );
         let batch = record_batches.get("ns_test").unwrap();
         assert_array_values!(batch, "value", vec![42i32], Int32Array);
@@ -2477,7 +2481,7 @@ mod tests {
                     - name: value
                       xml_path: /data/row/value
                       data_type: Int32
-            "#
+            "#,
         );
         let batch = record_batches.get("ns_test").unwrap();
         assert_array_values!(batch, "value", vec![42i32], Int32Array);
@@ -2504,7 +2508,7 @@ mod tests {
                     - name: value
                       xml_path: /data/row/value
                       data_type: Int32
-            "#
+            "#,
         );
         let batch = record_batches.get("ns_test").unwrap();
         assert_array_values!(batch, "value", vec![42i32], Int32Array);
@@ -2537,7 +2541,7 @@ mod tests {
                       xml_path: /data/row/other
                       data_type: Utf8
                       nullable: false
-            "#
+            "#,
         );
         let batch = record_batches.get("test").unwrap();
         assert_eq!(batch.num_rows(), 1);
@@ -2580,7 +2584,6 @@ mod tests {
 
         Ok(())
     }
-
 
     #[test]
     fn test_negative_unsigned_returns_error() {
@@ -2672,7 +2675,7 @@ mod tests {
                       xml_path: /data/row/value
                       data_type: Float64
                       scale: 0.5
-            "#
+            "#,
         );
         let batch = record_batches.get("scaled").unwrap();
         assert_array_approx_values!(batch, "value", vec![50.0], Float64Array, 0.001);
@@ -2694,7 +2697,7 @@ mod tests {
                       xml_path: /data/row/value
                       data_type: Float32
                       scale: 0.5
-            "#
+            "#,
         );
         let batch = record_batches.get("scaled").unwrap();
         assert_array_approx_values!(batch, "value", vec![50.0f32], Float32Array, 0.001);
@@ -2716,7 +2719,7 @@ mod tests {
                       xml_path: /data/row/value
                       data_type: Float64
                       offset: 50.0
-            "#
+            "#,
         );
         let batch = record_batches.get("offset").unwrap();
         assert_array_approx_values!(batch, "value", vec![150.0], Float64Array, 0.001);
@@ -2738,7 +2741,7 @@ mod tests {
                       xml_path: /data/row/value
                       data_type: Float32
                       offset: 50.0
-            "#
+            "#,
         );
         let batch = record_batches.get("offset").unwrap();
         assert_array_approx_values!(batch, "value", vec![150.0f32], Float32Array, 0.001);
@@ -2760,7 +2763,7 @@ mod tests {
                       xml_path: /data/row/value
                       data_type: Float64
                       scale: 2.0
-            "#
+            "#,
         );
         let batch = record_batches.get("scaled").unwrap();
         assert_array_approx_values!(batch, "value", vec![-200.0], Float64Array, 0.001);
@@ -2782,7 +2785,7 @@ mod tests {
                       xml_path: /data/row/value
                       data_type: Float64
                       offset: -50.0
-            "#
+            "#,
         );
         let batch = record_batches.get("offset").unwrap();
         assert_array_approx_values!(batch, "value", vec![-150.0], Float64Array, 0.001);
@@ -2805,7 +2808,7 @@ mod tests {
                       data_type: Float64
                       scale: 100.0
                       offset: 50.0
-            "#
+            "#,
         );
         let batch = record_batches.get("scaled").unwrap();
         assert_array_approx_values!(batch, "value", vec![50.0], Float64Array, 0.001);
@@ -2827,7 +2830,7 @@ mod tests {
                       xml_path: /data/row/value
                       data_type: Float64
                       scale: 0.000001
-            "#
+            "#,
         );
         let batch = record_batches.get("scaled").unwrap();
         assert_array_approx_values!(batch, "value", vec![1.0], Float64Array, 0.0001);
@@ -2849,7 +2852,7 @@ mod tests {
                       xml_path: /data/row/value
                       data_type: Float64
                       scale: 1000000.0
-            "#
+            "#,
         );
         let batch = record_batches.get("scaled").unwrap();
         assert_array_approx_values!(batch, "value", vec![1000.0], Float64Array, 0.1);
@@ -2880,7 +2883,7 @@ mod tests {
                     - name: float64
                       xml_path: /data/row/float64
                       data_type: Float64
-            "#
+            "#,
         );
         let batch = record_batches.get("scientific").unwrap();
         assert_array_approx_values!(batch, "float32", vec![1.5e10f32], Float32Array, 1e6);
@@ -2908,7 +2911,7 @@ mod tests {
                     - name: value
                       xml_path: /data/row/value
                       data_type: Float64
-            "#
+            "#,
         );
         let batch = record_batches.get("small").unwrap();
         assert_array_approx_values!(batch, "value", vec![1e-20f64], Float64Array, 1e-25);
@@ -2935,7 +2938,7 @@ mod tests {
                     - name: value
                       xml_path: /data/row/value
                       data_type: Float64
-            "#
+            "#,
         );
         let batch = record_batches.get("large").unwrap();
         assert_array_approx_values!(batch, "value", vec![1e20f64], Float64Array, 1e15);
@@ -2965,7 +2968,7 @@ mod tests {
                     - name: content
                       xml_path: /data/item
                       data_type: Utf8
-            "#
+            "#,
         );
         let batch = record_batches.get("unicode").unwrap();
         assert_eq!(batch.num_rows(), 3);
@@ -2997,7 +3000,7 @@ mod tests {
                     - name: value
                       xml_path: /data/row/value
                       data_type: Utf8
-            "#
+            "#,
         );
         let batch = record_batches.get("emoji").unwrap();
         assert_array_values!(
@@ -3030,7 +3033,7 @@ mod tests {
                     - name: name
                       xml_path: /data/item/@name
                       data_type: Utf8
-            "#
+            "#,
         );
         let batch = record_batches.get("attrs").unwrap();
         assert_array_values!(batch, "id", vec![""], StringArray);
@@ -3056,7 +3059,7 @@ mod tests {
                     - name: name
                       xml_path: /data/item/@name
                       data_type: Utf8
-            "#
+            "#,
         );
         let batch = record_batches.get("attrs").unwrap();
         assert_array_values!(batch, "name", vec!["  spaced  "], StringArray);
@@ -3083,7 +3086,7 @@ mod tests {
                     - { name: c, xml_path: /data/item/@c, data_type: Int32 }
                     - { name: d, xml_path: /data/item/@d, data_type: Int32 }
                     - { name: e, xml_path: /data/item/@e, data_type: Int32 }
-            "#
+            "#,
         );
         let batch = record_batches.get("attrs").unwrap();
         assert_array_values!(batch, "a", vec![1i32], Int32Array);
@@ -3118,7 +3121,7 @@ mod tests {
                     - name: value
                       xml_path: /data/row/value
                       data_type: Int32
-            "#
+            "#,
         );
         let batch = record_batches.get("test").unwrap();
         assert_array_values!(batch, "value", vec![42i32], Int32Array);
@@ -3143,7 +3146,7 @@ mod tests {
                     - name: value
                       xml_path: /data/row/value
                       data_type: Int32
-            "#
+            "#,
         );
         let batch = record_batches.get("test").unwrap();
         assert_array_values!(batch, "value", vec![42i32], Int32Array);
@@ -3176,7 +3179,7 @@ mod tests {
                     - name: value
                       xml_path: /data/group/item/value
                       data_type: Int32
-            "#
+            "#,
         );
         // "groups" table should not be in output (no fields)
         assert!(!record_batches.contains_key("groups"));
@@ -3213,7 +3216,7 @@ mod tests {
                     - name: version
                       xml_path: /root/version
                       data_type: Utf8
-            "#
+            "#,
         );
         let batch = record_batches.get("document").unwrap();
         assert_eq!(batch.num_rows(), 1);
@@ -3242,7 +3245,7 @@ mod tests {
                     - name: data
                       xml_path: /root/data
                       data_type: Utf8
-            "#
+            "#,
         );
         let batch = record_batches.get("document").unwrap();
         assert_eq!(batch.num_rows(), 1);
@@ -3279,7 +3282,7 @@ mod tests {
                     - name: path
                       xml_path: /items/item/@path
                       data_type: Utf8
-            "#
+            "#,
         );
         let batch = record_batches.get("items").unwrap();
 
@@ -3307,7 +3310,7 @@ mod tests {
                     - name: euro
                       xml_path: /items/item/@euro
                       data_type: Utf8
-            "#
+            "#,
         );
         let batch = record_batches.get("items").unwrap();
 
@@ -3360,7 +3363,7 @@ mod tests {
                     - name: price
                       xml_path: /document/items/item/price
                       data_type: Float64
-            "#
+            "#,
         );
 
         // Check document table
@@ -3374,5 +3377,1261 @@ mod tests {
         assert_eq!(items_batch.num_rows(), 2);
         assert_array_values!(items_batch, "name", vec!["Item 1", "Item 2"], StringArray);
         assert_array_values!(items_batch, "price", vec![10.5, 20.5], Float64Array);
+    }
+
+    // =========================================================================
+    // Float overflow with scale/offset
+    // =========================================================================
+
+    #[test]
+    fn test_f32_overflow_with_scale_produces_infinity() {
+        let xml_content = r#"<data><row><value>3.4e38</value></row></data>"#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: Float32
+                      scale: 10.0
+            "#,
+        );
+        let batch = record_batches.get("test").unwrap();
+        let array = batch
+            .column_by_name("value")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .unwrap();
+        assert!(
+            array.value(0).is_infinite(),
+            "Expected infinity for f32 overflow, got {}",
+            array.value(0)
+        );
+    }
+
+    #[test]
+    fn test_f64_large_value_with_scale_no_overflow() {
+        let xml_content = r#"<data><row><value>1.7e308</value></row></data>"#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: Float64
+                      scale: 0.5
+            "#,
+        );
+        let batch = record_batches.get("test").unwrap();
+        let array = batch
+            .column_by_name("value")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert!(
+            array.value(0).is_finite(),
+            "Expected finite value, got {}",
+            array.value(0)
+        );
+    }
+
+    #[test]
+    fn test_f64_overflow_with_scale_produces_infinity() {
+        let xml_content = r#"<data><row><value>1.7e308</value></row></data>"#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: Float64
+                      scale: 10.0
+            "#,
+        );
+        let batch = record_batches.get("test").unwrap();
+        let array = batch
+            .column_by_name("value")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert!(
+            array.value(0).is_infinite(),
+            "Expected infinity for f64 overflow, got {}",
+            array.value(0)
+        );
+    }
+
+    #[test]
+    fn test_f32_nan_with_transform_returns_error() {
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: Float32
+                      scale: 2.0
+            "#
+        );
+
+        let result = parse_xml(
+            "<data><row><value>not_a_float</value></row></data>".as_bytes(),
+            &config,
+        );
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            Error::ParseError(msg) => assert!(msg.contains("not_a_float")),
+            e => panic!("Expected ParseError, got {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_f64_nan_with_transform_returns_error() {
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: Float64
+                      offset: 1.0
+            "#
+        );
+
+        let result = parse_xml(
+            "<data><row><value>abc</value></row></data>".as_bytes(),
+            &config,
+        );
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            Error::ParseError(msg) => assert!(msg.contains("abc")),
+            e => panic!("Expected ParseError, got {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_nullable_f32_with_transform_missing_value() {
+        let xml_content = r#"<data><row></row></data>"#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: Float32
+                      scale: 2.0
+                      nullable: true
+            "#,
+        );
+        let batch = record_batches.get("test").unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        let array = batch
+            .column_by_name("value")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .unwrap();
+        assert!(array.is_null(0));
+    }
+
+    #[test]
+    fn test_non_nullable_f64_with_transform_missing_value_errors() {
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: Float64
+                      offset: 5.0
+                      nullable: false
+            "#
+        );
+
+        let result = parse_xml("<data><row></row></data>".as_bytes(), &config);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            Error::ParseError(msg) => assert!(msg.contains("Missing value")),
+            e => panic!("Expected ParseError, got {:?}", e),
+        }
+    }
+
+    // =========================================================================
+    // Sibling tables at the same nesting level
+    // =========================================================================
+
+    #[test]
+    fn test_sibling_tables_at_same_level() {
+        let xml_content = r#"
+        <data>
+            <orders>
+                <order><id>1</id><total>100</total></order>
+                <order><id>2</id><total>200</total></order>
+            </orders>
+            <customers>
+                <customer><name>Alice</name></customer>
+                <customer><name>Bob</name></customer>
+                <customer><name>Charlie</name></customer>
+            </customers>
+        </data>
+        "#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: orders
+                  xml_path: /data/orders
+                  levels: [order]
+                  fields:
+                    - name: id
+                      xml_path: /data/orders/order/id
+                      data_type: Int32
+                    - name: total
+                      xml_path: /data/orders/order/total
+                      data_type: Int32
+                - name: customers
+                  xml_path: /data/customers
+                  levels: [customer]
+                  fields:
+                    - name: name
+                      xml_path: /data/customers/customer/name
+                      data_type: Utf8
+            "#,
+        );
+
+        assert_eq!(record_batches.len(), 2);
+
+        let orders = record_batches.get("orders").unwrap();
+        assert_eq!(orders.num_rows(), 2);
+        assert_array_values!(orders, "id", vec![1i32, 2], Int32Array);
+        assert_array_values!(orders, "total", vec![100i32, 200], Int32Array);
+
+        let customers = record_batches.get("customers").unwrap();
+        assert_eq!(customers.num_rows(), 3);
+        assert_array_values!(
+            customers,
+            "name",
+            vec!["Alice", "Bob", "Charlie"],
+            StringArray
+        );
+    }
+
+    #[test]
+    fn test_sibling_tables_with_shared_parent_indices() {
+        let xml_content = r#"
+        <data>
+            <group>
+                <items>
+                    <item><value>1</value></item>
+                    <item><value>2</value></item>
+                </items>
+                <tags>
+                    <tag><label>A</label></tag>
+                </tags>
+            </group>
+            <group>
+                <items>
+                    <item><value>3</value></item>
+                </items>
+                <tags>
+                    <tag><label>B</label></tag>
+                    <tag><label>C</label></tag>
+                </tags>
+            </group>
+        </data>
+        "#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: groups
+                  xml_path: /data
+                  levels: [group]
+                  fields: []
+                - name: items
+                  xml_path: /data/group/items
+                  levels: [group, item]
+                  fields:
+                    - name: value
+                      xml_path: /data/group/items/item/value
+                      data_type: Int32
+                - name: tags
+                  xml_path: /data/group/tags
+                  levels: [group, tag]
+                  fields:
+                    - name: label
+                      xml_path: /data/group/tags/tag/label
+                      data_type: Utf8
+            "#,
+        );
+
+        let items = record_batches.get("items").unwrap();
+        assert_eq!(items.num_rows(), 3);
+        assert_array_values!(items, "<group>", vec![0u32, 0, 1], UInt32Array);
+        assert_array_values!(items, "value", vec![1i32, 2, 3], Int32Array);
+
+        let tags = record_batches.get("tags").unwrap();
+        assert_eq!(tags.num_rows(), 3);
+        assert_array_values!(tags, "<group>", vec![0u32, 1, 1], UInt32Array);
+        assert_array_values!(tags, "label", vec!["A", "B", "C"], StringArray);
+    }
+
+    // =========================================================================
+    // Empty element vs missing element for non-string types
+    // =========================================================================
+
+    #[test]
+    fn test_empty_element_int32_nullable_produces_null() {
+        let xml_content = r#"
+        <data>
+            <row><value></value></row>
+            <row><value>42</value></row>
+        </data>
+        "#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: Int32
+                      nullable: true
+            "#,
+        );
+        let batch = record_batches.get("test").unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        assert_array_values_option!(batch, "value", vec![None, Some(42i32)], Int32Array);
+    }
+
+    #[test]
+    fn test_empty_element_int32_non_nullable_returns_error() {
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: Int32
+                      nullable: false
+            "#
+        );
+
+        // Empty element <value></value> with has_value=false for non-nullable Int32
+        let result = parse_xml(
+            "<data><row><value></value></row></data>".as_bytes(),
+            &config,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_empty_element_float64_nullable_produces_null() {
+        let xml_content = r#"
+        <data>
+            <row><value></value></row>
+            <row><value>3.14</value></row>
+        </data>
+        "#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: Float64
+                      nullable: true
+            "#,
+        );
+        let batch = record_batches.get("test").unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        assert_array_approx_values_option!(
+            batch,
+            "value",
+            vec![None, Some(3.14f64)],
+            Float64Array,
+            0.001
+        );
+    }
+
+    #[test]
+    fn test_empty_element_boolean_nullable_produces_null() {
+        let xml_content = r#"
+        <data>
+            <row><flag></flag></row>
+            <row><flag>true</flag></row>
+        </data>
+        "#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: flag
+                      xml_path: /data/row/flag
+                      data_type: Boolean
+                      nullable: true
+            "#,
+        );
+        let batch = record_batches.get("test").unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        assert_array_values_option!(batch, "flag", vec![None, Some(true)], BooleanArray);
+    }
+
+    #[test]
+    fn test_missing_element_vs_empty_element_for_int32() {
+        // Both missing tag and empty tag should behave the same for nullable numeric fields
+        let xml_content = r#"
+        <data>
+            <row><value>10</value></row>
+            <row></row>
+            <row><value></value></row>
+        </data>
+        "#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: Int32
+                      nullable: true
+            "#,
+        );
+        let batch = record_batches.get("test").unwrap();
+        assert_eq!(batch.num_rows(), 3);
+        assert_array_values_option!(batch, "value", vec![Some(10i32), None, None], Int32Array);
+    }
+
+    // =========================================================================
+    // Non-nullable boolean with whitespace-only value
+    // =========================================================================
+
+    #[test]
+    fn test_non_nullable_boolean_whitespace_only_returns_error() {
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: flag
+                      xml_path: /data/row/flag
+                      data_type: Boolean
+                      nullable: false
+            "#
+        );
+
+        let result = parse_xml(
+            "<data><row><flag>   </flag></row></data>".as_bytes(),
+            &config,
+        );
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            Error::ParseError(msg) => assert!(msg.contains("Missing value")),
+            e => panic!("Expected ParseError, got {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_nullable_boolean_whitespace_only_produces_null() {
+        let xml_content = r#"<data><row><flag>   </flag></row></data>"#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: flag
+                      xml_path: /data/row/flag
+                      data_type: Boolean
+                      nullable: true
+            "#,
+        );
+        let batch = record_batches.get("test").unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert_array_values_option!(batch, "flag", vec![None::<bool>], BooleanArray);
+    }
+
+    // =========================================================================
+    // Stop paths mid-nested-data
+    // =========================================================================
+
+    #[test]
+    fn test_stop_at_path_mid_nested_table() {
+        let xml_content = r#"
+        <root>
+            <items>
+                <item><value>1</value></item>
+                <item><value>2</value></item>
+            </items>
+            <more_items>
+                <item><value>3</value></item>
+                <item><value>4</value></item>
+            </more_items>
+        </root>
+        "#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            parser_options:
+                stop_at_paths:
+                    - /root/items
+            tables:
+                - name: items
+                  xml_path: /root/items
+                  levels: [item]
+                  fields:
+                    - name: value
+                      xml_path: /root/items/item/value
+                      data_type: Int32
+                - name: more
+                  xml_path: /root/more_items
+                  levels: [item]
+                  fields:
+                    - name: value
+                      xml_path: /root/more_items/item/value
+                      data_type: Int32
+            "#,
+        );
+
+        // First table should have data (stop happens after its closing tag)
+        let items = record_batches.get("items").unwrap();
+        assert_eq!(items.num_rows(), 2);
+        assert_array_values!(items, "value", vec![1i32, 2], Int32Array);
+
+        // Second table should be empty (parsing stopped before it)
+        let more = record_batches.get("more").unwrap();
+        assert_eq!(more.num_rows(), 0);
+    }
+
+    #[test]
+    fn test_multiple_stop_at_paths() {
+        let xml_content = r#"
+        <root>
+            <meta><title>Report</title></meta>
+            <summary><count>5</count></summary>
+            <data>
+                <item><value>1</value></item>
+            </data>
+        </root>
+        "#;
+
+        // Stop after /root/summary, so /root/data is never reached
+        let record_batches = parse(
+            xml_content,
+            r#"
+            parser_options:
+                stop_at_paths:
+                    - /root/meta
+                    - /root/summary
+            tables:
+                - name: meta
+                  xml_path: /root
+                  levels: [meta]
+                  fields:
+                    - name: title
+                      xml_path: /root/meta/title
+                      data_type: Utf8
+                - name: data
+                  xml_path: /root/data
+                  levels: [item]
+                  fields:
+                    - name: value
+                      xml_path: /root/data/item/value
+                      data_type: Int32
+            "#,
+        );
+
+        // Meta should be parsed (stop occurs at first matching stop_at_path)
+        let meta = record_batches.get("meta").unwrap();
+        assert_eq!(meta.num_rows(), 1);
+        assert_array_values!(meta, "title", vec!["Report"], StringArray);
+
+        // Data should be empty (parsing stopped before it)
+        let data = record_batches.get("data").unwrap();
+        assert_eq!(data.num_rows(), 0);
+    }
+
+    // =========================================================================
+    // Root table without fields (hierarchy-only)
+    // =========================================================================
+
+    #[test]
+    fn test_root_table_without_fields_does_not_affect_child_indexing() {
+        let xml_content = r#"
+        <data>
+            <item><value>1</value></item>
+            <item><value>2</value></item>
+        </data>
+        "#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: root
+                  xml_path: /
+                  levels: []
+                  fields: []
+                - name: items
+                  xml_path: /data
+                  levels: [item]
+                  fields:
+                    - name: value
+                      xml_path: /data/item/value
+                      data_type: Int32
+            "#,
+        );
+
+        // Root table has no fields, should not appear in output
+        assert!(!record_batches.contains_key("root"));
+
+        // Items should work normally without root table interfering with indices
+        let items = record_batches.get("items").unwrap();
+        assert_eq!(items.num_rows(), 2);
+        assert_array_values!(items, "<item>", vec![0u32, 1], UInt32Array);
+        assert_array_values!(items, "value", vec![1i32, 2], Int32Array);
+    }
+
+    #[test]
+    fn test_root_table_with_fields_does_not_break_child_indices() {
+        // Root table with xml_path: / and fields should not affect child table indexing
+        let xml_content = r#"
+        <doc>
+            <title>Report</title>
+            <items>
+                <item><value>1</value></item>
+                <item><value>2</value></item>
+            </items>
+        </doc>
+        "#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: doc
+                  xml_path: /
+                  levels: []
+                  fields:
+                    - name: title
+                      xml_path: /doc/title
+                      data_type: Utf8
+                - name: items
+                  xml_path: /doc/items
+                  levels: [item]
+                  fields:
+                    - name: value
+                      xml_path: /doc/items/item/value
+                      data_type: Int32
+            "#,
+        );
+
+        let doc = record_batches.get("doc").unwrap();
+        assert_eq!(doc.num_rows(), 1);
+        assert_array_values!(doc, "title", vec!["Report"], StringArray);
+
+        // Child table indices should start from 0, unaffected by root table
+        let items = record_batches.get("items").unwrap();
+        assert_eq!(items.num_rows(), 2);
+        assert_array_values!(items, "<item>", vec![0u32, 1], UInt32Array);
+        assert_array_values!(items, "value", vec![1i32, 2], Int32Array);
+    }
+
+    // =========================================================================
+    // 4+ level nesting
+    // =========================================================================
+
+    #[test]
+    fn test_four_level_nesting_with_indices() {
+        let xml_content = r#"
+        <root>
+            <a>
+                <b>
+                    <c>
+                        <d><value>1</value></d>
+                        <d><value>2</value></d>
+                    </c>
+                    <c>
+                        <d><value>3</value></d>
+                    </c>
+                </b>
+                <b>
+                    <c>
+                        <d><value>4</value></d>
+                    </c>
+                </b>
+            </a>
+        </root>
+        "#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: as
+                  xml_path: /root
+                  levels: [a]
+                  fields: []
+                - name: bs
+                  xml_path: /root/a
+                  levels: [a, b]
+                  fields: []
+                - name: cs
+                  xml_path: /root/a/b
+                  levels: [a, b, c]
+                  fields: []
+                - name: ds
+                  xml_path: /root/a/b/c
+                  levels: [a, b, c, d]
+                  fields:
+                    - name: value
+                      xml_path: /root/a/b/c/d/value
+                      data_type: Int32
+            "#,
+        );
+
+        let ds = record_batches.get("ds").unwrap();
+        assert_eq!(ds.num_rows(), 4);
+        assert_array_values!(ds, "<a>", vec![0u32, 0, 0, 0], UInt32Array);
+        assert_array_values!(ds, "<b>", vec![0u32, 0, 0, 1], UInt32Array);
+        assert_array_values!(ds, "<c>", vec![0u32, 0, 1, 0], UInt32Array);
+        assert_array_values!(ds, "<d>", vec![0u32, 1, 0, 0], UInt32Array);
+        assert_array_values!(ds, "value", vec![1i32, 2, 3, 4], Int32Array);
+    }
+
+    // =========================================================================
+    // Non-nullable missing values across all numeric types
+    // =========================================================================
+
+    #[rstest]
+    #[case("Int8")]
+    #[case("UInt8")]
+    #[case("Int16")]
+    #[case("UInt16")]
+    #[case("Int32")]
+    #[case("UInt32")]
+    #[case("Int64")]
+    #[case("UInt64")]
+    #[case("Float32")]
+    #[case("Float64")]
+    #[case("Boolean")]
+    fn test_non_nullable_missing_value_returns_error_all_types(#[case] dtype: &str) {
+        let yaml_config = format!(
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: {dtype}
+                      nullable: false
+            "#
+        );
+        let config: Config = serde_yaml::from_str(&yaml_config).unwrap();
+        let result = parse_xml(
+            "<data><row><other>x</other></row></data>".as_bytes(),
+            &config,
+        );
+        assert!(
+            result.is_err(),
+            "Expected error for missing non-nullable {dtype}"
+        );
+    }
+
+    // =========================================================================
+    // Malformed XML returns error
+    // =========================================================================
+
+    #[test]
+    fn test_mismatched_xml_tags_returns_error() {
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: Int32
+            "#
+        );
+
+        // Mismatched closing tag should produce an error
+        let result = parse_xml(
+            "<data><row><value>42</wrong></row></data>".as_bytes(),
+            &config,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_binary_input_returns_error() {
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: Int32
+            "#
+        );
+
+        let garbage: &[u8] = &[0xFF, 0xFE, 0x00, 0x01, 0x80, 0x90, 0xAB];
+        let result = parse_xml(garbage, &config);
+        // Binary input should either error or produce an empty batch
+        // (quick_xml may treat it as text with no matching elements)
+        if let Ok(batches) = &result {
+            let batch = batches.get("test").unwrap();
+            assert_eq!(batch.num_rows(), 0);
+        }
+    }
+
+    // =========================================================================
+    // Attribute entity unescaping
+    // =========================================================================
+
+    #[test]
+    fn test_attribute_with_xml_entities() {
+        let xml_content = r#"<data><item name="A &amp; B" desc="&lt;tag&gt;">text</item></data>"#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: items
+                  xml_path: /data
+                  levels: [item]
+                  fields:
+                    - name: name
+                      xml_path: /data/item/@name
+                      data_type: Utf8
+                    - name: desc
+                      xml_path: /data/item/@desc
+                      data_type: Utf8
+            "#,
+        );
+        let batch = record_batches.get("items").unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert_array_values!(batch, "name", vec!["A & B"], StringArray);
+        assert_array_values!(batch, "desc", vec!["<tag>"], StringArray);
+    }
+
+    // =========================================================================
+    // Self-closing elements in table context
+    // =========================================================================
+
+    #[test]
+    fn test_self_closing_row_element_produces_nulls() {
+        let xml_content = r#"
+        <data>
+            <row><value>1</value></row>
+            <row/>
+            <row><value>3</value></row>
+        </data>
+        "#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: Int32
+                      nullable: true
+            "#,
+        );
+        let batch = record_batches.get("test").unwrap();
+        assert_eq!(batch.num_rows(), 3);
+        assert_array_values_option!(batch, "value", vec![Some(1i32), None, Some(3)], Int32Array);
+    }
+
+    // =========================================================================
+    // Attributes with numeric types and missing attributes
+    // =========================================================================
+
+    #[test]
+    fn test_nullable_missing_attribute_produces_null() {
+        let xml_content = r#"
+        <data>
+            <item id="1" name="first">text1</item>
+            <item id="2">text2</item>
+        </data>
+        "#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: items
+                  xml_path: /data
+                  levels: [item]
+                  fields:
+                    - name: id
+                      xml_path: /data/item/@id
+                      data_type: Int32
+                    - name: name
+                      xml_path: /data/item/@name
+                      data_type: Utf8
+                      nullable: true
+            "#,
+        );
+        let batch = record_batches.get("items").unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        assert_array_values!(batch, "id", vec![1i32, 2], Int32Array);
+        assert_array_values_option!(batch, "name", vec![Some("first"), None], StringArray);
+    }
+
+    // =========================================================================
+    // Mixed content with ignored child nodes
+    // =========================================================================
+
+    #[test]
+    fn test_mixed_content_with_ignored_child_elements() {
+        // Text around child elements that aren't configured as fields should
+        // be concatenated: "Start " + " End" = "Start  End"
+        let xml_content = r#"
+        <data>
+            <row>
+                <value>Start <ignored/> End</value>
+            </row>
+        </data>
+        "#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: Utf8
+            "#,
+        );
+        let batch = record_batches.get("test").unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert_array_values!(batch, "value", vec!["Start  End"], StringArray);
+    }
+
+    #[test]
+    fn test_mixed_content_with_nested_child_elements() {
+        // More complex: text around a child element with its own text content
+        let xml_content = r#"
+        <data>
+            <row>
+                <value>Before <child>inner</child> After</value>
+            </row>
+        </data>
+        "#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: Utf8
+            "#,
+        );
+        let batch = record_batches.get("test").unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        // Only text directly under <value> should be accumulated, not the child's text
+        assert_array_values!(batch, "value", vec!["Before  After"], StringArray);
+    }
+
+    // =========================================================================
+    // Schema nullability verification
+    // =========================================================================
+
+    #[test]
+    fn test_schema_nullability_matches_config() {
+        let xml_content = r#"
+        <data>
+            <row>
+                <required>1</required>
+                <optional>2</optional>
+            </row>
+        </data>
+        "#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: required
+                      xml_path: /data/row/required
+                      data_type: Int32
+                      nullable: false
+                    - name: optional
+                      xml_path: /data/row/optional
+                      data_type: Int32
+                      nullable: true
+            "#,
+        );
+        let batch = record_batches.get("test").unwrap();
+        let schema = batch.schema();
+
+        let required_field = schema.field_with_name("required").unwrap();
+        assert!(
+            !required_field.is_nullable(),
+            "Field 'required' should not be nullable in schema"
+        );
+
+        let optional_field = schema.field_with_name("optional").unwrap();
+        assert!(
+            optional_field.is_nullable(),
+            "Field 'optional' should be nullable in schema"
+        );
+    }
+
+    #[test]
+    fn test_schema_nullability_defaults_to_non_nullable() {
+        // Fields without explicit nullable should default to non-nullable
+        let xml_content = r#"<data><row><value>1</value></row></data>"#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: Int32
+            "#,
+        );
+        let batch = record_batches.get("test").unwrap();
+        let schema = batch.schema();
+        let field = schema.field_with_name("value").unwrap();
+        assert!(!field.is_nullable(), "Default nullability should be false");
+    }
+
+    // =========================================================================
+    // Duplicate attributes
+    // =========================================================================
+
+    #[test]
+    fn test_duplicate_attributes_returns_error() {
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [item]
+                  fields:
+                    - name: id
+                      xml_path: /data/item/@id
+                      data_type: Int32
+            "#
+        );
+
+        // Duplicate attribute "id" is invalid XML
+        let result = parse_xml(
+            r#"<data><item id="1" id="2">text</item></data>"#.as_bytes(),
+            &config,
+        );
+        assert!(
+            result.is_err(),
+            "Duplicate attributes should produce an error"
+        );
+    }
+
+    // =========================================================================
+    // Transform on empty-string nullable float
+    // =========================================================================
+
+    #[test]
+    fn test_nullable_f32_empty_element_with_transform_produces_null() {
+        // An empty element <value></value> for a nullable Float32 with offset
+        // should produce null, NOT 0.0 + offset
+        let xml_content = r#"
+        <data>
+            <row><value></value></row>
+            <row><value>10.0</value></row>
+        </data>
+        "#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: Float32
+                      scale: 2.0
+                      offset: 100.0
+                      nullable: true
+            "#,
+        );
+        let batch = record_batches.get("test").unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        let array = batch
+            .column_by_name("value")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .unwrap();
+        assert!(
+            array.is_null(0),
+            "Empty element should be null, not 0.0 + offset"
+        );
+        // 10.0 * 2.0 + 100.0 = 120.0
+        assert!(abs_diff_eq!(array.value(1), 120.0f32, epsilon = 0.001));
+    }
+
+    #[test]
+    fn test_nullable_f64_empty_element_with_transform_produces_null() {
+        let xml_content = r#"
+        <data>
+            <row><value></value></row>
+            <row><value>5.0</value></row>
+        </data>
+        "#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: Float64
+                      offset: 50.0
+                      nullable: true
+            "#,
+        );
+        let batch = record_batches.get("test").unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        let array = batch
+            .column_by_name("value")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert!(
+            array.is_null(0),
+            "Empty element should be null, not 0.0 + offset"
+        );
+        assert!(abs_diff_eq!(array.value(1), 55.0f64, epsilon = 0.001));
+    }
+
+    // =========================================================================
+    // Namespace prefixes in attributes
+    // =========================================================================
+
+    #[test]
+    fn test_prefixed_namespace_attribute_stripped() {
+        // Attributes with namespace prefixes should have the prefix stripped
+        // via local_name(), so ns:id matches @id in the config
+        let xml_content =
+            r#"<data xmlns:ns="http://example.com"><item ns:id="42">text</item></data>"#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [item]
+                  fields:
+                    - name: id
+                      xml_path: /data/item/@id
+                      data_type: Int32
+            "#,
+        );
+        let batch = record_batches.get("test").unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert_array_values!(batch, "id", vec![42i32], Int32Array);
     }
 }
