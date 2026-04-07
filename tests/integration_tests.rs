@@ -24,7 +24,7 @@ use common::{parse_xml_file, write_xml_tempfile};
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_file_parse_large_1k_rows() {
+fn test_large_file_1k_rows_parsed_correctly() {
     let mut xml = String::from(r#"<?xml version="1.0"?><data>"#);
     for i in 0..1000 {
         xml.push_str(&format!(
@@ -80,7 +80,7 @@ fn test_file_parse_large_1k_rows() {
 }
 
 #[test]
-fn test_file_parse_large_10k_rows() {
+fn test_large_file_10k_rows_parsed_correctly() {
     let mut xml = String::from(r#"<?xml version="1.0"?><data>"#);
     for i in 0..10000 {
         xml.push_str(&format!(
@@ -117,7 +117,7 @@ fn test_file_parse_large_10k_rows() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_file_config_yaml_with_transform() {
+fn test_yaml_config_with_transform_applied() {
     let mut yaml_file = NamedTempFile::with_suffix(".yaml").unwrap();
     write!(
         yaml_file,
@@ -156,7 +156,7 @@ tables:
 }
 
 #[test]
-fn test_file_config_yaml_invalid_content() {
+fn test_invalid_yaml_config_returns_error() {
     let mut yaml_file = NamedTempFile::with_suffix(".yaml").unwrap();
     write!(yaml_file, "this is not valid yaml config: [[[").unwrap();
 
@@ -165,13 +165,13 @@ fn test_file_config_yaml_invalid_content() {
 }
 
 #[test]
-fn test_file_config_yaml_not_found() {
+fn test_missing_yaml_config_returns_error() {
     let result = Config::from_yaml_file("/tmp/nonexistent_xml2arrow_test_config.yaml");
     assert!(result.is_err(), "Missing config file should produce an error");
 }
 
 #[test]
-fn test_file_config_reuse_across_files() {
+fn test_config_reused_across_multiple_files() {
     let config: Config = serde_yaml::from_str(
         r#"
         tables:
@@ -211,7 +211,7 @@ fn test_file_config_reuse_across_files() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_file_encoding_utf8_bom() {
+fn test_utf8_bom_file_parsed_correctly() {
     // A BOM (Byte Order Mark) is a special Unicode character (U+FEFF) that some
     // editors prepend to files to signal the encoding. In UTF-8 it is the three-byte
     // sequence 0xEF 0xBB 0xBF. The parser must handle files that start with a BOM
@@ -253,7 +253,7 @@ fn test_file_encoding_utf8_bom() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_file_edge_empty() {
+fn test_empty_file_returns_empty_batch() {
     let xml_file = NamedTempFile::new().unwrap();
     // File is empty -- no content written
 
@@ -282,7 +282,7 @@ fn test_file_edge_empty() {
 }
 
 #[test]
-fn test_file_edge_whitespace_only() {
+fn test_whitespace_only_file_returns_empty_batch() {
     let xml_file = write_xml_tempfile("   \n\t\n   ");
 
     let config: Config = serde_yaml::from_str(
@@ -311,7 +311,7 @@ fn test_file_edge_whitespace_only() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_file_parse_realistic_sensor_data() {
+fn test_realistic_sensor_data_parsed_correctly() {
     let batches = parse_xml_file(
         r#"<?xml version="1.0" encoding="UTF-8"?>
         <sensorData>

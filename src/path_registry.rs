@@ -410,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_from_config() {
+    fn test_registry_built_from_config_correctly() {
         let config = create_test_config();
         let registry = PathRegistry::from_config(&config);
 
@@ -433,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_field_paths() {
+    fn test_registry_returns_correct_field_paths() {
         let config = create_test_config();
         let registry = PathRegistry::from_config(&config);
 
@@ -456,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn test_path_tracker_basic() {
+    fn test_path_tracker_tracks_known_paths() {
         let config = create_test_config();
         let registry = PathRegistry::from_config(&config);
         let mut tracker = PathTracker::new();
@@ -481,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn test_path_tracker_unknown_path() {
+    fn test_path_tracker_ignores_unknown_paths() {
         let config = create_test_config();
         let registry = PathRegistry::from_config(&config);
         let mut tracker = PathTracker::new();
@@ -505,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn test_root_table_path() {
+    fn test_root_table_path_resolved_correctly() {
         let config = config_from_yaml!(
             r#"
             tables:
@@ -527,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn test_attribute_paths() {
+    fn test_attribute_paths_registered_correctly() {
         let config = config_from_yaml!(
             r#"
             tables:

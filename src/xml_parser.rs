@@ -1092,7 +1092,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_complex_multiple_tables_nested() {
+    fn test_multiple_nested_tables_parsed_correctly() {
         let record_batches = parse(
             r#"
             <?xml version="1.0" encoding="UTF-8"?>
@@ -1154,7 +1154,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_stop_at_paths_header_only() {
+    fn test_stop_at_paths_extracts_header_only() {
         let xml_content = r#"
         <report>
             <header>
@@ -1205,7 +1205,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_basic_multiple_tables() {
+    fn test_multiple_tables_parsed_correctly() {
         let xml_content = r#"
         <?xml version="1.0" encoding="UTF-8"?>
         <root>
@@ -1266,7 +1266,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_dtypes_all_numeric_types() {
+    fn test_all_numeric_dtypes_parsed_correctly() {
         let xml_content = r#"
         <data>
             <row>
@@ -1347,7 +1347,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_text_special_characters_escaped() {
+    fn test_xml_entities_unescaped_in_text() {
         let xml_content = r#"<data><row><text>&lt;hello&gt; &amp; "world"</text></row></data>"#;
 
         let record_batches = parse(
@@ -1368,7 +1368,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_edge_empty_input() {
+    fn test_empty_input_returns_empty_batch() {
         let xml_content = r#"<data></data>"#;
 
         let record_batches = parse(
@@ -1389,7 +1389,7 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_scale_offset_float64() {
+    fn test_scale_and_offset_applied_to_float64() {
         let xml_content = r#"
         <data>
             <row><value>100</value></row>
@@ -1418,7 +1418,7 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_scale_offset_float32() {
+    fn test_scale_and_offset_applied_to_float32() {
         let xml_content = r#"
         <data>
             <row><value>100</value></row>
@@ -1446,7 +1446,7 @@ mod tests {
     }
 
     #[test]
-    fn test_attr_parse_multiple_attributes() {
+    fn test_multiple_attributes_parsed_correctly() {
         let xml_content = r#"
         <data>
             <item id="1" name="First" type="A">Content 1</item>
@@ -1490,7 +1490,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_nested_parent_indices_three_levels() {
+    fn test_three_level_nesting_produces_parent_indices() {
         let xml_content = r#"
         <root>
             <group>
@@ -1537,7 +1537,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_structure_deeply_nested() {
+    fn test_deeply_nested_structure_parsed_correctly() {
         let xml_content = r#"
         <level1>
             <level2>
@@ -1573,7 +1573,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_structure_deeply_nested_generic() {
+    fn test_deeply_nested_generic_paths_parsed_correctly() {
         let xml_content = r#"
         <level1>
             <level2>
@@ -1634,7 +1634,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_indices_nested_row_index() {
+    fn test_nested_rows_indexed_correctly() {
         let xml_content = r#"
         <data>
             <group>
@@ -1672,7 +1672,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_edge_empty_tags() {
+    fn test_empty_tags_produce_empty_strings() {
         let xml_content = r#"
         <data>
             <row>
@@ -1711,7 +1711,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dtype_boolean_valid_values() {
+    fn test_boolean_valid_values_parsed() {
         let xml_content = r#"
         <data>
             <row><bool>true</bool></row>
@@ -1758,7 +1758,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dtype_boolean_invalid_values() -> Result<()> {
+    fn test_boolean_invalid_value_returns_error() -> Result<()> {
         let xml_content = r#"
         <data>
             <row><bool>maybe</bool></row>
@@ -1793,7 +1793,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dtype_boolean_missing_value() -> Result<()> {
+    fn test_boolean_missing_value_returns_error() -> Result<()> {
         let xml_content = r#"
         <data>
             <row><bool></bool></row>
@@ -1851,7 +1851,7 @@ mod tests {
     #[case("Int16", "offset: 10.0")]
     #[case("Boolean", "scale: 0.1")]
     #[case("Utf8", "offset: 10.0")]
-    fn test_transform_unsupported_dtype(#[case] dtype: &str, #[case] transform: &str) {
+    fn test_unsupported_dtype_transform_returns_error(#[case] dtype: &str, #[case] transform: &str) {
         let yaml = format!(
             r#"
             tables:
@@ -1873,7 +1873,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unicode_parse_non_utf8_bytes() {
+    fn test_non_utf8_bytes_return_error() {
         let xml_content = r#"<data><row><value>Hello 世界 🌍</value></row></data>"#;
 
         let record_batches = parse(
@@ -1894,7 +1894,7 @@ mod tests {
     }
 
     #[test]
-    fn test_attr_parse_empty_elements() {
+    fn test_attributes_on_empty_elements_parsed() {
         let xml_content = r#"
         <data>
             <item id="1" />
@@ -1932,7 +1932,7 @@ mod tests {
     }
 
     #[test]
-    fn test_error_malformed_xml_various_cases() {
+    fn test_malformed_xml_returns_error() {
         let config = config_from_yaml!(
             r#"
             tables:
@@ -1959,7 +1959,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_options_trim_text() -> Result<()> {
+    fn test_trim_text_option_strips_whitespace() -> Result<()> {
         let xml_content = r#"
         <data>
             <row>
@@ -2020,7 +2020,7 @@ mod tests {
     #[case("4294967296", "UInt32")]
     #[case("9223372036854775808", "Int64")]
     #[case("18446744073709551616", "UInt64")]
-    fn test_dtype_overflow(#[case] value: &str, #[case] dtype: &str) {
+    fn test_numeric_overflow_returns_error(#[case] value: &str, #[case] dtype: &str) {
         let xml_content = format!("<data><row><value>{value}</value></row></data>");
         let yaml_config = format!(
             r#"
@@ -2040,7 +2040,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dtype_boundary_int64_max() -> Result<()> {
+    fn test_int64_max_boundary_parsed_correctly() -> Result<()> {
         let xml_content = r#"<data><row><value>9223372036854775807</value></row></data>"#;
 
         let config = config_from_yaml!(
@@ -2064,7 +2064,7 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_scale_offset_negative_float() {
+    fn test_scale_and_offset_with_negative_values() {
         let xml_content = r#"
         <data>
             <row><value>-100</value></row>
@@ -2093,7 +2093,7 @@ mod tests {
     }
 
     #[test]
-    fn test_nullable_all_null_various_types() {
+    fn test_all_null_values_produce_null_arrays() {
         let xml_content = r#"
         <data>
             <row></row>
@@ -2141,7 +2141,7 @@ mod tests {
     }
 
     #[test]
-    fn test_nullable_mixed_null_and_valid() {
+    fn test_mixed_null_and_valid_values_parsed() {
         let xml_content = r#"
         <data>
             <row><value>10</value></row>
@@ -2176,7 +2176,7 @@ mod tests {
     }
 
     #[test]
-    fn test_nullable_all_types_with_nulls() {
+    fn test_all_nullable_types_with_null_values() {
         let xml_content = r#"
         <data>
             <row>
@@ -2259,7 +2259,7 @@ mod tests {
     }
 
     #[test]
-    fn test_nullable_empty_vs_missing_element() {
+    fn test_empty_vs_missing_nullable_element() {
         let xml_content = r#"
         <data>
             <row><value></value></row>
@@ -2290,7 +2290,7 @@ mod tests {
 
 
     #[test]
-    fn test_cdata_parse_basic() {
+    fn test_cdata_basic_text_extracted() {
         let xml_content = r#"
         <data>
             <row>
@@ -2317,7 +2317,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cdata_parse_special_characters() {
+    fn test_cdata_special_characters_preserved() {
         let xml_content = r#"
         <data>
             <row>
@@ -2349,7 +2349,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cdata_parse_mixed_with_text() {
+    fn test_cdata_mixed_with_regular_text() {
         let xml_content = r#"
         <data>
             <row>
@@ -2376,7 +2376,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cdata_parse_multiple_sections() {
+    fn test_cdata_multiple_sections_concatenated() {
         let xml_content = r#"
         <data>
             <row>
@@ -2403,7 +2403,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cdata_parse_numeric_conversion() {
+    fn test_cdata_numeric_values_converted() {
         let xml_content = r#"
         <data>
             <row>
@@ -2430,7 +2430,7 @@ mod tests {
     }
 
     #[test]
-    fn test_namespace_parse_default() {
+    fn test_default_namespace_stripped() {
         let xml_content = r#"
         <data xmlns="http://example.com/ns">
             <row>
@@ -2457,7 +2457,7 @@ mod tests {
     }
 
     #[test]
-    fn test_namespace_parse_prefixed() {
+    fn test_prefixed_namespace_stripped() {
         let xml_content = r#"
         <ns:data xmlns:ns="http://example.com/ns">
             <ns:row>
@@ -2484,7 +2484,7 @@ mod tests {
     }
 
     #[test]
-    fn test_namespace_parse_multiple() {
+    fn test_multiple_namespaces_stripped() {
         let xml_content = r#"
         <data xmlns="http://example.com/default" xmlns:other="http://example.com/other">
             <row>
@@ -2511,7 +2511,7 @@ mod tests {
     }
 
     #[test]
-    fn test_nullable_missing_string_uses_empty() {
+    fn test_missing_string_defaults_to_empty() {
         // Test that non-nullable strings get empty string, not error
         let xml_content = r#"
         <data>
@@ -2547,7 +2547,7 @@ mod tests {
     }
 
     #[test]
-    fn test_nullable_missing_numeric_errors() -> Result<()> {
+    fn test_missing_numeric_returns_error() -> Result<()> {
         // Test that non-nullable numeric fields error on missing
         let xml_content = r#"
         <data>
@@ -2583,7 +2583,7 @@ mod tests {
 
 
     #[test]
-    fn test_dtype_invalid_negative_unsigned() {
+    fn test_negative_unsigned_returns_error() {
         let xml_content = r#"<data><row><value>-1</value></row></data>"#;
 
         let config = config_from_yaml!(
@@ -2604,7 +2604,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dtype_boundary_all_types() -> Result<()> {
+    fn test_all_type_boundaries_parsed_correctly() -> Result<()> {
         let xml_content = r#"
         <data>
             <row>
@@ -2657,7 +2657,7 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_scale_only_float64() {
+    fn test_scale_only_applied_to_float64() {
         let xml_content = r#"<data><row><value>100</value></row></data>"#;
 
         let record_batches = parse(
@@ -2679,7 +2679,7 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_scale_only_float32() {
+    fn test_scale_only_applied_to_float32() {
         let xml_content = r#"<data><row><value>100</value></row></data>"#;
 
         let record_batches = parse(
@@ -2701,7 +2701,7 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_offset_only_float64() {
+    fn test_offset_only_applied_to_float64() {
         let xml_content = r#"<data><row><value>100</value></row></data>"#;
 
         let record_batches = parse(
@@ -2723,7 +2723,7 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_offset_only_float32() {
+    fn test_offset_only_applied_to_float32() {
         let xml_content = r#"<data><row><value>100</value></row></data>"#;
 
         let record_batches = parse(
@@ -2745,7 +2745,7 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_scale_negative_value() {
+    fn test_negative_scale_applied_correctly() {
         let xml_content = r#"<data><row><value>-100</value></row></data>"#;
 
         let record_batches = parse(
@@ -2767,7 +2767,7 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_offset_negative_value() {
+    fn test_negative_offset_applied_correctly() {
         let xml_content = r#"<data><row><value>-100</value></row></data>"#;
 
         let record_batches = parse(
@@ -2789,7 +2789,7 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_scale_zero_value() {
+    fn test_zero_scale_produces_zeros() {
         let xml_content = r#"<data><row><value>0</value></row></data>"#;
 
         let record_batches = parse(
@@ -2812,7 +2812,7 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_scale_very_small() {
+    fn test_very_small_scale_applied_correctly() {
         let xml_content = r#"<data><row><value>1000000</value></row></data>"#;
 
         let record_batches = parse(
@@ -2834,7 +2834,7 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_scale_very_large() {
+    fn test_very_large_scale_applied_correctly() {
         let xml_content = r#"<data><row><value>0.001</value></row></data>"#;
 
         let record_batches = parse(
@@ -2856,7 +2856,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dtype_float_scientific_notation() {
+    fn test_float_scientific_notation_parsed() {
         let xml_content = r#"
         <data>
             <row>
@@ -2888,7 +2888,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dtype_float_very_small() {
+    fn test_very_small_float_parsed_correctly() {
         let xml_content = r#"
         <data>
             <row>
@@ -2915,7 +2915,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dtype_float_very_large() {
+    fn test_very_large_float_parsed_correctly() {
         let xml_content = r#"
         <data>
             <row>
@@ -2942,7 +2942,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unicode_attr_various_scripts() {
+    fn test_unicode_scripts_in_attributes() {
         let xml_content = r#"
         <data>
             <item name="日本語">Japanese</item>
@@ -2978,7 +2978,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unicode_text_emojis() {
+    fn test_emoji_text_parsed_correctly() {
         let xml_content = r#"
         <data>
             <row><value>Hello 🌍 World 🚀</value></row>
@@ -3009,7 +3009,7 @@ mod tests {
     }
 
     #[test]
-    fn test_attr_parse_empty_value() {
+    fn test_empty_attribute_value_preserved() {
         let xml_content = r#"
         <data>
             <item id="" name="test">content</item>
@@ -3038,7 +3038,7 @@ mod tests {
     }
 
     #[test]
-    fn test_attr_parse_whitespace_preserved() {
+    fn test_attribute_whitespace_preserved() {
         let xml_content = r#"
         <data>
             <item name="  spaced  ">content</item>
@@ -3063,7 +3063,7 @@ mod tests {
     }
 
     #[test]
-    fn test_attr_parse_multiple_on_element() {
+    fn test_multiple_attributes_on_single_element() {
         let xml_content = r#"
         <data>
             <item a="1" b="2" c="3" d="4" e="5">content</item>
@@ -3094,7 +3094,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_xml_features_comments_ignored() {
+    fn test_xml_comments_ignored_during_parse() {
         let xml_content = r#"
         <!-- This is a comment -->
         <data>
@@ -3125,7 +3125,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_xml_features_declaration() {
+    fn test_xml_declaration_handled_correctly() {
         let xml_content = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <data>
             <row><value>42</value></row>
@@ -3150,7 +3150,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_table_indices_only_excluded() {
+    fn test_index_only_table_excluded_from_output() {
         // Tables with no fields (only indices) should not appear in output
         let xml_content = r#"
         <data>
@@ -3190,7 +3190,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_structure_fields_at_root() {
+    fn test_fields_at_root_level_parsed_correctly() {
         // Test fields defined directly at root level (xml_path: /)
         let xml_content = r#"
         <root>
@@ -3222,7 +3222,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_structure_root_with_attributes() {
+    fn test_root_attributes_parsed_correctly() {
         let xml_content = r#"<root version="2.0" encoding="utf-8"><data>content</data></root>"#;
 
         let record_batches = parse(
@@ -3252,7 +3252,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_attribute_xml_entities_unescaped() {
+    fn test_xml_entities_unescaped_in_attributes() {
         let xml_content = r#"
         <items>
             <item id="AT&amp;T" label="2 &lt; 3" note="&quot;quoted&quot;" path="a&apos;b"/>
@@ -3290,7 +3290,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_attribute_numeric_entities_unescaped() {
+    fn test_numeric_entities_unescaped_in_attributes() {
         let xml_content = r#"<items><item symbol="&#65;&#66;&#67;" euro="&#x20AC;"/></items>"#;
 
         let record_batches = parse(
@@ -3316,7 +3316,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_structure_root_with_nested_tables() {
+    fn test_root_with_nested_tables_parsed_correctly() {
         let xml_content = r#"
         <document>
             <meta>
