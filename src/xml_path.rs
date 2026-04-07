@@ -59,7 +59,7 @@ mod tests {
     #[case("/path/with/empty/segments//more/nodes", vec!["path", "with", "empty", "segments", "more", "nodes"])]
     #[case("/library/books/book/@id", vec!["library", "books", "book", "@id"])]
     #[case("", vec![])]
-    fn test_xml_path_new_from_string(#[case] path_str: &str, #[case] expected_parts: Vec<&str>) {
+    fn test_xml_path_created_from_string_correctly(#[case] path_str: &str, #[case] expected_parts: Vec<&str>) {
         let path = XmlPath::new(path_str);
         assert_eq!(
             path.parts
@@ -75,7 +75,7 @@ mod tests {
     #[case("/path/with/segments", "new_node", "/path/with/segments/new_node")]
     #[case("/library", "@id", "/library/@id")]
     #[case("", "new_node", "/new_node")]
-    fn test_xml_path_append_node_various_paths(
+    fn test_xml_path_append_node_produces_correct_path(
         #[case] path_str: &str,
         #[case] new_node: &str,
         #[case] expected_path: &str,
@@ -90,7 +90,7 @@ mod tests {
     #[case("/path/only", "/path", Some(Atom::from("only")))]
     #[case("/library/@id", "/library", Some(Atom::from("@id")))]
     #[case("", "/", None)]
-    fn test_xml_path_remove_node_various_paths(
+    fn test_xml_path_remove_node_produces_correct_path(
         #[case] path_str: &str,
         #[case] expected_path: &str,
         #[case] expected_removed: Option<Atom>,

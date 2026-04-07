@@ -374,34 +374,25 @@ mod tests {
     use rstest::rstest;
 
     #[rstest]
-    fn test_yaml_config_roundtrip(
+    fn test_config_yaml_roundtrip_preserves_values(
         #[values(
             Config {
                 parser_options: Default::default(),
                 tables: vec![
                     TableConfig::new("table1", "/path/to", vec![], vec![
-                        match FieldConfigBuilder::new("string_field", "/path/to/string_field", DType::Utf8)
+                        FieldConfigBuilder::new("string_field", "/path/to/string_field", DType::Utf8)
                             .nullable(true)
                             .build()
-                        {
-                            Ok(f) => f,
-                            Err(e) => panic!("Failed to build field config: {:?}", e),
-                        },
-                        match FieldConfigBuilder::new("int32_field", "/path/to/int32_field", DType::Int32)
+                            .unwrap(),
+                        FieldConfigBuilder::new("int32_field", "/path/to/int32_field", DType::Int32)
                             .build()
-                        {
-                            Ok(f) => f,
-                            Err(e) => panic!("Failed to build field config: {:?}", e),
-                        },
-                        match FieldConfigBuilder::new("float64_field", "/path/to/float64_field", DType::Float64)
+                            .unwrap(),
+                        FieldConfigBuilder::new("float64_field", "/path/to/float64_field", DType::Float64)
                             .nullable(true)
                             .scale(1.0e-9)
                             .offset(1.0e-3)
                             .build()
-                        {
-                            Ok(f) => f,
-                            Err(e) => panic!("Failed to build field config: {:?}", e),
-                        },
+                            .unwrap(),
                         ]
                     ),
                 ],
@@ -426,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn test_yaml_from_file_invalid_content() {
+    fn test_invalid_yaml_file_returns_error() {
         let invalid_yaml = "tables:\n  - name: table1\n    row_element: /path\n    fields:\n      - name: field1\n        xml_path: path\n        type: InvalidType\n        nullable: true";
         let temp_file = tempfile::NamedTempFile::new().unwrap();
         let path = temp_file.path().to_path_buf();
@@ -437,14 +428,14 @@ mod tests {
     }
 
     #[test]
-    fn test_yaml_from_file_not_found() {
+    fn test_missing_yaml_file_returns_error() {
         let result = Config::from_yaml_file(PathBuf::from("not_existing.yaml"));
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::Io(_)));
     }
 
     #[test]
-    fn test_yaml_to_file_invalid_path() {
+    fn test_yaml_write_invalid_path_returns_error() {
         let config = Config {
             tables: vec![],
             parser_options: Default::default(),
@@ -455,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn test_yaml_field_nullable_default() {
+    fn test_field_nullable_defaults_to_false() {
         let yaml_string = r#"
             name: test_field
             xml_path: /path/to/field
@@ -467,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    fn test_yaml_parser_options_trim_text_default() {
+    fn test_parser_options_trim_text_defaults_to_false() {
         let yaml_string = r#"
             tables:
               - name: test_table
@@ -488,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn test_yaml_parser_options_trim_text_explicit() {
+    fn test_parser_options_trim_text_set_explicitly() {
         let yaml_string = r#"
             parser_options:
               trim_text: true
@@ -503,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn test_yaml_parser_options_empty_section() {
+    fn test_empty_parser_options_uses_defaults() {
         let yaml_string = r#"
             parser_options: {}
             tables: []
@@ -517,71 +508,64 @@ mod tests {
     }
 
     #[test]
-    fn test_config_requires_attr_parsing_with_attributes() {
-        let config = Config {
-            tables: vec![TableConfig::new(
-                "test",
-                "/root",
-                vec![],
-                vec![
-                    match FieldConfigBuilder::new("id", "/root/item/@id", DType::Int32).build() {
-                        Ok(f) => f,
-                        Err(e) => panic!("Failed to build field config: {:?}", e),
-                    },
-                ],
-            )],
-            parser_options: Default::default(),
-        };
-
+    fn test_requires_attr_parsing_with_attribute_fields() {
+        let config: Config = serde_yaml::from_str(
+            r#"
+            tables:
+              - name: test
+                xml_path: /root
+                levels: []
+                fields:
+                  - name: id
+                    xml_path: /root/item/@id
+                    data_type: Int32
+            "#,
+        )
+        .unwrap();
         assert!(config.requires_attribute_parsing());
     }
 
     #[test]
-    fn test_config_requires_attr_parsing_without_attributes() {
-        let config = Config {
-            tables: vec![TableConfig::new(
-                "test",
-                "/root",
-                vec![],
-                vec![
-                    match FieldConfigBuilder::new("id", "/root/item/id", DType::Int32).build() {
-                        Ok(f) => f,
-                        Err(e) => panic!("Failed to build field config: {:?}", e),
-                    },
-                ],
-            )],
-            parser_options: Default::default(),
-        };
-
+    fn test_requires_attr_parsing_without_attribute_fields() {
+        let config: Config = serde_yaml::from_str(
+            r#"
+            tables:
+              - name: test
+                xml_path: /root
+                levels: []
+                fields:
+                  - name: id
+                    xml_path: /root/item/id
+                    data_type: Int32
+            "#,
+        )
+        .unwrap();
         assert!(!config.requires_attribute_parsing());
     }
 
     #[test]
-    fn test_config_requires_attr_parsing_mixed() {
-        let config = Config {
-            tables: vec![TableConfig::new(
-                "test",
-                "/root",
-                vec![],
-                vec![
-                    match FieldConfigBuilder::new("id", "/root/item/id", DType::Int32).build() {
-                        Ok(f) => f,
-                        Err(e) => panic!("Failed to build field config: {:?}", e),
-                    },
-                    match FieldConfigBuilder::new("type", "/root/item/@type", DType::Utf8).build() {
-                        Ok(f) => f,
-                        Err(e) => panic!("Failed to build field config: {:?}", e),
-                    },
-                ],
-            )],
-            parser_options: Default::default(),
-        };
-
+    fn test_requires_attr_parsing_with_mixed_fields() {
+        let config: Config = serde_yaml::from_str(
+            r#"
+            tables:
+              - name: test
+                xml_path: /root
+                levels: []
+                fields:
+                  - name: id
+                    xml_path: /root/item/id
+                    data_type: Int32
+                  - name: type
+                    xml_path: /root/item/@type
+                    data_type: Utf8
+            "#,
+        )
+        .unwrap();
         assert!(config.requires_attribute_parsing());
     }
 
     #[test]
-    fn test_dtype_as_arrow_type_all_variants() {
+    fn test_all_dtype_variants_convert_to_arrow() {
         use arrow::datatypes::DataType as ArrowDataType;
 
         assert_eq!(DType::Boolean.as_arrow_type(), ArrowDataType::Boolean);
@@ -599,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_field_config_chaining() {
+    fn test_field_config_builder_chaining_works() {
         let field = FieldConfigBuilder::new("test_field", "/path/to/field", DType::Float64)
             .nullable(true)
             .scale(0.001)
@@ -616,7 +600,7 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_field_config_scale_only() {
+    fn test_field_config_builder_scale_only() {
         let field = FieldConfigBuilder::new("test", "/path", DType::Float32)
             .scale(0.5)
             .build()
@@ -627,7 +611,7 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_field_config_offset_only() {
+    fn test_field_config_builder_offset_only() {
         let field = FieldConfigBuilder::new("test", "/path", DType::Float64)
             .offset(5.0)
             .build()
