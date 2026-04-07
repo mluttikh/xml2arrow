@@ -4352,4 +4352,286 @@ mod tests {
         assert_array_values!(batch, "id", vec![1i32, 2], Int32Array);
         assert_array_values_option!(batch, "name", vec![Some("first"), None], StringArray);
     }
+
+    // =========================================================================
+    // Mixed content with ignored child nodes
+    // =========================================================================
+
+    #[test]
+    fn test_mixed_content_with_ignored_child_elements() {
+        // Text around child elements that aren't configured as fields should
+        // be concatenated: "Start " + " End" = "Start  End"
+        let xml_content = r#"
+        <data>
+            <row>
+                <value>Start <ignored/> End</value>
+            </row>
+        </data>
+        "#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: Utf8
+            "#,
+        );
+        let batch = record_batches.get("test").unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert_array_values!(batch, "value", vec!["Start  End"], StringArray);
+    }
+
+    #[test]
+    fn test_mixed_content_with_nested_child_elements() {
+        // More complex: text around a child element with its own text content
+        let xml_content = r#"
+        <data>
+            <row>
+                <value>Before <child>inner</child> After</value>
+            </row>
+        </data>
+        "#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: Utf8
+            "#,
+        );
+        let batch = record_batches.get("test").unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        // Only text directly under <value> should be accumulated, not the child's text
+        assert_array_values!(batch, "value", vec!["Before  After"], StringArray);
+    }
+
+    // =========================================================================
+    // Schema nullability verification
+    // =========================================================================
+
+    #[test]
+    fn test_schema_nullability_matches_config() {
+        let xml_content = r#"
+        <data>
+            <row>
+                <required>1</required>
+                <optional>2</optional>
+            </row>
+        </data>
+        "#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: required
+                      xml_path: /data/row/required
+                      data_type: Int32
+                      nullable: false
+                    - name: optional
+                      xml_path: /data/row/optional
+                      data_type: Int32
+                      nullable: true
+            "#,
+        );
+        let batch = record_batches.get("test").unwrap();
+        let schema = batch.schema();
+
+        let required_field = schema.field_with_name("required").unwrap();
+        assert!(
+            !required_field.is_nullable(),
+            "Field 'required' should not be nullable in schema"
+        );
+
+        let optional_field = schema.field_with_name("optional").unwrap();
+        assert!(
+            optional_field.is_nullable(),
+            "Field 'optional' should be nullable in schema"
+        );
+    }
+
+    #[test]
+    fn test_schema_nullability_defaults_to_non_nullable() {
+        // Fields without explicit nullable should default to non-nullable
+        let xml_content = r#"<data><row><value>1</value></row></data>"#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: Int32
+            "#,
+        );
+        let batch = record_batches.get("test").unwrap();
+        let schema = batch.schema();
+        let field = schema.field_with_name("value").unwrap();
+        assert!(!field.is_nullable(), "Default nullability should be false");
+    }
+
+    // =========================================================================
+    // Duplicate attributes
+    // =========================================================================
+
+    #[test]
+    fn test_duplicate_attributes_returns_error() {
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [item]
+                  fields:
+                    - name: id
+                      xml_path: /data/item/@id
+                      data_type: Int32
+            "#
+        );
+
+        // Duplicate attribute "id" is invalid XML
+        let result = parse_xml(
+            r#"<data><item id="1" id="2">text</item></data>"#.as_bytes(),
+            &config,
+        );
+        assert!(
+            result.is_err(),
+            "Duplicate attributes should produce an error"
+        );
+    }
+
+    // =========================================================================
+    // Transform on empty-string nullable float
+    // =========================================================================
+
+    #[test]
+    fn test_nullable_f32_empty_element_with_transform_produces_null() {
+        // An empty element <value></value> for a nullable Float32 with offset
+        // should produce null, NOT 0.0 + offset
+        let xml_content = r#"
+        <data>
+            <row><value></value></row>
+            <row><value>10.0</value></row>
+        </data>
+        "#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: Float32
+                      scale: 2.0
+                      offset: 100.0
+                      nullable: true
+            "#,
+        );
+        let batch = record_batches.get("test").unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        let array = batch
+            .column_by_name("value")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .unwrap();
+        assert!(
+            array.is_null(0),
+            "Empty element should be null, not 0.0 + offset"
+        );
+        // 10.0 * 2.0 + 100.0 = 120.0
+        assert!(abs_diff_eq!(array.value(1), 120.0f32, epsilon = 0.001));
+    }
+
+    #[test]
+    fn test_nullable_f64_empty_element_with_transform_produces_null() {
+        let xml_content = r#"
+        <data>
+            <row><value></value></row>
+            <row><value>5.0</value></row>
+        </data>
+        "#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: Float64
+                      offset: 50.0
+                      nullable: true
+            "#,
+        );
+        let batch = record_batches.get("test").unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        let array = batch
+            .column_by_name("value")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert!(
+            array.is_null(0),
+            "Empty element should be null, not 0.0 + offset"
+        );
+        assert!(abs_diff_eq!(array.value(1), 55.0f64, epsilon = 0.001));
+    }
+
+    // =========================================================================
+    // Namespace prefixes in attributes
+    // =========================================================================
+
+    #[test]
+    fn test_prefixed_namespace_attribute_stripped() {
+        // Attributes with namespace prefixes should have the prefix stripped
+        // via local_name(), so ns:id matches @id in the config
+        let xml_content =
+            r#"<data xmlns:ns="http://example.com"><item ns:id="42">text</item></data>"#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [item]
+                  fields:
+                    - name: id
+                      xml_path: /data/item/@id
+                      data_type: Int32
+            "#,
+        );
+        let batch = record_batches.get("test").unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert_array_values!(batch, "id", vec![42i32], Int32Array);
+    }
 }
