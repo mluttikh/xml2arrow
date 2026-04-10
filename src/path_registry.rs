@@ -22,7 +22,6 @@
 // over upfront construction work at startup.
 
 use fxhash::FxHashMap;
-use string_cache::DefaultAtom as Atom;
 
 use crate::config::Config;
 
@@ -107,7 +106,7 @@ impl PathNodeInfo {
 /// * `node_info`: Uses the node's `PathNodeId` as an index to retrieve `PathNodeInfo` (whether this node is a table boundary or contains fields).
 pub struct PathRegistry {
     /// For each node, map child element name to child node ID.
-    children: Vec<FxHashMap<Atom, PathNodeId>>,
+    children: Vec<FxHashMap<Box<[u8]>, PathNodeId>>,
     /// Information about each node (is it a table? which fields?).
     node_info: Vec<PathNodeInfo>,
 }
@@ -147,7 +146,7 @@ impl PathRegistry {
         for node_id_idx in 0..registry.children.len() {
             let has_attr_child = registry.children[node_id_idx]
                 .keys()
-                .any(|name| name.as_ref().starts_with('@'));
+                .any(|name| name.starts_with(b"@"));
             registry.node_info[node_id_idx].has_attribute_children = has_attr_child;
         }
 
@@ -166,17 +165,14 @@ impl PathRegistry {
     /// - Leading "/" is ignored.
     /// - Empty segments are ignored (double slashes, trailing slash).
     fn get_or_create_path(&mut self, path_str: &str) -> PathNodeId {
-        let parts: Vec<&str> = path_str
+        let mut current_node = PathNodeId::ROOT;
+
+        for part in path_str
             .trim_start_matches('/')
             .split('/')
             .filter(|s| !s.is_empty())
-            .collect();
-
-        let mut current_node = PathNodeId::ROOT;
-
-        for part in parts {
-            let atom = Atom::from(part);
-            current_node = self.get_or_create_child(current_node, atom);
+        {
+            current_node = self.get_or_create_child(current_node, part.as_bytes());
         }
 
         current_node
@@ -186,17 +182,14 @@ impl PathRegistry {
     ///
     /// Returns `None` if the path doesn't exist in the registry.
     pub fn resolve_path(&self, path_str: &str) -> Option<PathNodeId> {
-        let parts: Vec<&str> = path_str
+        let mut current_node = PathNodeId::ROOT;
+
+        for part in path_str
             .trim_start_matches('/')
             .split('/')
             .filter(|s| !s.is_empty())
-            .collect();
-
-        let mut current_node = PathNodeId::ROOT;
-
-        for part in parts {
-            let atom = Atom::from(part);
-            current_node = self.get_child(current_node, &atom)?;
+        {
+            current_node = self.get_child(current_node, part.as_bytes())?;
         }
 
         Some(current_node)
@@ -206,8 +199,8 @@ impl PathRegistry {
     ///
     /// This is the only place we mutate the trie. By isolating that logic, we
     /// avoid duplicating bookkeeping for new nodes.
-    fn get_or_create_child(&mut self, parent: PathNodeId, name: Atom) -> PathNodeId {
-        if let Some(&child_id) = self.children[parent.index()].get(&name) {
+    fn get_or_create_child(&mut self, parent: PathNodeId, name: &[u8]) -> PathNodeId {
+        if let Some(&child_id) = self.children[parent.index()].get(name) {
             return child_id;
         }
 
@@ -215,7 +208,7 @@ impl PathRegistry {
         let new_id = PathNodeId(self.children.len() as u32);
         self.children.push(FxHashMap::default());
         self.node_info.push(PathNodeInfo::default());
-        self.children[parent.index()].insert(name, new_id);
+        self.children[parent.index()].insert(name.into(), new_id);
 
         new_id
     }
@@ -224,7 +217,7 @@ impl PathRegistry {
     ///
     /// Returns `None` if the child doesn't exist (path not in config).
     #[inline]
-    pub fn get_child(&self, parent: PathNodeId, name: &Atom) -> Option<PathNodeId> {
+    pub fn get_child(&self, parent: PathNodeId, name: &[u8]) -> Option<PathNodeId> {
         self.children.get(parent.index())?.get(name).copied()
     }
 
@@ -289,15 +282,7 @@ impl PathTracker {
     /// Returns the new node ID if the path exists in the registry, or None if
     /// the path is not configured (and thus can be ignored).
     #[inline]
-    #[allow(dead_code)]
-    pub fn enter(&mut self, name: &str, registry: &PathRegistry) -> Option<PathNodeId> {
-        let atom = Atom::from(name);
-        self.enter_atom(atom, registry)
-    }
-
-    /// Enters a child element using a pre-interned atom.
-    #[inline]
-    pub fn enter_atom(&mut self, name: Atom, registry: &PathRegistry) -> Option<PathNodeId> {
+    pub fn enter(&mut self, name: &[u8], registry: &PathRegistry) -> Option<PathNodeId> {
         let (current_node, current_is_known) = self.node_stack.last().copied().unwrap();
 
         if !current_is_known {
@@ -307,7 +292,7 @@ impl PathTracker {
             return None;
         }
 
-        if let Some(child_id) = registry.get_child(current_node, &name) {
+        if let Some(child_id) = registry.get_child(current_node, name) {
             self.node_stack.push((child_id, true));
             Some(child_id)
         } else {
@@ -418,13 +403,9 @@ mod tests {
         assert!(!registry.is_table_path(PathNodeId::ROOT));
 
         // Check that table paths are recognized
-        let root_atom = Atom::from("root");
-        let items_atom = Atom::from("items");
-        let metadata_atom = Atom::from("metadata");
-
-        let root_node = registry.get_child(PathNodeId::ROOT, &root_atom).unwrap();
-        let items_node = registry.get_child(root_node, &items_atom).unwrap();
-        let metadata_node = registry.get_child(root_node, &metadata_atom).unwrap();
+        let root_node = registry.get_child(PathNodeId::ROOT, b"root").unwrap();
+        let items_node = registry.get_child(root_node, b"items").unwrap();
+        let metadata_node = registry.get_child(root_node, b"metadata").unwrap();
 
         assert!(registry.is_table_path(items_node));
         assert!(registry.is_table_path(metadata_node));
@@ -438,15 +419,10 @@ mod tests {
         let registry = PathRegistry::from_config(&config);
 
         // Navigate to /root/items/item/name
-        let root_atom = Atom::from("root");
-        let items_atom = Atom::from("items");
-        let item_atom = Atom::from("item");
-        let name_atom = Atom::from("name");
-
-        let root_node = registry.get_child(PathNodeId::ROOT, &root_atom).unwrap();
-        let items_node = registry.get_child(root_node, &items_atom).unwrap();
-        let item_node = registry.get_child(items_node, &item_atom).unwrap();
-        let name_node = registry.get_child(item_node, &name_atom).unwrap();
+        let root_node = registry.get_child(PathNodeId::ROOT, b"root").unwrap();
+        let items_node = registry.get_child(root_node, b"items").unwrap();
+        let item_node = registry.get_child(items_node, b"item").unwrap();
+        let name_node = registry.get_child(item_node, b"name").unwrap();
 
         let info = registry.get_node_info(name_node);
         assert!(!info.is_table());
@@ -462,12 +438,12 @@ mod tests {
         let mut tracker = PathTracker::new();
 
         // Enter /root
-        let node = tracker.enter("root", &registry);
+        let node = tracker.enter(b"root", &registry);
         assert!(node.is_some());
         assert!(!registry.is_table_path(node.unwrap()));
 
         // Enter /root/items
-        let node = tracker.enter("items", &registry);
+        let node = tracker.enter(b"items", &registry);
         assert!(node.is_some());
         assert!(registry.is_table_path(node.unwrap()));
 
@@ -487,12 +463,12 @@ mod tests {
         let mut tracker = PathTracker::new();
 
         // Enter unknown path
-        let node = tracker.enter("unknown", &registry);
+        let node = tracker.enter(b"unknown", &registry);
         assert!(node.is_none());
         assert!(!tracker.is_current_known());
 
         // Children of unknown paths are also unknown
-        let node = tracker.enter("child", &registry);
+        let node = tracker.enter(b"child", &registry);
         assert!(node.is_none());
 
         // Leave unknown child
@@ -545,12 +521,12 @@ mod tests {
         let mut tracker = PathTracker::new();
 
         // Navigate to /root/items/item
-        tracker.enter("root", &registry);
-        tracker.enter("items", &registry);
-        tracker.enter("item", &registry);
+        tracker.enter(b"root", &registry);
+        tracker.enter(b"items", &registry);
+        tracker.enter(b"item", &registry);
 
         // Enter attribute path @id
-        let node = tracker.enter("@id", &registry);
+        let node = tracker.enter(b"@id", &registry);
         assert!(node.is_some());
 
         let info = registry.get_node_info(node.unwrap());
