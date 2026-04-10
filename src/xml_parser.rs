@@ -514,12 +514,6 @@ impl XmlToArrowConverter {
         })
     }
 
-    /// Check if the given node represents a table path.
-    #[inline]
-    fn is_table_path(&self, node_id: PathNodeId) -> bool {
-        self.registry.is_table_path(node_id)
-    }
-
     /// Check if there's a root-level table (xml_path: /) that has fields defined.
     fn has_root_table_with_fields(&self) -> bool {
         if let Some(table_idx) = self.registry.get_table_index(PathNodeId::ROOT) {
@@ -529,9 +523,66 @@ impl XmlToArrowConverter {
         }
     }
 
+    /// Starts the root-level table scope (xml_path: /).
+    /// Called once before parsing begins, only when the root has fields.
+    fn start_root_table(&mut self) {
+        if let Some(table_idx) = self.registry.get_table_index(PathNodeId::ROOT) {
+            self.builder_stack.push(TableStackEntry {
+                table_idx,
+                node_id: PathNodeId::ROOT,
+            });
+            self.table_builders[table_idx].row_index = 0;
+        }
+    }
+
+    /// Enters an XML element: tracks the path and starts a table scope if this node
+    /// represents a table boundary. Returns the node ID and whether a table was started.
+    #[inline]
+    fn enter_element(
+        &mut self,
+        path_tracker: &mut PathTracker,
+        name: &[u8],
+    ) -> (Option<PathNodeId>, bool) {
+        let node_id = path_tracker.enter(name, &self.registry);
+        let is_table = node_id
+            .is_some_and(|id| self.registry.is_table_path(id));
+
+        if is_table {
+            let id = node_id.unwrap();
+            if let Some(table_idx) = self.registry.get_table_index(id) {
+                self.builder_stack
+                    .push(TableStackEntry { table_idx, node_id: id });
+                self.table_builders[table_idx].row_index = 0;
+            }
+        }
+
+        (node_id, is_table)
+    }
+
+    /// After leaving an element, check if the parent context requires ending a row.
+    /// This handles both the normal case (parent is a table on the stack) and the
+    /// special root-table case (xml_path: /).
+    #[inline]
+    fn maybe_end_parent_row(
+        &mut self,
+        element_stack: &[(Option<PathNodeId>, bool)],
+        path_tracker: &PathTracker,
+    ) -> Result<()> {
+        if let Some(&(_, parent_is_table)) = element_stack.last() {
+            if parent_is_table {
+                self.end_current_row()?;
+            }
+        } else if self.registry.is_table_path(PathNodeId::ROOT)
+            && path_tracker.current() == Some(PathNodeId::ROOT)
+        {
+            self.end_current_row()?;
+        }
+        Ok(())
+    }
+
     /// Sets a field value for the current table using path node information.
     #[inline]
-    pub fn set_field_value_for_node(&mut self, node_id: PathNodeId, value: &str) {
+    fn set_field_value_for_node(&mut self, node_id: PathNodeId, value: &str) {
         let info = self.registry.get_node_info(node_id);
         if info.field_indices.is_empty() {
             return;
@@ -569,18 +620,8 @@ impl XmlToArrowConverter {
         Ok(())
     }
 
-    fn start_table(&mut self, node_id: PathNodeId) -> Result<()> {
-        if let Some(table_idx) = self.registry.get_table_index(node_id) {
-            self.builder_stack
-                .push(TableStackEntry { table_idx, node_id });
-            self.table_builders[table_idx].row_index = 0;
-        }
-        Ok(())
-    }
-
-    fn end_table(&mut self) -> Result<()> {
+    fn end_table(&mut self) {
         self.builder_stack.pop();
-        Ok(())
     }
 
     fn finish(mut self) -> Result<IndexMap<String, arrow::record_batch::RecordBatch>> {
@@ -642,7 +683,7 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
     // level indexing. Tables with xml_path: / and no fields are just used for
     // hierarchy purposes and don't need to be on the stack.
     if xml_to_arrow_converter.has_root_table_with_fields() {
-        xml_to_arrow_converter.start_table(PathNodeId::ROOT)?;
+        xml_to_arrow_converter.start_root_table();
     }
 
     // Use specialized parsing logic based on whether attribute parsing is required.
@@ -672,40 +713,31 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
 fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
     reader: &mut Reader<B>,
     path_tracker: &mut PathTracker,
-    xml_to_arrow_converter: &mut XmlToArrowConverter,
+    converter: &mut XmlToArrowConverter,
     stop_node_ids: &[PathNodeId],
 ) -> Result<()> {
     let mut buf = Vec::with_capacity(4096);
     let mut attr_name_buffer = Vec::with_capacity(64);
 
-    // Stack to track (node_id, is_table) for each entered element
-    // This avoids redundant lookups on End events
+    // Stack to track (node_id, is_table) for each entered element.
+    // This avoids redundant registry lookups on End events.
     let mut element_stack: Vec<(Option<PathNodeId>, bool)> = Vec::with_capacity(32);
 
     loop {
         match reader.read_event_into(&mut buf)? {
             Event::Start(e) => {
-                let name_bytes = e.local_name().into_inner();
-                let node_id = path_tracker.enter(name_bytes, &xml_to_arrow_converter.registry);
-
-                let is_table = node_id
-                    .map(|id| xml_to_arrow_converter.is_table_path(id))
-                    .unwrap_or(false);
-
-                if is_table {
-                    xml_to_arrow_converter.start_table(node_id.unwrap())?;
-                }
-
+                let (node_id, is_table) =
+                    converter.enter_element(path_tracker, e.local_name().into_inner());
                 element_stack.push((node_id, is_table));
 
                 if PARSE_ATTRIBUTES {
                     if let Some(id) = node_id {
-                        if xml_to_arrow_converter.registry.has_attribute_children(id) {
+                        if converter.registry.has_attribute_children(id) {
                             parse_attributes(
                                 reader.decoder(),
                                 e.attributes(),
                                 path_tracker,
-                                xml_to_arrow_converter,
+                                converter,
                                 &mut attr_name_buffer,
                             )?;
                         }
@@ -713,25 +745,17 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                 }
             }
             Event::Empty(e) => {
-                let name_bytes = e.local_name().into_inner();
-                let node_id = path_tracker.enter(name_bytes, &xml_to_arrow_converter.registry);
-
-                let is_table = node_id
-                    .map(|id| xml_to_arrow_converter.is_table_path(id))
-                    .unwrap_or(false);
-
-                if is_table {
-                    xml_to_arrow_converter.start_table(node_id.unwrap())?;
-                }
+                let (node_id, is_table) =
+                    converter.enter_element(path_tracker, e.local_name().into_inner());
 
                 if PARSE_ATTRIBUTES {
                     if let Some(id) = node_id {
-                        if xml_to_arrow_converter.registry.has_attribute_children(id) {
+                        if converter.registry.has_attribute_children(id) {
                             parse_attributes(
                                 reader.decoder(),
                                 e.attributes(),
                                 path_tracker,
-                                xml_to_arrow_converter,
+                                converter,
                                 &mut attr_name_buffer,
                             )?;
                         }
@@ -740,31 +764,13 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
 
                 // Immediately close: empty elements have no children or text
                 if is_table {
-                    xml_to_arrow_converter.end_table()?;
+                    converter.end_table();
                 }
                 path_tracker.leave();
+                converter.maybe_end_parent_row(&element_stack, path_tracker)?;
 
-                // Check if parent is a table - need to end row
-                if let Some(&(_parent_node_id, parent_is_table)) = element_stack.last() {
-                    if parent_is_table {
-                        xml_to_arrow_converter.end_current_row()?;
-                    }
-                } else if xml_to_arrow_converter
-                    .registry
-                    .is_table_path(PathNodeId::ROOT)
-                {
-                    if path_tracker.current() == Some(PathNodeId::ROOT) {
-                        xml_to_arrow_converter.end_current_row()?;
-                    }
-                }
-
-                // Check stop paths
-                if let Some(node_id) = node_id {
-                    if !stop_node_ids.is_empty()
-                        && stop_node_ids.iter().any(|stop_id| *stop_id == node_id)
-                    {
-                        break;
-                    }
+                if should_stop(node_id, stop_node_ids) {
+                    break;
                 }
             }
             Event::GeneralRef(e) => {
@@ -772,58 +778,35 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                     let text = e.into_inner();
                     let text = std::str::from_utf8(&text)?;
                     let text = escape::resolve_predefined_entity(text).unwrap_or_default();
-                    xml_to_arrow_converter.set_field_value_for_node(node_id, &text);
+                    converter.set_field_value_for_node(node_id, &text);
                 }
             }
             Event::Text(e) => {
                 if let Some(node_id) = path_tracker.current() {
                     let text = e.into_inner();
                     let text = std::str::from_utf8(&text)?;
-                    xml_to_arrow_converter.set_field_value_for_node(node_id, text);
+                    converter.set_field_value_for_node(node_id, text);
                 }
             }
             Event::CData(e) => {
                 if let Some(node_id) = path_tracker.current() {
                     let text = e.into_inner();
                     let text = std::str::from_utf8(&text)?;
-                    xml_to_arrow_converter.set_field_value_for_node(node_id, text);
+                    converter.set_field_value_for_node(node_id, text);
                 }
             }
             Event::End(_) => {
-                // Pop from our element stack
                 if let Some((node_id, is_table)) = element_stack.pop() {
                     if is_table {
-                        xml_to_arrow_converter.end_table()?;
+                        converter.end_table();
                     }
-
-                    // Leave the current path
                     path_tracker.leave();
-
-                    // Check if parent is a table - need to end row
-                    if let Some(&(_parent_node_id, parent_is_table)) = element_stack.last() {
-                        if parent_is_table {
-                            xml_to_arrow_converter.end_current_row()?;
-                        }
-                    } else {
-                        // Check root table case
-                        if xml_to_arrow_converter
-                            .registry
-                            .is_table_path(PathNodeId::ROOT)
-                        {
-                            if path_tracker.current() == Some(PathNodeId::ROOT) {
-                                xml_to_arrow_converter.end_current_row()?;
-                            }
-                        }
-                    }
+                    converter.maybe_end_parent_row(&element_stack, path_tracker)?;
 
                     // Stop after closing the configured path, so header-only reads
                     // can exit without scanning the remainder of the XML.
-                    if let Some(node_id) = node_id {
-                        if !stop_node_ids.is_empty()
-                            && stop_node_ids.iter().any(|stop_id| *stop_id == node_id)
-                        {
-                            break;
-                        }
+                    if should_stop(node_id, stop_node_ids) {
+                        break;
                     }
                 }
             }
@@ -837,12 +820,21 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
     Ok(())
 }
 
+/// Returns true if the given node matches one of the configured stop paths.
+#[inline]
+fn should_stop(node_id: Option<PathNodeId>, stop_node_ids: &[PathNodeId]) -> bool {
+    match node_id {
+        Some(id) if !stop_node_ids.is_empty() => stop_node_ids.iter().any(|&stop_id| stop_id == id),
+        _ => false,
+    }
+}
+
 #[inline]
 fn parse_attributes(
     decoder: Decoder,
     attributes: Attributes,
     path_tracker: &mut PathTracker,
-    xml_to_arrow_converter: &mut XmlToArrowConverter,
+    converter: &mut XmlToArrowConverter,
     attr_name_buffer: &mut Vec<u8>,
 ) -> Result<()> {
     for attribute in attributes {
@@ -855,10 +847,10 @@ fn parse_attributes(
         attr_name_buffer.extend_from_slice(key);
 
         if let Some(attr_node_id) =
-            path_tracker.enter(attr_name_buffer, &xml_to_arrow_converter.registry)
+            path_tracker.enter(attr_name_buffer, &converter.registry)
         {
             let value = attribute.decode_and_unescape_value(decoder)?;
-            xml_to_arrow_converter.set_field_value_for_node(attr_node_id, &value);
+            converter.set_field_value_for_node(attr_node_id, &value);
         }
         path_tracker.leave();
     }
