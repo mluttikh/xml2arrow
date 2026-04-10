@@ -11,6 +11,5 @@ pub use errors::{Error, Result};
 mod path_registry;
 mod xml_parser;
 pub use xml_parser::parse_xml;
-mod xml_path;
 
 pub use config::{Config, DType, FieldConfig, FieldConfigBuilder, ParserOptions, TableConfig};

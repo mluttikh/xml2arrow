@@ -340,7 +340,7 @@ impl DType {
             DType::Int16 => DataType::Int16,
             DType::UInt16 => DataType::UInt16,
             DType::Int32 => DataType::Int32,
-            &DType::UInt32 => DataType::UInt32,
+            DType::UInt32 => DataType::UInt32,
             DType::Int64 => DataType::Int64,
             DType::UInt64 => DataType::UInt64,
         }

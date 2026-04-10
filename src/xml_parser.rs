@@ -11,23 +11,21 @@
 //! This means we front-load configuration validation and path compilation so the
 //! event loop can focus on direct indexing and appends.
 use std::io::BufRead;
-use std::str::FromStr;
+use std::num::IntErrorKind;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayBuilder, ArrowNumericType, BooleanBuilder, Float32Builder, Float64Builder,
-    Int8Builder, Int16Builder, Int32Builder, Int64Builder, RecordBatch, StringBuilder,
-    UInt8Builder, UInt16Builder, UInt32Builder, UInt64Builder,
+    Array, BooleanBuilder, Float32Builder, Float64Builder, Int8Builder, Int16Builder, Int32Builder,
+    Int64Builder, RecordBatch, StringBuilder, UInt8Builder, UInt16Builder, UInt32Builder,
+    UInt64Builder,
 };
 use arrow::datatypes::{DataType, Field, Schema};
-use fxhash::FxHashMap;
 use indexmap::IndexMap;
 use quick_xml::Reader;
 use quick_xml::encoding::Decoder;
 use quick_xml::escape;
 use quick_xml::events::Event;
 use quick_xml::events::attributes::Attributes;
-use string_cache::DefaultAtom as Atom;
 
 use crate::Config;
 use crate::config::{DType, FieldConfig, TableConfig};
@@ -36,9 +34,60 @@ use crate::errors::Result;
 use crate::path_registry::{PathNodeId, PathRegistry, PathTracker};
 
 // === Field-level accumulation ===
-// The FieldBuilder owns the value buffer and the Arrow builder for one field.
-// It encapsulates conversion, null handling, and optional scale/offset transforms.
-///
+
+/// Enum-based array builder that avoids dynamic dispatch (`Box<dyn ArrayBuilder>`)
+/// in the hot path. Each variant holds the concrete Arrow builder type directly.
+enum TypedArrayBuilder {
+    Boolean(BooleanBuilder),
+    Int8(Int8Builder),
+    UInt8(UInt8Builder),
+    Int16(Int16Builder),
+    UInt16(UInt16Builder),
+    Int32(Int32Builder),
+    UInt32(UInt32Builder),
+    Int64(Int64Builder),
+    UInt64(UInt64Builder),
+    Float32(Float32Builder),
+    Float64(Float64Builder),
+    Utf8(StringBuilder),
+}
+
+impl TypedArrayBuilder {
+    fn from_dtype(data_type: DType) -> Self {
+        match data_type {
+            DType::Boolean => Self::Boolean(BooleanBuilder::default()),
+            DType::Int8 => Self::Int8(Int8Builder::default()),
+            DType::UInt8 => Self::UInt8(UInt8Builder::default()),
+            DType::Int16 => Self::Int16(Int16Builder::default()),
+            DType::UInt16 => Self::UInt16(UInt16Builder::default()),
+            DType::Int32 => Self::Int32(Int32Builder::default()),
+            DType::UInt32 => Self::UInt32(UInt32Builder::default()),
+            DType::Int64 => Self::Int64(Int64Builder::default()),
+            DType::UInt64 => Self::UInt64(UInt64Builder::default()),
+            DType::Float32 => Self::Float32(Float32Builder::default()),
+            DType::Float64 => Self::Float64(Float64Builder::default()),
+            DType::Utf8 => Self::Utf8(StringBuilder::default()),
+        }
+    }
+
+    fn finish(&mut self) -> Arc<dyn Array> {
+        match self {
+            Self::Boolean(b) => Arc::new(b.finish()),
+            Self::Int8(b) => Arc::new(b.finish()),
+            Self::UInt8(b) => Arc::new(b.finish()),
+            Self::Int16(b) => Arc::new(b.finish()),
+            Self::UInt16(b) => Arc::new(b.finish()),
+            Self::Int32(b) => Arc::new(b.finish()),
+            Self::UInt32(b) => Arc::new(b.finish()),
+            Self::Int64(b) => Arc::new(b.finish()),
+            Self::UInt64(b) => Arc::new(b.finish()),
+            Self::Float32(b) => Arc::new(b.finish()),
+            Self::Float64(b) => Arc::new(b.finish()),
+            Self::Utf8(b) => Arc::new(b.finish()),
+        }
+    }
+}
+
 /// Builds Arrow arrays for a single field based on parsed XML data.
 ///
 /// This struct manages the accumulation of values from the XML and their conversion
@@ -49,138 +98,14 @@ struct FieldBuilder {
     field_config: FieldConfig,
     /// The Arrow field description
     field: Field,
-    /// The Arrow array builder used to construct the array.
-    array_builder: Box<dyn ArrayBuilder>,
+    /// The Arrow array builder used to construct the array (enum dispatch, no vtable).
+    array_builder: TypedArrayBuilder,
     /// Indicates whether the builder has received any values for the current row.
     has_value: bool,
     /// Temporary storage for accumulating the current value from potentially multiple XML text nodes.
     current_value: String,
     /// Whether this field has scale or offset transforms that should be applied inline.
     has_transform: bool,
-}
-
-/// Helper function to parse a string and append it to a numeric builder.
-fn append_numeric<T>(
-    builder: &mut Box<dyn ArrayBuilder>,
-    value: &str,
-    has_value: bool,
-    field_config: &FieldConfig,
-) -> Result<()>
-where
-    T: ArrowNumericType,
-    T::Native: FromStr,
-    <T::Native as FromStr>::Err: std::fmt::Display,
-{
-    let builder = builder
-        .as_any_mut()
-        .downcast_mut::<arrow::array::PrimitiveBuilder<T>>()
-        .expect("Builder type mismatch. This is a bug in create_array_builder.");
-
-    if has_value {
-        match value.parse::<T::Native>() {
-            Ok(val) => builder.append_value(val),
-            Err(e) => {
-                return Err(Error::ParseError(format!(
-                    "Failed to parse value '{}' as {} for field '{}' at path {}: {}",
-                    value,
-                    std::any::type_name::<T::Native>(),
-                    field_config.name,
-                    field_config.xml_path,
-                    e
-                )));
-            }
-        }
-    } else if field_config.nullable {
-        builder.append_null();
-    } else {
-        return Err(Error::ParseError(format!(
-            "Missing value for non-nullable field '{}' at path {}",
-            field_config.name, field_config.xml_path
-        )));
-    }
-    Ok(())
-}
-
-/// Parses a float string and appends it to a Float64Builder with inline scale/offset.
-fn append_f64_with_transform(
-    builder: &mut Box<dyn ArrayBuilder>,
-    value: &str,
-    has_value: bool,
-    field_config: &FieldConfig,
-) -> Result<()> {
-    let builder = builder
-        .as_any_mut()
-        .downcast_mut::<Float64Builder>()
-        .expect("Float64Builder");
-
-    if has_value {
-        match value.parse::<f64>() {
-            Ok(mut val) => {
-                if let Some(scale) = field_config.scale {
-                    val *= scale;
-                }
-                if let Some(offset) = field_config.offset {
-                    val += offset;
-                }
-                builder.append_value(val);
-            }
-            Err(e) => {
-                return Err(Error::ParseError(format!(
-                    "Failed to parse value '{}' as f64 for field '{}' at path {}: {}",
-                    value, field_config.name, field_config.xml_path, e
-                )));
-            }
-        }
-    } else if field_config.nullable {
-        builder.append_null();
-    } else {
-        return Err(Error::ParseError(format!(
-            "Missing value for non-nullable field '{}' at path {}",
-            field_config.name, field_config.xml_path
-        )));
-    }
-    Ok(())
-}
-
-/// Parses a float string and appends it to a Float32Builder with inline scale/offset.
-fn append_f32_with_transform(
-    builder: &mut Box<dyn ArrayBuilder>,
-    value: &str,
-    has_value: bool,
-    field_config: &FieldConfig,
-) -> Result<()> {
-    let builder = builder
-        .as_any_mut()
-        .downcast_mut::<Float32Builder>()
-        .expect("Float32Builder");
-
-    if has_value {
-        match value.parse::<f32>() {
-            Ok(mut val) => {
-                if let Some(scale) = field_config.scale {
-                    val *= scale as f32;
-                }
-                if let Some(offset) = field_config.offset {
-                    val += offset as f32;
-                }
-                builder.append_value(val);
-            }
-            Err(e) => {
-                return Err(Error::ParseError(format!(
-                    "Failed to parse value '{}' as f32 for field '{}' at path {}: {}",
-                    value, field_config.name, field_config.xml_path, e
-                )));
-            }
-        }
-    } else if field_config.nullable {
-        builder.append_null();
-    } else {
-        return Err(Error::ParseError(format!(
-            "Missing value for non-nullable field '{}' at path {}",
-            field_config.name, field_config.xml_path
-        )));
-    }
-    Ok(())
 }
 
 /// Parses a boolean token from a string, trimming whitespace first.
@@ -212,9 +137,74 @@ fn parse_boolean_token(value: &str) -> std::result::Result<Option<bool>, ()> {
     }
 }
 
+/// Helper macro to reduce boilerplate for parsing and appending integer values.
+/// Uses `atoi` for fast byte-level integer parsing.
+macro_rules! append_int {
+    ($builder:expr, $value:expr, $has_value:expr, $field_config:expr, $ty:ty, $type_name:expr) => {
+        if $has_value {
+            match atoi::atoi::<$ty>($value.as_bytes()) {
+                Some(val) => $builder.append_value(val),
+                None => {
+                    // Fall back to std parse for better error messages
+                    match $value.parse::<$ty>() {
+                        Ok(val) => $builder.append_value(val),
+                        Err(e) => {
+                            let msg = if *e.kind() == IntErrorKind::PosOverflow
+                                || *e.kind() == IntErrorKind::NegOverflow
+                            {
+                                format!(
+                                    "Failed to parse value '{}' as {} for field '{}' at path {}: {}",
+                                    $value, $type_name, $field_config.name, $field_config.xml_path, e
+                                )
+                            } else {
+                                format!(
+                                    "Failed to parse value '{}' as {} for field '{}' at path {}: {}",
+                                    $value, $type_name, $field_config.name, $field_config.xml_path, e
+                                )
+                            };
+                            return Err(Error::ParseError(msg));
+                        }
+                    }
+                }
+            }
+        } else if $field_config.nullable {
+            $builder.append_null();
+        } else {
+            return Err(Error::ParseError(format!(
+                "Missing value for non-nullable field '{}' at path {}",
+                $field_config.name, $field_config.xml_path
+            )));
+        }
+    };
+}
+
+/// Helper macro for parsing and appending float values using `fast_float2`.
+macro_rules! append_float {
+    ($builder:expr, $value:expr, $has_value:expr, $field_config:expr, $ty:ty, $type_name:expr) => {
+        if $has_value {
+            match fast_float2::parse::<$ty, _>($value) {
+                Ok(val) => $builder.append_value(val),
+                Err(e) => {
+                    return Err(Error::ParseError(format!(
+                        "Failed to parse value '{}' as {} for field '{}' at path {}: {}",
+                        $value, $type_name, $field_config.name, $field_config.xml_path, e
+                    )));
+                }
+            }
+        } else if $field_config.nullable {
+            $builder.append_null();
+        } else {
+            return Err(Error::ParseError(format!(
+                "Missing value for non-nullable field '{}' at path {}",
+                $field_config.name, $field_config.xml_path
+            )));
+        }
+    };
+}
+
 impl FieldBuilder {
     fn new(field_config: &FieldConfig) -> Result<Self> {
-        let array_builder = create_array_builder(field_config.data_type)?;
+        let array_builder = TypedArrayBuilder::from_dtype(field_config.data_type);
         let field = Field::new(
             &field_config.name,
             field_config.data_type.as_arrow_type(),
@@ -237,158 +227,128 @@ impl FieldBuilder {
         self.has_value = true;
     }
 
-    /// Appends the currently accumulated value to the appropriate Arrow array builder,
+    /// Appends the currently accumulated value to the Arrow array builder,
     /// performing type conversion and handling nulls.
     fn append_current_value(&mut self) -> Result<()> {
         let value = self.current_value.as_str();
-        match self.field.data_type() {
-            DataType::Utf8 => {
-                let builder = self
-                    .array_builder
-                    .as_any_mut()
-                    .downcast_mut::<StringBuilder>()
-                    .expect("Utf8Builder");
-                if self.has_value {
-                    builder.append_value(value);
-                } else if self.field_config.nullable {
-                    builder.append_null();
+        let has_value = self.has_value;
+        let fc = &self.field_config;
+
+        match &mut self.array_builder {
+            TypedArrayBuilder::Utf8(b) => {
+                if has_value {
+                    b.append_value(value);
+                } else if fc.nullable {
+                    b.append_null();
                 } else {
-                    builder.append_value("")
+                    b.append_value("");
                 }
             }
-            DataType::Int8 => append_numeric::<arrow::datatypes::Int8Type>(
-                &mut self.array_builder,
-                value,
-                self.has_value,
-                &self.field_config,
-            )?,
-            DataType::UInt8 => append_numeric::<arrow::datatypes::UInt8Type>(
-                &mut self.array_builder,
-                value,
-                self.has_value,
-                &self.field_config,
-            )?,
-            DataType::Int16 => append_numeric::<arrow::datatypes::Int16Type>(
-                &mut self.array_builder,
-                value,
-                self.has_value,
-                &self.field_config,
-            )?,
-            DataType::UInt16 => append_numeric::<arrow::datatypes::UInt16Type>(
-                &mut self.array_builder,
-                value,
-                self.has_value,
-                &self.field_config,
-            )?,
-            DataType::Int32 => append_numeric::<arrow::datatypes::Int32Type>(
-                &mut self.array_builder,
-                value,
-                self.has_value,
-                &self.field_config,
-            )?,
-            DataType::UInt32 => append_numeric::<arrow::datatypes::UInt32Type>(
-                &mut self.array_builder,
-                value,
-                self.has_value,
-                &self.field_config,
-            )?,
-            DataType::Int64 => append_numeric::<arrow::datatypes::Int64Type>(
-                &mut self.array_builder,
-                value,
-                self.has_value,
-                &self.field_config,
-            )?,
-            DataType::UInt64 => append_numeric::<arrow::datatypes::UInt64Type>(
-                &mut self.array_builder,
-                value,
-                self.has_value,
-                &self.field_config,
-            )?,
-            DataType::Float32 if self.has_transform => append_f32_with_transform(
-                &mut self.array_builder,
-                value,
-                self.has_value,
-                &self.field_config,
-            )?,
-            DataType::Float64 if self.has_transform => append_f64_with_transform(
-                &mut self.array_builder,
-                value,
-                self.has_value,
-                &self.field_config,
-            )?,
-            DataType::Float32 => append_numeric::<arrow::datatypes::Float32Type>(
-                &mut self.array_builder,
-                value,
-                self.has_value,
-                &self.field_config,
-            )?,
-            DataType::Float64 => append_numeric::<arrow::datatypes::Float64Type>(
-                &mut self.array_builder,
-                value,
-                self.has_value,
-                &self.field_config,
-            )?,
-            DataType::Boolean => {
-                let builder = self
-                    .array_builder
-                    .as_any_mut()
-                    .downcast_mut::<BooleanBuilder>()
-                    .expect("BooleanBuilder");
-                if self.has_value {
+            TypedArrayBuilder::Int8(b) => append_int!(b, value, has_value, fc, i8, "i8"),
+            TypedArrayBuilder::UInt8(b) => append_int!(b, value, has_value, fc, u8, "u8"),
+            TypedArrayBuilder::Int16(b) => append_int!(b, value, has_value, fc, i16, "i16"),
+            TypedArrayBuilder::UInt16(b) => append_int!(b, value, has_value, fc, u16, "u16"),
+            TypedArrayBuilder::Int32(b) => append_int!(b, value, has_value, fc, i32, "i32"),
+            TypedArrayBuilder::UInt32(b) => append_int!(b, value, has_value, fc, u32, "u32"),
+            TypedArrayBuilder::Int64(b) => append_int!(b, value, has_value, fc, i64, "i64"),
+            TypedArrayBuilder::UInt64(b) => append_int!(b, value, has_value, fc, u64, "u64"),
+            TypedArrayBuilder::Float32(b) => {
+                if self.has_transform {
+                    if has_value {
+                        match fast_float2::parse::<f32, _>(value) {
+                            Ok(mut val) => {
+                                if let Some(scale) = fc.scale {
+                                    val *= scale as f32;
+                                }
+                                if let Some(offset) = fc.offset {
+                                    val += offset as f32;
+                                }
+                                b.append_value(val);
+                            }
+                            Err(e) => {
+                                return Err(Error::ParseError(format!(
+                                    "Failed to parse value '{}' as f32 for field '{}' at path {}: {}",
+                                    value, fc.name, fc.xml_path, e
+                                )));
+                            }
+                        }
+                    } else if fc.nullable {
+                        b.append_null();
+                    } else {
+                        return Err(Error::ParseError(format!(
+                            "Missing value for non-nullable field '{}' at path {}",
+                            fc.name, fc.xml_path
+                        )));
+                    }
+                } else {
+                    append_float!(b, value, has_value, fc, f32, "f32");
+                }
+            }
+            TypedArrayBuilder::Float64(b) => {
+                if self.has_transform {
+                    if has_value {
+                        match fast_float2::parse::<f64, _>(value) {
+                            Ok(mut val) => {
+                                if let Some(scale) = fc.scale {
+                                    val *= scale;
+                                }
+                                if let Some(offset) = fc.offset {
+                                    val += offset;
+                                }
+                                b.append_value(val);
+                            }
+                            Err(e) => {
+                                return Err(Error::ParseError(format!(
+                                    "Failed to parse value '{}' as f64 for field '{}' at path {}: {}",
+                                    value, fc.name, fc.xml_path, e
+                                )));
+                            }
+                        }
+                    } else if fc.nullable {
+                        b.append_null();
+                    } else {
+                        return Err(Error::ParseError(format!(
+                            "Missing value for non-nullable field '{}' at path {}",
+                            fc.name, fc.xml_path
+                        )));
+                    }
+                } else {
+                    append_float!(b, value, has_value, fc, f64, "f64");
+                }
+            }
+            TypedArrayBuilder::Boolean(b) => {
+                if has_value {
                     match parse_boolean_token(value) {
-                        Ok(Some(val)) => builder.append_value(val),
-                        Ok(None) if self.field_config.nullable => builder.append_null(),
+                        Ok(Some(val)) => b.append_value(val),
+                        Ok(None) if fc.nullable => b.append_null(),
                         Ok(None) => {
                             return Err(Error::ParseError(format!(
                                 "Missing value for non-nullable field '{}' at path {}",
-                                self.field_config.name, self.field_config.xml_path
+                                fc.name, fc.xml_path
                             )));
                         }
                         Err(()) => {
                             return Err(Error::ParseError(format!(
                                 "Failed to parse value '{}' as boolean for field '{}' at path {}: expected one of 'true', 'false', '1', '0', 'yes', 'no', 'on', 'off', 't', 'f', 'y', or 'n'",
-                                value, self.field_config.name, self.field_config.xml_path
+                                value, fc.name, fc.xml_path
                             )));
                         }
                     }
-                } else if self.field_config.nullable {
-                    builder.append_null();
+                } else if fc.nullable {
+                    b.append_null();
                 } else {
                     return Err(Error::ParseError(format!(
                         "Missing value for non-nullable field '{}' at path {}",
-                        self.field_config.name, self.field_config.xml_path
+                        fc.name, fc.xml_path
                     )));
                 }
-            }
-            _ => {
-                return Err(Error::UnsupportedDataType(format!(
-                    "Data type {:?} is not supported",
-                    self.field.data_type()
-                )));
             }
         }
         Ok(())
     }
 
-    pub fn finish(&mut self) -> Result<Arc<dyn Array>> {
-        Ok(self.array_builder.finish())
-    }
-}
-
-fn create_array_builder(data_type: DType) -> Result<Box<dyn ArrayBuilder>> {
-    match data_type {
-        DType::Boolean => Ok(Box::new(BooleanBuilder::default())),
-        DType::Int8 => Ok(Box::new(Int8Builder::default())),
-        DType::UInt8 => Ok(Box::new(UInt8Builder::default())),
-        DType::Int16 => Ok(Box::new(Int16Builder::default())),
-        DType::UInt16 => Ok(Box::new(UInt16Builder::default())),
-        DType::Int32 => Ok(Box::new(Int32Builder::default())),
-        DType::UInt32 => Ok(Box::new(UInt32Builder::default())),
-        DType::Int64 => Ok(Box::new(Int64Builder::default())),
-        DType::UInt64 => Ok(Box::new(UInt64Builder::default())),
-        DType::Float32 => Ok(Box::new(Float32Builder::default())),
-        DType::Float64 => Ok(Box::new(Float64Builder::default())),
-        DType::Utf8 => Ok(Box::new(StringBuilder::default())),
+    pub fn finish(&mut self) -> Arc<dyn Array> {
+        self.array_builder.finish()
     }
 }
 
@@ -483,7 +443,7 @@ impl TableBuilder {
             fields.push(Field::new(format!("<{}>", level), DataType::UInt32, false));
         }
         for field_builder in self.field_builders.iter_mut() {
-            let array = field_builder.finish()?;
+            let array = field_builder.finish();
             arrays.push(array);
             fields.push(field_builder.field.clone())
         }
@@ -716,12 +676,7 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
     stop_node_ids: &[PathNodeId],
 ) -> Result<()> {
     let mut buf = Vec::with_capacity(4096);
-    let mut attr_name_buffer = String::with_capacity(64);
-
-    // Local atom cache: avoids repeated global interning for the same element names.
-    // XML documents typically have 10-50 unique element names, so this cache has
-    // a near-100% hit rate after the first few elements.
-    let mut atom_cache: FxHashMap<Vec<u8>, Atom> = FxHashMap::default();
+    let mut attr_name_buffer = Vec::with_capacity(64);
 
     // Stack to track (node_id, is_table) for each entered element
     // This avoids redundant lookups on End events
@@ -731,8 +686,7 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
         match reader.read_event_into(&mut buf)? {
             Event::Start(e) => {
                 let name_bytes = e.local_name().into_inner();
-                let atom = get_or_intern_atom(&mut atom_cache, name_bytes)?;
-                let node_id = path_tracker.enter_atom(atom, &xml_to_arrow_converter.registry);
+                let node_id = path_tracker.enter(name_bytes, &xml_to_arrow_converter.registry);
 
                 let is_table = node_id
                     .map(|id| xml_to_arrow_converter.is_table_path(id))
@@ -760,8 +714,7 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
             }
             Event::Empty(e) => {
                 let name_bytes = e.local_name().into_inner();
-                let atom = get_or_intern_atom(&mut atom_cache, name_bytes)?;
-                let node_id = path_tracker.enter_atom(atom, &xml_to_arrow_converter.registry);
+                let node_id = path_tracker.enter(name_bytes, &xml_to_arrow_converter.registry);
 
                 let is_table = node_id
                     .map(|id| xml_to_arrow_converter.is_table_path(id))
@@ -884,38 +837,25 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
     Ok(())
 }
 
-/// Looks up or creates an interned atom from a byte slice, using a local cache
-/// to avoid repeated global hash set lookups for the same element names.
-#[inline]
-fn get_or_intern_atom(cache: &mut FxHashMap<Vec<u8>, Atom>, name_bytes: &[u8]) -> Result<Atom> {
-    if let Some(atom) = cache.get(name_bytes) {
-        return Ok(atom.clone());
-    }
-    let name_str = std::str::from_utf8(name_bytes)?;
-    let atom = Atom::from(name_str);
-    cache.insert(name_bytes.to_vec(), atom.clone());
-    Ok(atom)
-}
-
 #[inline]
 fn parse_attributes(
     decoder: Decoder,
     attributes: Attributes,
     path_tracker: &mut PathTracker,
     xml_to_arrow_converter: &mut XmlToArrowConverter,
-    attr_name_buffer: &mut String,
+    attr_name_buffer: &mut Vec<u8>,
 ) -> Result<()> {
     for attribute in attributes {
         let attribute = attribute?;
-        let key = std::str::from_utf8(attribute.key.local_name().into_inner())?;
+        let key = attribute.key.local_name().into_inner();
 
-        // Reuse buffer to avoid allocation
+        // Reuse buffer to avoid allocation: build "@key" as bytes
         attr_name_buffer.clear();
-        attr_name_buffer.push('@');
-        attr_name_buffer.push_str(key);
+        attr_name_buffer.push(b'@');
+        attr_name_buffer.extend_from_slice(key);
 
-        let atom = Atom::from(attr_name_buffer.as_str());
-        if let Some(attr_node_id) = path_tracker.enter_atom(atom, &xml_to_arrow_converter.registry)
+        if let Some(attr_node_id) =
+            path_tracker.enter(attr_name_buffer, &xml_to_arrow_converter.registry)
         {
             let value = attribute.decode_and_unescape_value(decoder)?;
             xml_to_arrow_converter.set_field_value_for_node(attr_node_id, &value);
