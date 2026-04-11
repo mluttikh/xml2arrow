@@ -1,6 +1,6 @@
 [package]
 name = "xml2arrow"
-version = "0.14.0"
+version = "0.15.0"
 edition = "2024"
 description = "Efficiently convert XML data to Apache Arrow format for high-performance data processing"
 license = "MIT"
@@ -11,9 +11,9 @@ readme = "README.md"
 
 [dependencies]
 arrow = "57.3.0"
-derive_more = { version = "2.0.1", features = ["from"] }
-indexmap = "2.12.0"
-quick-xml = "0.38.4"
+derive_more = { version = "2.1.1", features = ["from"] }
+indexmap = "2.14.0"
+quick-xml = "0.39.2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_yaml = "0.9.34"
 fxhash = "0.2.1"
