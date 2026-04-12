@@ -12,10 +12,10 @@ pub type Result<T> = core::result::Result<T, Error>;
 
 #[derive(Debug, From)]
 pub enum Error {
-    /// Errors from the QuickXML crate during XML parsing
+    /// Errors from the `quick-xml` crate during XML parsing.
     #[from]
     XmlParsing(quick_xml::Error),
-    /// Errors from the QuickXML crate that can be raised during parsing attributes.
+    /// Errors from the `quick-xml` crate that can be raised during parsing attributes.
     #[from]
     XmlParseAttr(quick_xml::events::attributes::AttrError),
     // Errors from the QuickXML crate that can be raised when decoding or encoding.
@@ -121,13 +121,13 @@ impl From<Error> for PyErr {
             Error::XmlParseAttr(e) => XmlParsingError::new_err(e.to_string()),
             Error::XmlParseEncoding(e) => XmlParsingError::new_err(e.to_string()),
             Error::Yaml(e) => YamlParsingError::new_err(e.to_string()),
-            Error::UnsupportedDataType(e) => UnsupportedDataTypeError::new_err(e.to_string()),
-            Error::TableNotFound(e) => TableNotFoundError::new_err(e.to_string()),
+            Error::UnsupportedDataType(e) => UnsupportedDataTypeError::new_err(e.clone()),
+            Error::TableNotFound(e) => TableNotFoundError::new_err(e.clone()),
             Error::NoTableOnStack => {
                 NoTableOnStackError::new_err("There is no table on the stack".to_string())
             }
-            Error::ParseError(e) => ParseError::new_err(e.to_string()),
-            Error::UnsupportedConversion(e) => UnsupportedConversionError::new_err(e.to_string()),
+            Error::ParseError(e) => ParseError::new_err(e.clone()),
+            Error::UnsupportedConversion(e) => UnsupportedConversionError::new_err(e.clone()),
         }
     }
 }
