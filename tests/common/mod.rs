@@ -185,15 +185,14 @@ macro_rules! assert_array_approx_values_option {
     }};
 }
 
-
 /// Parse XML content from a string using a YAML config string.
 ///
 /// Panics on parse or config errors -- intended for tests where
 /// the XML and config are known to be valid.
 #[allow(dead_code)]
 pub fn parse_xml_str(xml: &str, yaml_config: &str) -> IndexMap<String, RecordBatch> {
-    let config: Config = serde_yaml::from_str(yaml_config)
-        .unwrap_or_else(|e| panic!("Invalid YAML config: {e}"));
+    let config: Config =
+        serde_yaml::from_str(yaml_config).unwrap_or_else(|e| panic!("Invalid YAML config: {e}"));
     parse_xml(xml.as_bytes(), &config).unwrap_or_else(|e| panic!("XML parsing failed: {e:?}"))
 }
 
@@ -207,8 +206,8 @@ pub fn parse_xml_file(xml: &str, yaml_config: &str) -> IndexMap<String, RecordBa
     let mut xml_file = NamedTempFile::new().expect("Failed to create temp file");
     write!(xml_file, "{}", xml).expect("Failed to write XML to temp file");
 
-    let config: Config = serde_yaml::from_str(yaml_config)
-        .unwrap_or_else(|e| panic!("Invalid YAML config: {e}"));
+    let config: Config =
+        serde_yaml::from_str(yaml_config).unwrap_or_else(|e| panic!("Invalid YAML config: {e}"));
 
     let file = File::open(xml_file.path()).expect("Failed to open temp file");
     let reader = BufReader::new(file);

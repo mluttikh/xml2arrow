@@ -695,8 +695,7 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                 let name_bytes = e.local_name().into_inner();
                 let node_id = path_tracker.enter(name_bytes, &xml_to_arrow_converter.registry);
 
-                let is_table = node_id
-                    .is_some_and(|id| xml_to_arrow_converter.is_table_path(id));
+                let is_table = node_id.is_some_and(|id| xml_to_arrow_converter.is_table_path(id));
 
                 if is_table {
                     xml_to_arrow_converter.start_table(node_id.unwrap());
@@ -721,8 +720,7 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                 let name_bytes = e.local_name().into_inner();
                 let node_id = path_tracker.enter(name_bytes, &xml_to_arrow_converter.registry);
 
-                let is_table = node_id
-                    .is_some_and(|id| xml_to_arrow_converter.is_table_path(id));
+                let is_table = node_id.is_some_and(|id| xml_to_arrow_converter.is_table_path(id));
 
                 if is_table {
                     xml_to_arrow_converter.start_table(node_id.unwrap());

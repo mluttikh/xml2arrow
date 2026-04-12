@@ -60,9 +60,8 @@ fn generate_xml(num_measurements: usize, num_sensors: usize) -> String {
 
         for measurement_idx in 0..num_measurements {
             let timestamp_ms = measurement_idx as u64;
-            let value = 101325.0
-                + (measurement_idx as f64).sin() * 5000.0
-                + (sensor_id as f64) * 100.0;
+            let value =
+                101325.0 + (measurement_idx as f64).sin() * 5000.0 + (sensor_id as f64) * 100.0;
             let temperature = 20.0 + (measurement_idx as f64 / 100.0).sin() * 5.0;
             let quality = if measurement_idx % 97 == 0 { 1 } else { 0 };
             xml.push_str(&format!(

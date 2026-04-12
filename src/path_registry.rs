@@ -337,9 +337,7 @@ impl PathTracker {
     #[inline]
     #[allow(dead_code)]
     pub fn is_current_known(&self) -> bool {
-        self.node_stack
-            .last()
-            .is_some_and(|(_, known)| *known)
+        self.node_stack.last().is_some_and(|(_, known)| *known)
     }
 
     /// Returns the depth of the current path (number of segments from root).
