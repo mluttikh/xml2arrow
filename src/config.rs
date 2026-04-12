@@ -755,17 +755,21 @@ mod tests {
                     "table_a",
                     "/root/a",
                     vec![],
-                    vec![FieldConfigBuilder::new("id", "/root/a/id", DType::Int32)
-                        .build()
-                        .unwrap()],
+                    vec![
+                        FieldConfigBuilder::new("id", "/root/a/id", DType::Int32)
+                            .build()
+                            .unwrap(),
+                    ],
                 ),
                 TableConfig::new(
                     "table_b",
                     "/root/b",
                     vec![],
-                    vec![FieldConfigBuilder::new("id", "/root/b/id", DType::Int32)
-                        .build()
-                        .unwrap()],
+                    vec![
+                        FieldConfigBuilder::new("id", "/root/b/id", DType::Int32)
+                            .build()
+                            .unwrap(),
+                    ],
                 ),
             ],
         };
@@ -780,9 +784,11 @@ mod tests {
                 "items",
                 "/root",
                 vec![],
-                vec![FieldConfigBuilder::new("", "/root/value", DType::Utf8)
-                    .build()
-                    .unwrap()],
+                vec![
+                    FieldConfigBuilder::new("", "/root/value", DType::Utf8)
+                        .build()
+                        .unwrap(),
+                ],
             )],
         };
         let err = config.validate().unwrap_err();
@@ -798,9 +804,11 @@ mod tests {
                 "items",
                 "/root",
                 vec![],
-                vec![FieldConfigBuilder::new("value", "", DType::Utf8)
-                    .build()
-                    .unwrap()],
+                vec![
+                    FieldConfigBuilder::new("value", "", DType::Utf8)
+                        .build()
+                        .unwrap(),
+                ],
             )],
         };
         let err = config.validate().unwrap_err();
