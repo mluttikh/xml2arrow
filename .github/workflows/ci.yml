@@ -58,4 +58,5 @@ jobs:
           fail-on-alert: true
           comment-on-alert: true
           summary-always: true
+          save-data-file: false
           github-token: ${{ secrets.GITHUB_TOKEN }}
