@@ -1,4 +1,6 @@
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use codspeed_criterion_compat::{
+    BenchmarkId, Criterion, Throughput, criterion_group, criterion_main,
+};
 use std::time::Duration;
 use xml2arrow::{Config, parse_xml};
 
