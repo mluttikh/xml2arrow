@@ -10,12 +10,31 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  check:
+    name: Check & Lint
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-      - name: Build
-        run: cargo build --verbose
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Format check
+        run: cargo fmt --check
+      - name: Clippy (default features)
+        run: cargo clippy -- -D warnings
+      - name: Clippy (python feature)
+        run: cargo clippy --features python -- -D warnings
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Run tests
-        run: cargo test --verbose
+        run: cargo test

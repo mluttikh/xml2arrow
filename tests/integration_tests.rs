@@ -139,8 +139,7 @@ tables:
     )
     .unwrap();
 
-    let xml_file =
-        write_xml_tempfile(r#"<data><item><id>1</id><value>1000</value></item></data>"#);
+    let xml_file = write_xml_tempfile(r#"<data><item><id>1</id><value>1000</value></item></data>"#);
 
     // Tests Config::from_yaml_file specifically
     let config = Config::from_yaml_file(yaml_file.path()).unwrap();
@@ -167,7 +166,10 @@ fn test_invalid_yaml_config_returns_error() {
 #[test]
 fn test_missing_yaml_config_returns_error() {
     let result = Config::from_yaml_file("/tmp/nonexistent_xml2arrow_test_config.yaml");
-    assert!(result.is_err(), "Missing config file should produce an error");
+    assert!(
+        result.is_err(),
+        "Missing config file should produce an error"
+    );
 }
 
 #[test]
