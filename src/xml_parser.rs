@@ -2,9 +2,9 @@
 //!
 //! This module is intentionally organized as a top-down narrative of the parsing flow:
 //! 1) Build per-table and per-field builders that accumulate values into Arrow arrays.
-//! 2) Stream XML events and track the current path using integer IDs (via PathRegistry).
+//! 2) Stream XML events and track the current path using integer IDs (via `PathRegistry`).
 //! 3) On element boundaries, push/pop table context and finalize rows deterministically.
-//! 4) After streaming, finish builders into RecordBatches and return an ordered map.
+//! 4) After streaming, finish builders into `RecordBatch`es and return an ordered map.
 //!
 //! The guiding goals are: single-pass parsing, predictable O(1) lookups, and minimal
 //! allocation in the hot path.
@@ -203,7 +203,7 @@ macro_rules! append_float {
 }
 
 impl FieldBuilder {
-    fn new(field_config: &FieldConfig) -> Result<Self> {
+    fn new(field_config: &FieldConfig) -> Self {
         let array_builder = TypedArrayBuilder::from_dtype(field_config.data_type);
         let field = Field::new(
             &field_config.name,
@@ -211,14 +211,14 @@ impl FieldBuilder {
             field_config.nullable,
         );
         let has_transform = field_config.scale.is_some() || field_config.offset.is_some();
-        Ok(Self {
+        Self {
             field_config: field_config.clone(),
             field,
             array_builder,
             has_value: false,
             has_transform,
             current_value: String::with_capacity(128),
-        })
+        }
     }
 
     #[inline]
@@ -229,6 +229,7 @@ impl FieldBuilder {
 
     /// Appends the currently accumulated value to the Arrow array builder,
     /// performing type conversion and handling nulls.
+    #[allow(clippy::too_many_lines)]
     fn append_current_value(&mut self) -> Result<()> {
         let value = self.current_value.as_str();
         let has_value = self.has_value;
@@ -256,6 +257,7 @@ impl FieldBuilder {
                 if self.has_transform {
                     if has_value {
                         match fast_float2::parse::<f32, _>(value) {
+                            #[allow(clippy::cast_possible_truncation)]
                             Ok(mut val) => {
                                 if let Some(scale) = fc.scale {
                                     val *= scale as f32;
@@ -356,7 +358,7 @@ impl FieldBuilder {
 // A TableBuilder owns per-field builders plus index builders for nested levels.
 // It finalizes rows into a RecordBatch in a single, ordered pass.
 ///
-/// Builds an Arrow RecordBatch for a single table defined in the configuration.
+/// Builds an Arrow `RecordBatch` for a single table defined in the configuration.
 ///
 /// This struct manages the building of a single Arrow `RecordBatch` by collecting
 /// data for each field defined in the table's configuration. It also handles
@@ -377,25 +379,25 @@ struct TableBuilder {
 }
 
 impl TableBuilder {
-    fn new(table_config: &TableConfig) -> Result<Self> {
+    fn new(table_config: &TableConfig) -> Self {
         let mut index_builders = Vec::with_capacity(table_config.levels.len());
         index_builders.resize_with(table_config.levels.len(), UInt32Builder::default);
         let mut field_builders = Vec::with_capacity(table_config.fields.len());
         for field_config in &table_config.fields {
-            field_builders.push(FieldBuilder::new(field_config)?);
+            field_builders.push(FieldBuilder::new(field_config));
         }
-        Ok(Self {
+        Self {
             table_config: table_config.clone(),
             index_builders,
             field_builders,
             row_index: 0,
-        })
+        }
     }
 
     fn end_row(&mut self, indices: &[u32]) -> Result<()> {
         // Append the current row's data to the arrays
         self.save_row(indices)?;
-        for field_builder in self.field_builders.iter_mut() {
+        for field_builder in &mut self.field_builders {
             field_builder.has_value = false;
             field_builder.current_value.clear();
         }
@@ -416,11 +418,11 @@ impl TableBuilder {
         // in order of hierarchy. These align 1:1 with the `levels` defined
         // in this table's configuration.
         for (index, index_builder) in indices.iter().zip(&mut self.index_builders) {
-            index_builder.append_value(*index)
+            index_builder.append_value(*index);
         }
 
         // 2. Write the actual field values for this table.
-        for field_builder in self.field_builders.iter_mut() {
+        for field_builder in &mut self.field_builders {
             field_builder.append_current_value()?;
         }
 
@@ -440,12 +442,12 @@ impl TableBuilder {
             .zip(&mut self.index_builders)
         {
             arrays.push(Arc::new(index_builder.finish()));
-            fields.push(Field::new(format!("<{}>", level), DataType::UInt32, false));
+            fields.push(Field::new(format!("<{level}>"), DataType::UInt32, false));
         }
-        for field_builder in self.field_builders.iter_mut() {
+        for field_builder in &mut self.field_builders {
             let array = field_builder.finish();
             arrays.push(array);
-            fields.push(field_builder.field.clone())
+            fields.push(field_builder.field.clone());
         }
         let schema = Schema::new(fields);
         Ok(RecordBatch::try_new(Arc::new(schema), arrays).map_err(|e| {
@@ -460,16 +462,16 @@ impl TableBuilder {
 /// Entry on the table stack tracking active tables during parsing.
 #[derive(Debug, Clone)]
 struct TableStackEntry {
-    /// The table index in the table_builders array.
+    /// The table index in the `table_builders` array.
     table_idx: usize,
     /// The node ID in the path registry.
     node_id: PathNodeId,
 }
 
-/// Converts parsed XML events into Arrow RecordBatches.
+/// Converts parsed XML events into Arrow `RecordBatch`es.
 ///
 /// This struct maintains a stack of table builders to handle nested XML structures.
-/// It uses integer-based path indexing via PathRegistry for efficient lookups.
+/// It uses integer-based path indexing via `PathRegistry` for efficient lookups.
 struct XmlToArrowConverter {
     /// Table builders for each table defined in the configuration, indexed by position.
     table_builders: Vec<TableBuilder>,
@@ -500,7 +502,7 @@ impl XmlToArrowConverter {
 
         let mut table_builders = Vec::with_capacity(config.tables.len());
         for table_config in &config.tables {
-            table_builders.push(TableBuilder::new(table_config)?);
+            table_builders.push(TableBuilder::new(table_config));
         }
 
         let builder_stack = Vec::new();
@@ -520,7 +522,7 @@ impl XmlToArrowConverter {
         self.registry.is_table_path(node_id)
     }
 
-    /// Check if there's a root-level table (xml_path: /) that has fields defined.
+    /// Check if there's a root-level table (`xml_path`: /) that has fields defined.
     fn has_root_table_with_fields(&self) -> bool {
         if let Some(table_idx) = self.registry.get_table_index(PathNodeId::ROOT) {
             !self.table_builders[table_idx].field_builders.is_empty()
@@ -553,13 +555,14 @@ impl XmlToArrowConverter {
     fn end_current_row(&mut self) -> Result<()> {
         // Collect parent indices into reusable buffer to avoid per-row allocation.
         self.parent_indices_buffer.clear();
-        for entry in self.builder_stack.iter() {
+        for entry in &self.builder_stack {
             // Skip the root table (xml_path: /) when collecting parent indices.
             // The root table is special - it represents the document root and shouldn't
             // contribute to parent indices for child tables.
             if entry.node_id == PathNodeId::ROOT {
                 continue;
             }
+            #[allow(clippy::cast_possible_truncation)] // Row count won't exceed u32::MAX
             self.parent_indices_buffer
                 .push(self.table_builders[entry.table_idx].row_index as u32);
         }
@@ -569,18 +572,16 @@ impl XmlToArrowConverter {
         Ok(())
     }
 
-    fn start_table(&mut self, node_id: PathNodeId) -> Result<()> {
+    fn start_table(&mut self, node_id: PathNodeId) {
         if let Some(table_idx) = self.registry.get_table_index(node_id) {
             self.builder_stack
                 .push(TableStackEntry { table_idx, node_id });
             self.table_builders[table_idx].row_index = 0;
         }
-        Ok(())
     }
 
-    fn end_table(&mut self) -> Result<()> {
+    fn end_table(&mut self) {
         self.builder_stack.pop();
-        Ok(())
     }
 
     fn finish(mut self) -> Result<IndexMap<String, arrow::record_batch::RecordBatch>> {
@@ -614,6 +615,11 @@ impl XmlToArrowConverter {
 ///     and values are the corresponding Arrow `RecordBatch` objects.
 /// *   `Err(Error)`: An `Error` value if any error occurs during parsing, configuration, or Arrow table creation.
 ///
+/// # Errors
+///
+/// Returns an error if configuration validation fails, XML parsing encounters invalid
+/// data, value conversion fails, or Arrow `RecordBatch` creation fails.
+///
 /// # Example
 ///
 /// ```rust
@@ -642,7 +648,7 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
     // level indexing. Tables with xml_path: / and no fields are just used for
     // hierarchy purposes and don't need to be on the stack.
     if xml_to_arrow_converter.has_root_table_with_fields() {
-        xml_to_arrow_converter.start_table(PathNodeId::ROOT)?;
+        xml_to_arrow_converter.start_table(PathNodeId::ROOT);
     }
 
     // Use specialized parsing logic based on whether attribute parsing is required.
@@ -669,6 +675,7 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
     Ok(batches)
 }
 
+#[allow(clippy::too_many_lines)]
 fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
     reader: &mut Reader<B>,
     path_tracker: &mut PathTracker,
@@ -689,27 +696,25 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                 let node_id = path_tracker.enter(name_bytes, &xml_to_arrow_converter.registry);
 
                 let is_table = node_id
-                    .map(|id| xml_to_arrow_converter.is_table_path(id))
-                    .unwrap_or(false);
+                    .is_some_and(|id| xml_to_arrow_converter.is_table_path(id));
 
                 if is_table {
-                    xml_to_arrow_converter.start_table(node_id.unwrap())?;
+                    xml_to_arrow_converter.start_table(node_id.unwrap());
                 }
 
                 element_stack.push((node_id, is_table));
 
-                if PARSE_ATTRIBUTES {
-                    if let Some(id) = node_id {
-                        if xml_to_arrow_converter.registry.has_attribute_children(id) {
-                            parse_attributes(
-                                reader.decoder(),
-                                e.attributes(),
-                                path_tracker,
-                                xml_to_arrow_converter,
-                                &mut attr_name_buffer,
-                            )?;
-                        }
-                    }
+                if PARSE_ATTRIBUTES
+                    && let Some(id) = node_id
+                    && xml_to_arrow_converter.registry.has_attribute_children(id)
+                {
+                    parse_attributes(
+                        reader.decoder(),
+                        e.attributes(),
+                        path_tracker,
+                        xml_to_arrow_converter,
+                        &mut attr_name_buffer,
+                    )?;
                 }
             }
             Event::Empty(e) => {
@@ -717,30 +722,28 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                 let node_id = path_tracker.enter(name_bytes, &xml_to_arrow_converter.registry);
 
                 let is_table = node_id
-                    .map(|id| xml_to_arrow_converter.is_table_path(id))
-                    .unwrap_or(false);
+                    .is_some_and(|id| xml_to_arrow_converter.is_table_path(id));
 
                 if is_table {
-                    xml_to_arrow_converter.start_table(node_id.unwrap())?;
+                    xml_to_arrow_converter.start_table(node_id.unwrap());
                 }
 
-                if PARSE_ATTRIBUTES {
-                    if let Some(id) = node_id {
-                        if xml_to_arrow_converter.registry.has_attribute_children(id) {
-                            parse_attributes(
-                                reader.decoder(),
-                                e.attributes(),
-                                path_tracker,
-                                xml_to_arrow_converter,
-                                &mut attr_name_buffer,
-                            )?;
-                        }
-                    }
+                if PARSE_ATTRIBUTES
+                    && let Some(id) = node_id
+                    && xml_to_arrow_converter.registry.has_attribute_children(id)
+                {
+                    parse_attributes(
+                        reader.decoder(),
+                        e.attributes(),
+                        path_tracker,
+                        xml_to_arrow_converter,
+                        &mut attr_name_buffer,
+                    )?;
                 }
 
                 // Immediately close: empty elements have no children or text
                 if is_table {
-                    xml_to_arrow_converter.end_table()?;
+                    xml_to_arrow_converter.end_table();
                 }
                 path_tracker.leave();
 
@@ -752,27 +755,24 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                 } else if xml_to_arrow_converter
                     .registry
                     .is_table_path(PathNodeId::ROOT)
+                    && path_tracker.current() == Some(PathNodeId::ROOT)
                 {
-                    if path_tracker.current() == Some(PathNodeId::ROOT) {
-                        xml_to_arrow_converter.end_current_row()?;
-                    }
+                    xml_to_arrow_converter.end_current_row()?;
                 }
 
                 // Check stop paths
-                if let Some(node_id) = node_id {
-                    if !stop_node_ids.is_empty()
-                        && stop_node_ids.iter().any(|stop_id| *stop_id == node_id)
-                    {
-                        break;
-                    }
+                if let Some(node_id) = node_id
+                    && stop_node_ids.contains(&node_id)
+                {
+                    break;
                 }
             }
             Event::GeneralRef(e) => {
                 if let Some(node_id) = path_tracker.current() {
                     let text = e.into_inner();
                     let text = std::str::from_utf8(&text)?;
-                    let text = escape::resolve_predefined_entity(text).unwrap_or_default();
-                    xml_to_arrow_converter.set_field_value_for_node(node_id, &text);
+                    let resolved = escape::resolve_predefined_entity(text).unwrap_or_default();
+                    xml_to_arrow_converter.set_field_value_for_node(node_id, resolved);
                 }
             }
             Event::Text(e) => {
@@ -793,7 +793,7 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                 // Pop from our element stack
                 if let Some((node_id, is_table)) = element_stack.pop() {
                     if is_table {
-                        xml_to_arrow_converter.end_table()?;
+                        xml_to_arrow_converter.end_table();
                     }
 
                     // Leave the current path
@@ -804,26 +804,21 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                         if parent_is_table {
                             xml_to_arrow_converter.end_current_row()?;
                         }
-                    } else {
+                    } else if xml_to_arrow_converter
+                        .registry
+                        .is_table_path(PathNodeId::ROOT)
+                        && path_tracker.current() == Some(PathNodeId::ROOT)
+                    {
                         // Check root table case
-                        if xml_to_arrow_converter
-                            .registry
-                            .is_table_path(PathNodeId::ROOT)
-                        {
-                            if path_tracker.current() == Some(PathNodeId::ROOT) {
-                                xml_to_arrow_converter.end_current_row()?;
-                            }
-                        }
+                        xml_to_arrow_converter.end_current_row()?;
                     }
 
                     // Stop after closing the configured path, so header-only reads
                     // can exit without scanning the remainder of the XML.
-                    if let Some(node_id) = node_id {
-                        if !stop_node_ids.is_empty()
-                            && stop_node_ids.iter().any(|stop_id| *stop_id == node_id)
-                        {
-                            break;
-                        }
+                    if let Some(node_id) = node_id
+                        && stop_node_ids.contains(&node_id)
+                    {
+                        break;
                     }
                 }
             }

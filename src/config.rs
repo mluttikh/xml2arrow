@@ -9,7 +9,7 @@ use arrow::datatypes::DataType;
 use serde::{Deserialize, Serialize};
 
 /// Configuration for the XML parser.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub struct ParserOptions {
     /// Whether to trim whitespace from text nodes. Defaults to false.
     #[serde(default)]
@@ -17,15 +17,6 @@ pub struct ParserOptions {
     /// Optional XML paths where parsing should stop after the closing tag.
     #[serde(default)]
     pub stop_at_paths: Vec<String>,
-}
-
-impl Default for ParserOptions {
-    fn default() -> Self {
-        Self {
-            trim_text: false,
-            stop_at_paths: Vec::new(),
-        }
-    }
 }
 
 /// Top-level configuration for XML to Arrow conversion.
@@ -43,6 +34,8 @@ pub struct Config {
 
 impl Config {
     /// Validates the configuration by checking all field configurations.
+    ///
+    /// # Errors
     ///
     /// Returns an error if any field uses an unsupported combination (e.g., scale/offset on non-float types).
     pub fn validate(&self) -> Result<()> {
@@ -118,6 +111,7 @@ impl Config {
     /// # Returns
     ///
     /// `true` if the configuration contains at least one attribute to parse, `false` otherwise.
+    #[must_use]
     pub fn requires_attribute_parsing(&self) -> bool {
         for table in &self.tables {
             for field in &table.fields {
@@ -142,7 +136,7 @@ pub struct TableConfig {
     /// The XML path to the table elements. For example `/data/dataset/table`.
     pub xml_path: String,
     /// The levels of nesting for this table. This is used to create the indices for nested tables.
-    /// For example if the xml_path is `/data/dataset/table/item/properties` the levels should
+    /// For example if the `xml_path` is `/data/dataset/table/item/properties` the levels should
     /// be `["table", "properties"]`.
     pub levels: Vec<String>,
     /// A vector of `FieldConfig` structs, each defining a field (column) in the table.
@@ -150,6 +144,7 @@ pub struct TableConfig {
 }
 
 impl TableConfig {
+    #[must_use]
     pub fn new(name: &str, xml_path: &str, levels: Vec<String>, fields: Vec<FieldConfig>) -> Self {
         Self {
             name: name.to_string(),
@@ -183,6 +178,10 @@ pub struct FieldConfig {
 
 impl FieldConfig {
     /// Validates that scale/offset are only used with floating point data types.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if scale or offset is set on a non-float data type.
     pub fn validate(&self) -> Result<()> {
         match self.data_type {
             DType::Float32 | DType::Float64 => Ok(()),
@@ -232,6 +231,7 @@ impl FieldConfigBuilder {
     /// # Returns
     ///
     /// A new `FieldConfigBuilder` instance with the provided properties.
+    #[must_use]
     pub fn new(name: &str, xml_path: &str, data_type: DType) -> Self {
         Self {
             name: name.to_string(),
@@ -252,6 +252,7 @@ impl FieldConfigBuilder {
     /// # Returns
     ///
     /// The builder instance itself, allowing for method chaining.
+    #[must_use]
     pub fn nullable(mut self, nullable: bool) -> Self {
         self.nullable = nullable;
         self
@@ -268,6 +269,7 @@ impl FieldConfigBuilder {
     /// # Returns
     ///
     /// The builder instance itself, allowing for method chaining.
+    #[must_use]
     pub fn scale(mut self, scale: f64) -> Self {
         self.scale = Some(scale);
         self
@@ -284,6 +286,7 @@ impl FieldConfigBuilder {
     /// # Returns
     ///
     /// The builder instance itself, allowing for method chaining.
+    #[must_use]
     pub fn offset(mut self, offset: f64) -> Self {
         self.offset = Some(offset);
         self
@@ -295,7 +298,11 @@ impl FieldConfigBuilder {
     ///
     /// # Returns
     ///
-    /// A `FieldConfig` struct with the configured properties
+    /// A `FieldConfig` struct with the configured properties.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if scale or offset is set on a non-float data type.
     pub fn build(self) -> Result<FieldConfig> {
         let cfg = FieldConfig {
             name: self.name,
@@ -329,7 +336,7 @@ pub enum DType {
 }
 
 impl DType {
-    pub(crate) fn as_arrow_type(&self) -> DataType {
+    pub(crate) fn as_arrow_type(self) -> DataType {
         match self {
             DType::Boolean => DataType::Boolean,
             DType::Float32 => DataType::Float32,

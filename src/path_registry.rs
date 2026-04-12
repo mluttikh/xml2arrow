@@ -51,7 +51,7 @@ impl PathNodeId {
 pub struct PathNodeInfo {
     /// If this path represents a table, store the table index.
     pub table_index: Option<usize>,
-    /// Field indices: (table_idx, field_idx) pairs for fields at this path.
+    /// Field indices: (`table_idx`, `field_idx`) pairs for fields at this path.
     pub field_indices: Vec<(usize, usize)>,
     /// Whether any child of this node has an attribute path (starts with "@").
     /// Used to skip attribute parsing for elements that have no attribute fields configured.
@@ -205,6 +205,7 @@ impl PathRegistry {
         }
 
         // Create a new node and wire it into the trie.
+        #[allow(clippy::cast_possible_truncation)] // Node count will never exceed u32::MAX
         let new_id = PathNodeId(self.children.len() as u32);
         self.children.push(FxHashMap::default());
         self.node_info.push(PathNodeInfo::default());
@@ -264,8 +265,8 @@ impl PathRegistry {
 /// subtree. This avoids repeated registry lookups for irrelevant branches.
 #[derive(Debug)]
 pub struct PathTracker {
-    /// Stack of (node_id, is_known_path) pairs representing current XML nesting.
-    /// is_known_path is true if the node exists in the registry (path is in config).
+    /// Stack of (`node_id`, `is_known_path`) pairs representing current XML nesting.
+    /// `is_known_path` is true if the node exists in the registry (path is in config).
     node_stack: Vec<(PathNodeId, bool)>,
 }
 
@@ -329,8 +330,7 @@ impl PathTracker {
     pub fn current_or_root(&self) -> PathNodeId {
         self.node_stack
             .last()
-            .map(|(id, _)| *id)
-            .unwrap_or(PathNodeId::ROOT)
+            .map_or(PathNodeId::ROOT, |(id, _)| *id)
     }
 
     /// Returns true if the current path is known (exists in the registry).
@@ -339,8 +339,7 @@ impl PathTracker {
     pub fn is_current_known(&self) -> bool {
         self.node_stack
             .last()
-            .map(|(_, known)| *known)
-            .unwrap_or(false)
+            .is_some_and(|(_, known)| *known)
     }
 
     /// Returns the depth of the current path (number of segments from root).
