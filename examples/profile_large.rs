@@ -90,7 +90,7 @@ fn generate_xml(num_measurements: usize, num_sensors: usize) -> String {
 }
 
 fn main() {
-    let config: Config = serde_yaml::from_str(
+    let config: Config = yaml_serde::from_str(
         r#"
 parser_options:
   trim_text: false

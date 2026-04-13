@@ -1801,7 +1801,7 @@ mod tests {
                       {transform}
             "#
         );
-        let config: Config = serde_yaml::from_str(&yaml).unwrap();
+        let config: Config = yaml_serde::from_str(&yaml).unwrap();
         assert!(
             config.validate().is_err(),
             "Expected validation error for {transform} on {dtype}"
@@ -1970,7 +1970,7 @@ mod tests {
                       data_type: {dtype}
             "#
         );
-        let config: Config = serde_yaml::from_str(&yaml_config).unwrap();
+        let config: Config = yaml_serde::from_str(&yaml_config).unwrap();
         let result = parse_xml(xml_content.as_bytes(), &config);
         assert!(
             result.is_err(),
@@ -4124,7 +4124,7 @@ mod tests {
                       nullable: false
             "#
         );
-        let config: Config = serde_yaml::from_str(&yaml_config).unwrap();
+        let config: Config = yaml_serde::from_str(&yaml_config).unwrap();
         let result = parse_xml(
             "<data><row><other>x</other></row></data>".as_bytes(),
             &config,

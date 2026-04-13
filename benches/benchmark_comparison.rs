@@ -99,7 +99,7 @@ fn create_realistic_xml(num_measurements: usize, num_sensors: usize) -> String {
 }
 
 fn create_realistic_config() -> Config {
-    serde_yaml::from_str(
+    yaml_serde::from_str(
         r#"
 parser_options:
   trim_text: false

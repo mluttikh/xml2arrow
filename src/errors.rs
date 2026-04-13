@@ -23,7 +23,7 @@ pub enum Error {
     XmlParseEncoding(quick_xml::encoding::EncodingError),
     /// Errors from the Serde YAML crate during configuration parsing
     #[from]
-    Yaml(serde_yaml::Error),
+    Yaml(yaml_serde::Error),
     /// Standard I/O errors
     #[from]
     Io(std::io::Error),

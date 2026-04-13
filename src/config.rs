@@ -128,7 +128,7 @@ impl Config {
     pub fn from_yaml_file(path: impl AsRef<Path>) -> Result<Self> {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
-        let config: Config = serde_yaml::from_reader(reader).map_err(Error::Yaml)?;
+        let config: Config = yaml_serde::from_reader(reader).map_err(Error::Yaml)?;
         config.validate()?;
         Ok(config)
     }
@@ -157,7 +157,7 @@ impl Config {
     pub fn to_yaml_file(&self, path: impl AsRef<Path>) -> Result<()> {
         let file = File::create(path)?;
         let writer = BufWriter::new(file);
-        serde_yaml::to_writer(writer, self).map_err(Error::Yaml)
+        yaml_serde::to_writer(writer, self).map_err(Error::Yaml)
     }
 
     /// Checks if the configuration contains any fields that require attribute parsing.
@@ -418,7 +418,7 @@ impl DType {
 #[macro_export]
 macro_rules! config_from_yaml {
     ($yaml:expr) => {{
-        match serde_yaml::from_str::<$crate::config::Config>($yaml) {
+        match yaml_serde::from_str::<$crate::config::Config>($yaml) {
             Ok(config) => {
                 if let Err(e) = config.validate() {
                     panic!("Invalid configuration: {:?}", e);
@@ -517,7 +517,7 @@ mod tests {
             data_type: Utf8
             "#;
 
-        let field_config: FieldConfig = serde_yaml::from_str(yaml_string).unwrap();
+        let field_config: FieldConfig = yaml_serde::from_str(yaml_string).unwrap();
         assert!(!field_config.nullable);
     }
 
@@ -535,7 +535,7 @@ mod tests {
                     nullable: true
             "#;
 
-        let config: Config = serde_yaml::from_str(yaml_string).unwrap();
+        let config: Config = yaml_serde::from_str(yaml_string).unwrap();
         assert!(
             !config.parser_options.trim_text,
             "trim_text should default to false"
@@ -550,7 +550,7 @@ mod tests {
             tables: []
             "#;
 
-        let config: Config = serde_yaml::from_str(yaml_string).unwrap();
+        let config: Config = yaml_serde::from_str(yaml_string).unwrap();
         assert!(
             config.parser_options.trim_text,
             "trim_text should be true when explicitly set"
@@ -564,7 +564,7 @@ mod tests {
             tables: []
             "#;
 
-        let config: Config = serde_yaml::from_str(yaml_string).unwrap();
+        let config: Config = yaml_serde::from_str(yaml_string).unwrap();
         assert!(
             !config.parser_options.trim_text,
             "trim_text should default to false when parser_options is empty"
@@ -573,7 +573,7 @@ mod tests {
 
     #[test]
     fn test_requires_attr_parsing_with_attribute_fields() {
-        let config: Config = serde_yaml::from_str(
+        let config: Config = yaml_serde::from_str(
             r#"
             tables:
               - name: test
@@ -591,7 +591,7 @@ mod tests {
 
     #[test]
     fn test_requires_attr_parsing_without_attribute_fields() {
-        let config: Config = serde_yaml::from_str(
+        let config: Config = yaml_serde::from_str(
             r#"
             tables:
               - name: test
@@ -609,7 +609,7 @@ mod tests {
 
     #[test]
     fn test_requires_attr_parsing_with_mixed_fields() {
-        let config: Config = serde_yaml::from_str(
+        let config: Config = yaml_serde::from_str(
             r#"
             tables:
               - name: test

@@ -174,7 +174,7 @@ fn test_missing_yaml_config_returns_error() {
 
 #[test]
 fn test_config_reused_across_multiple_files() {
-    let config: Config = serde_yaml::from_str(
+    let config: Config = yaml_serde::from_str(
         r#"
         tables:
           - name: items
@@ -227,7 +227,7 @@ fn test_utf8_bom_file_parsed_correctly() {
     )
     .unwrap();
 
-    let config: Config = serde_yaml::from_str(
+    let config: Config = yaml_serde::from_str(
         r#"
         tables:
           - name: items
@@ -259,7 +259,7 @@ fn test_empty_file_returns_empty_batch() {
     let xml_file = NamedTempFile::new().unwrap();
     // File is empty -- no content written
 
-    let config: Config = serde_yaml::from_str(
+    let config: Config = yaml_serde::from_str(
         r#"
         tables:
           - name: items
@@ -287,7 +287,7 @@ fn test_empty_file_returns_empty_batch() {
 fn test_whitespace_only_file_returns_empty_batch() {
     let xml_file = write_xml_tempfile("   \n\t\n   ");
 
-    let config: Config = serde_yaml::from_str(
+    let config: Config = yaml_serde::from_str(
         r#"
         tables:
           - name: items
