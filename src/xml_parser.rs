@@ -675,74 +675,214 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
     Ok(batches)
 }
 
+/// Parses XML data from an in-memory byte slice into Arrow record batches.
+///
+/// This is the zero-copy variant of [`parse_xml`]. When the XML data is already
+/// in memory, this function avoids per-event buffer copies by using quick-xml's
+/// slice reader, which returns events that borrow directly from the input.
+/// For streaming sources (files, network), use [`parse_xml`] instead.
+///
+/// # Arguments
+///
+/// * `xml`: A byte slice containing the XML data.
+/// * `config`: A `Config` struct that specifies the tables, fields, and data types to extract.
+///
+/// # Returns
+///
+/// An `IndexMap<String, RecordBatch>` where keys are table names and values are Arrow batches.
+///
+/// # Errors
+///
+/// Returns an error if configuration validation fails, XML parsing encounters invalid
+/// data, value conversion fails, or Arrow `RecordBatch` creation fails.
+///
+/// # Example
+///
+/// ```rust
+/// use xml2arrow::{parse_xml_slice, config::{Config, TableConfig, FieldConfigBuilder, DType}};
+///
+/// let xml = b"<data><item><value>123</value></item></data>";
+/// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build().unwrap()];
+/// let tables = vec![TableConfig::new("items", "/data", vec![], fields)];
+/// let config = Config { tables, parser_options: Default::default() };
+/// let record_batches = parse_xml_slice(xml, &config).unwrap();
+/// ```
+pub fn parse_xml_slice(xml: &[u8], config: &Config) -> Result<IndexMap<String, RecordBatch>> {
+    let mut reader = Reader::from_reader(xml);
+    if config.parser_options.trim_text {
+        reader.config_mut().trim_text(true);
+    }
+    let mut xml_to_arrow_converter = XmlToArrowConverter::from_config(config)?;
+    let mut path_tracker = PathTracker::new();
+
+    if xml_to_arrow_converter.has_root_table_with_fields() {
+        xml_to_arrow_converter.start_table(PathNodeId::ROOT);
+    }
+
+    let stop_node_ids = std::mem::take(&mut xml_to_arrow_converter.stop_node_ids);
+    if config.requires_attribute_parsing() {
+        process_xml_events_slice::<true>(
+            &mut reader,
+            &mut path_tracker,
+            &mut xml_to_arrow_converter,
+            &stop_node_ids,
+        )?;
+    } else {
+        process_xml_events_slice::<false>(
+            &mut reader,
+            &mut path_tracker,
+            &mut xml_to_arrow_converter,
+            &stop_node_ids,
+        )?;
+    }
+
+    let batches = xml_to_arrow_converter.finish()?;
+    Ok(batches)
+}
+
+// --- Event loop implementations ---
+//
+// Two loop variants exist to match how events are read from quick-xml:
+//
+// 1) `process_xml_events` (buffered): uses `read_event_into(&mut buf)` which
+//    copies each event into a reusable buffer. Required for streaming readers.
+//
+// 2) `process_xml_events_slice` (zero-copy): uses `read_event()` on
+//    `Reader<&[u8]>` which returns events that borrow directly from the input
+//    slice, eliminating per-event copies.
+//
+// Both delegate to `handle_event` for the actual event processing so the
+// match-arm logic is written exactly once.
+
+/// The result of processing a single XML event, telling the event loop
+/// whether to continue reading or stop (on EOF or a stop-path match).
+enum LoopAction {
+    Continue,
+    Break,
+}
+
+/// Processes a single XML event, updating path tracking, table builders, and field values.
+///
+/// This function encapsulates the core event-handling logic shared by both the
+/// buffered and zero-copy parsing paths. Extracting it avoids duplicating the
+/// match arms while keeping each loop wrapper focused solely on how it obtains
+/// the next event.
 #[allow(clippy::too_many_lines)]
-fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
-    reader: &mut Reader<B>,
+#[inline]
+fn handle_event<const PARSE_ATTRIBUTES: bool>(
+    event: Event<'_>,
+    decoder: Decoder,
     path_tracker: &mut PathTracker,
     xml_to_arrow_converter: &mut XmlToArrowConverter,
     stop_node_ids: &[PathNodeId],
-) -> Result<()> {
-    let mut buf = Vec::with_capacity(4096);
-    let mut attr_name_buffer = Vec::with_capacity(64);
+    element_stack: &mut Vec<(Option<PathNodeId>, bool)>,
+    attr_name_buffer: &mut Vec<u8>,
+) -> Result<LoopAction> {
+    match event {
+        Event::Start(e) => {
+            let name_bytes = e.local_name().into_inner();
+            let node_id = path_tracker.enter(name_bytes, &xml_to_arrow_converter.registry);
 
-    // Stack to track (node_id, is_table) for each entered element
-    // This avoids redundant lookups on End events
-    let mut element_stack: Vec<(Option<PathNodeId>, bool)> = Vec::with_capacity(32);
+            let is_table = node_id.is_some_and(|id| xml_to_arrow_converter.is_table_path(id));
 
-    loop {
-        match reader.read_event_into(&mut buf)? {
-            Event::Start(e) => {
-                let name_bytes = e.local_name().into_inner();
-                let node_id = path_tracker.enter(name_bytes, &xml_to_arrow_converter.registry);
-
-                let is_table = node_id.is_some_and(|id| xml_to_arrow_converter.is_table_path(id));
-
-                if is_table {
-                    xml_to_arrow_converter.start_table(node_id.unwrap());
-                }
-
-                element_stack.push((node_id, is_table));
-
-                if PARSE_ATTRIBUTES
-                    && let Some(id) = node_id
-                    && xml_to_arrow_converter.registry.has_attribute_children(id)
-                {
-                    parse_attributes(
-                        reader.decoder(),
-                        e.attributes(),
-                        path_tracker,
-                        xml_to_arrow_converter,
-                        &mut attr_name_buffer,
-                    )?;
-                }
+            if is_table {
+                xml_to_arrow_converter.start_table(node_id.unwrap());
             }
-            Event::Empty(e) => {
-                let name_bytes = e.local_name().into_inner();
-                let node_id = path_tracker.enter(name_bytes, &xml_to_arrow_converter.registry);
 
-                let is_table = node_id.is_some_and(|id| xml_to_arrow_converter.is_table_path(id));
+            element_stack.push((node_id, is_table));
 
-                if is_table {
-                    xml_to_arrow_converter.start_table(node_id.unwrap());
+            if PARSE_ATTRIBUTES
+                && let Some(id) = node_id
+                && xml_to_arrow_converter.registry.has_attribute_children(id)
+            {
+                parse_attributes(
+                    decoder,
+                    e.attributes(),
+                    path_tracker,
+                    xml_to_arrow_converter,
+                    attr_name_buffer,
+                )?;
+            }
+        }
+        Event::Empty(e) => {
+            let name_bytes = e.local_name().into_inner();
+            let node_id = path_tracker.enter(name_bytes, &xml_to_arrow_converter.registry);
+
+            let is_table = node_id.is_some_and(|id| xml_to_arrow_converter.is_table_path(id));
+
+            if is_table {
+                xml_to_arrow_converter.start_table(node_id.unwrap());
+            }
+
+            if PARSE_ATTRIBUTES
+                && let Some(id) = node_id
+                && xml_to_arrow_converter.registry.has_attribute_children(id)
+            {
+                parse_attributes(
+                    decoder,
+                    e.attributes(),
+                    path_tracker,
+                    xml_to_arrow_converter,
+                    attr_name_buffer,
+                )?;
+            }
+
+            // Immediately close: empty elements have no children or text
+            if is_table {
+                xml_to_arrow_converter.end_table();
+            }
+            path_tracker.leave();
+
+            // Check if parent is a table - need to end row
+            if let Some(&(_parent_node_id, parent_is_table)) = element_stack.last() {
+                if parent_is_table {
+                    xml_to_arrow_converter.end_current_row()?;
                 }
+            } else if xml_to_arrow_converter
+                .registry
+                .is_table_path(PathNodeId::ROOT)
+                && path_tracker.current() == Some(PathNodeId::ROOT)
+            {
+                xml_to_arrow_converter.end_current_row()?;
+            }
 
-                if PARSE_ATTRIBUTES
-                    && let Some(id) = node_id
-                    && xml_to_arrow_converter.registry.has_attribute_children(id)
-                {
-                    parse_attributes(
-                        reader.decoder(),
-                        e.attributes(),
-                        path_tracker,
-                        xml_to_arrow_converter,
-                        &mut attr_name_buffer,
-                    )?;
-                }
-
-                // Immediately close: empty elements have no children or text
+            // Check stop paths
+            if let Some(node_id) = node_id
+                && stop_node_ids.contains(&node_id)
+            {
+                return Ok(LoopAction::Break);
+            }
+        }
+        Event::GeneralRef(e) => {
+            if let Some(node_id) = path_tracker.current() {
+                let text = e.into_inner();
+                let text = std::str::from_utf8(&text)?;
+                let resolved = escape::resolve_predefined_entity(text).unwrap_or_default();
+                xml_to_arrow_converter.set_field_value_for_node(node_id, resolved);
+            }
+        }
+        Event::Text(e) => {
+            if let Some(node_id) = path_tracker.current() {
+                let text = e.into_inner();
+                let text = std::str::from_utf8(&text)?;
+                xml_to_arrow_converter.set_field_value_for_node(node_id, text);
+            }
+        }
+        Event::CData(e) => {
+            if let Some(node_id) = path_tracker.current() {
+                let text = e.into_inner();
+                let text = std::str::from_utf8(&text)?;
+                xml_to_arrow_converter.set_field_value_for_node(node_id, text);
+            }
+        }
+        Event::End(_) => {
+            // Pop from our element stack
+            if let Some((node_id, is_table)) = element_stack.pop() {
                 if is_table {
                     xml_to_arrow_converter.end_table();
                 }
+
+                // Leave the current path
                 path_tracker.leave();
 
                 // Check if parent is a table - need to end row
@@ -755,77 +895,92 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
                     .is_table_path(PathNodeId::ROOT)
                     && path_tracker.current() == Some(PathNodeId::ROOT)
                 {
+                    // Check root table case
                     xml_to_arrow_converter.end_current_row()?;
                 }
 
-                // Check stop paths
+                // Stop after closing the configured path, so header-only reads
+                // can exit without scanning the remainder of the XML.
                 if let Some(node_id) = node_id
                     && stop_node_ids.contains(&node_id)
                 {
-                    break;
+                    return Ok(LoopAction::Break);
                 }
             }
-            Event::GeneralRef(e) => {
-                if let Some(node_id) = path_tracker.current() {
-                    let text = e.into_inner();
-                    let text = std::str::from_utf8(&text)?;
-                    let resolved = escape::resolve_predefined_entity(text).unwrap_or_default();
-                    xml_to_arrow_converter.set_field_value_for_node(node_id, resolved);
-                }
-            }
-            Event::Text(e) => {
-                if let Some(node_id) = path_tracker.current() {
-                    let text = e.into_inner();
-                    let text = std::str::from_utf8(&text)?;
-                    xml_to_arrow_converter.set_field_value_for_node(node_id, text);
-                }
-            }
-            Event::CData(e) => {
-                if let Some(node_id) = path_tracker.current() {
-                    let text = e.into_inner();
-                    let text = std::str::from_utf8(&text)?;
-                    xml_to_arrow_converter.set_field_value_for_node(node_id, text);
-                }
-            }
-            Event::End(_) => {
-                // Pop from our element stack
-                if let Some((node_id, is_table)) = element_stack.pop() {
-                    if is_table {
-                        xml_to_arrow_converter.end_table();
-                    }
+        }
+        Event::Eof => {
+            return Ok(LoopAction::Break);
+        }
+        _ => (),
+    }
+    Ok(LoopAction::Continue)
+}
 
-                    // Leave the current path
-                    path_tracker.leave();
+/// Streaming (buffered) XML event loop for readers that implement `BufRead`.
+///
+/// This path copies each event into a reusable buffer via `read_event_into`.
+/// For in-memory byte slices, prefer `process_xml_events_slice` which avoids
+/// the copy entirely.
+fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
+    reader: &mut Reader<B>,
+    path_tracker: &mut PathTracker,
+    xml_to_arrow_converter: &mut XmlToArrowConverter,
+    stop_node_ids: &[PathNodeId],
+) -> Result<()> {
+    let mut buf = Vec::with_capacity(4096);
+    let mut attr_name_buffer = Vec::with_capacity(64);
+    let mut element_stack: Vec<(Option<PathNodeId>, bool)> = Vec::with_capacity(32);
 
-                    // Check if parent is a table - need to end row
-                    if let Some(&(_parent_node_id, parent_is_table)) = element_stack.last() {
-                        if parent_is_table {
-                            xml_to_arrow_converter.end_current_row()?;
-                        }
-                    } else if xml_to_arrow_converter
-                        .registry
-                        .is_table_path(PathNodeId::ROOT)
-                        && path_tracker.current() == Some(PathNodeId::ROOT)
-                    {
-                        // Check root table case
-                        xml_to_arrow_converter.end_current_row()?;
-                    }
-
-                    // Stop after closing the configured path, so header-only reads
-                    // can exit without scanning the remainder of the XML.
-                    if let Some(node_id) = node_id
-                        && stop_node_ids.contains(&node_id)
-                    {
-                        break;
-                    }
-                }
-            }
-            Event::Eof => {
-                break;
-            }
-            _ => (),
+    loop {
+        let event = reader.read_event_into(&mut buf)?;
+        let decoder = reader.decoder();
+        let action = handle_event::<PARSE_ATTRIBUTES>(
+            event,
+            decoder,
+            path_tracker,
+            xml_to_arrow_converter,
+            stop_node_ids,
+            &mut element_stack,
+            &mut attr_name_buffer,
+        )?;
+        if matches!(action, LoopAction::Break) {
+            break;
         }
         buf.clear();
+    }
+    Ok(())
+}
+
+/// Zero-copy XML event loop for in-memory byte slices.
+///
+/// When the XML input is already in memory, `Reader<&[u8]>::read_event()`
+/// returns events that borrow directly from the input slice — no buffer
+/// allocation or per-event copy required. This is the fast path for the
+/// common case where the caller has the full XML in a `&[u8]` or `&str`.
+fn process_xml_events_slice<const PARSE_ATTRIBUTES: bool>(
+    reader: &mut Reader<&[u8]>,
+    path_tracker: &mut PathTracker,
+    xml_to_arrow_converter: &mut XmlToArrowConverter,
+    stop_node_ids: &[PathNodeId],
+) -> Result<()> {
+    let mut attr_name_buffer = Vec::with_capacity(64);
+    let mut element_stack: Vec<(Option<PathNodeId>, bool)> = Vec::with_capacity(32);
+
+    loop {
+        let event = reader.read_event()?;
+        let decoder = reader.decoder();
+        let action = handle_event::<PARSE_ATTRIBUTES>(
+            event,
+            decoder,
+            path_tracker,
+            xml_to_arrow_converter,
+            stop_node_ids,
+            &mut element_stack,
+            &mut attr_name_buffer,
+        )?;
+        if matches!(action, LoopAction::Break) {
+            break;
+        }
     }
     Ok(())
 }

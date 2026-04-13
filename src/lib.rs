@@ -10,6 +10,6 @@ pub use errors::{Error, Result};
 
 mod path_registry;
 mod xml_parser;
-pub use xml_parser::parse_xml;
+pub use xml_parser::{parse_xml, parse_xml_slice};
 
 pub use config::{Config, DType, FieldConfig, FieldConfigBuilder, ParserOptions, TableConfig};
