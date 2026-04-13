@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs::File,
     io::{BufReader, BufWriter},
     path::Path,
@@ -33,14 +34,70 @@ pub struct Config {
 }
 
 impl Config {
-    /// Validates the configuration by checking all field configurations.
+    /// Validates the configuration for structural correctness and field constraints.
+    ///
+    /// Checks performed:
+    /// - Table names must be non-empty and unique across the configuration.
+    /// - Table `xml_path` values must be non-empty.
+    /// - Field names must be non-empty and unique within each table.
+    /// - Field `xml_path` values must be non-empty.
+    /// - Field `xml_path` must be a descendant of (or equal to) the parent table's `xml_path`,
+    ///   unless the table's `xml_path` is `/` (root table, which allows any field path).
+    /// - Scale/offset may only be used with Float32 and Float64 fields.
     ///
     /// # Errors
     ///
-    /// Returns an error if any field uses an unsupported combination (e.g., scale/offset on non-float types).
+    /// Returns an error if any of the above constraints are violated.
     pub fn validate(&self) -> Result<()> {
+        // --- Table-level checks ---
+        let mut table_names = HashSet::with_capacity(self.tables.len());
         for table in &self.tables {
+            if table.name.is_empty() {
+                return Err(Error::InvalidConfig("Table name must not be empty".into()));
+            }
+            if !table_names.insert(&table.name) {
+                return Err(Error::InvalidConfig(format!(
+                    "Duplicate table name '{}'",
+                    table.name
+                )));
+            }
+            if table.xml_path.is_empty() {
+                return Err(Error::InvalidConfig(format!(
+                    "Table '{}' has an empty xml_path",
+                    table.name
+                )));
+            }
+
+            // --- Field-level checks within this table ---
+            let mut field_names = HashSet::with_capacity(table.fields.len());
             for field in &table.fields {
+                if field.name.is_empty() {
+                    return Err(Error::InvalidConfig(format!(
+                        "Field name must not be empty in table '{}'",
+                        table.name
+                    )));
+                }
+                if !field_names.insert(&field.name) {
+                    return Err(Error::InvalidConfig(format!(
+                        "Duplicate field name '{}' in table '{}'",
+                        field.name, table.name
+                    )));
+                }
+                if field.xml_path.is_empty() {
+                    return Err(Error::InvalidConfig(format!(
+                        "Field '{}' in table '{}' has an empty xml_path",
+                        field.name, table.name
+                    )));
+                }
+
+                // Field path must be under the table path (skip for root table "/").
+                if table.xml_path != "/" && !field.xml_path.starts_with(&table.xml_path) {
+                    return Err(Error::InvalidConfig(format!(
+                        "Field '{}' has xml_path '{}' which is not under table '{}' xml_path '{}'",
+                        field.name, field.xml_path, table.name, table.xml_path
+                    )));
+                }
+
                 field.validate()?;
             }
         }
@@ -626,5 +683,226 @@ mod tests {
 
         assert_eq!(field.scale, None);
         assert_eq!(field.offset, Some(5.0));
+    }
+
+    // --- Config validation tests ---
+
+    #[test]
+    fn test_duplicate_table_names_rejected() {
+        let config = Config {
+            parser_options: Default::default(),
+            tables: vec![
+                TableConfig::new("items", "/root/a", vec![], vec![]),
+                TableConfig::new("items", "/root/b", vec![], vec![]),
+            ],
+        };
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, Error::InvalidConfig(_)));
+        assert!(format!("{err:?}").contains("Duplicate table name 'items'"));
+    }
+
+    #[test]
+    fn test_empty_table_name_rejected() {
+        let config = Config {
+            parser_options: Default::default(),
+            tables: vec![TableConfig::new("", "/root", vec![], vec![])],
+        };
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, Error::InvalidConfig(_)));
+        assert!(format!("{err:?}").contains("Table name must not be empty"));
+    }
+
+    #[test]
+    fn test_empty_table_xml_path_rejected() {
+        let config = Config {
+            parser_options: Default::default(),
+            tables: vec![TableConfig::new("items", "", vec![], vec![])],
+        };
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, Error::InvalidConfig(_)));
+        assert!(format!("{err:?}").contains("empty xml_path"));
+    }
+
+    #[test]
+    fn test_duplicate_field_names_in_same_table_rejected() {
+        let config = Config {
+            parser_options: Default::default(),
+            tables: vec![TableConfig::new(
+                "items",
+                "/root",
+                vec![],
+                vec![
+                    FieldConfigBuilder::new("value", "/root/value", DType::Utf8)
+                        .build()
+                        .unwrap(),
+                    FieldConfigBuilder::new("value", "/root/other", DType::Int32)
+                        .build()
+                        .unwrap(),
+                ],
+            )],
+        };
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, Error::InvalidConfig(_)));
+        assert!(format!("{err:?}").contains("Duplicate field name 'value'"));
+    }
+
+    #[test]
+    fn test_same_field_name_in_different_tables_allowed() {
+        let config = Config {
+            parser_options: Default::default(),
+            tables: vec![
+                TableConfig::new(
+                    "table_a",
+                    "/root/a",
+                    vec![],
+                    vec![
+                        FieldConfigBuilder::new("id", "/root/a/id", DType::Int32)
+                            .build()
+                            .unwrap(),
+                    ],
+                ),
+                TableConfig::new(
+                    "table_b",
+                    "/root/b",
+                    vec![],
+                    vec![
+                        FieldConfigBuilder::new("id", "/root/b/id", DType::Int32)
+                            .build()
+                            .unwrap(),
+                    ],
+                ),
+            ],
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_empty_field_name_rejected() {
+        let config = Config {
+            parser_options: Default::default(),
+            tables: vec![TableConfig::new(
+                "items",
+                "/root",
+                vec![],
+                vec![
+                    FieldConfigBuilder::new("", "/root/value", DType::Utf8)
+                        .build()
+                        .unwrap(),
+                ],
+            )],
+        };
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, Error::InvalidConfig(_)));
+        assert!(format!("{err:?}").contains("Field name must not be empty"));
+    }
+
+    #[test]
+    fn test_empty_field_xml_path_rejected() {
+        let config = Config {
+            parser_options: Default::default(),
+            tables: vec![TableConfig::new(
+                "items",
+                "/root",
+                vec![],
+                vec![
+                    FieldConfigBuilder::new("value", "", DType::Utf8)
+                        .build()
+                        .unwrap(),
+                ],
+            )],
+        };
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, Error::InvalidConfig(_)));
+        assert!(format!("{err:?}").contains("empty xml_path"));
+    }
+
+    #[test]
+    fn test_field_path_not_under_table_path_rejected() {
+        let config = Config {
+            parser_options: Default::default(),
+            tables: vec![TableConfig::new(
+                "items",
+                "/root/items",
+                vec![],
+                vec![
+                    FieldConfigBuilder::new("value", "/root/other/value", DType::Utf8)
+                        .build()
+                        .unwrap(),
+                ],
+            )],
+        };
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, Error::InvalidConfig(_)));
+        assert!(format!("{err:?}").contains("not under table"));
+    }
+
+    #[test]
+    fn test_field_path_under_table_path_accepted() {
+        let config = Config {
+            parser_options: Default::default(),
+            tables: vec![TableConfig::new(
+                "items",
+                "/root/items",
+                vec![],
+                vec![
+                    FieldConfigBuilder::new("value", "/root/items/item/value", DType::Utf8)
+                        .build()
+                        .unwrap(),
+                ],
+            )],
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_root_table_allows_any_field_path() {
+        let config = Config {
+            parser_options: Default::default(),
+            tables: vec![TableConfig::new(
+                "root",
+                "/",
+                vec![],
+                vec![
+                    FieldConfigBuilder::new("value", "/anywhere/deep/value", DType::Utf8)
+                        .build()
+                        .unwrap(),
+                ],
+            )],
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_valid_config_passes_all_checks() {
+        let config = Config {
+            parser_options: Default::default(),
+            tables: vec![
+                TableConfig::new(
+                    "header",
+                    "/doc/header",
+                    vec![],
+                    vec![
+                        FieldConfigBuilder::new("title", "/doc/header/title", DType::Utf8)
+                            .build()
+                            .unwrap(),
+                    ],
+                ),
+                TableConfig::new(
+                    "items",
+                    "/doc/items",
+                    vec!["item".to_string()],
+                    vec![
+                        FieldConfigBuilder::new("id", "/doc/items/item/@id", DType::Int32)
+                            .build()
+                            .unwrap(),
+                        FieldConfigBuilder::new("value", "/doc/items/item/value", DType::Float64)
+                            .scale(0.001)
+                            .build()
+                            .unwrap(),
+                    ],
+                ),
+            ],
+        };
+        assert!(config.validate().is_ok());
     }
 }

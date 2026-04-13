@@ -44,6 +44,8 @@ pub enum Error {
     NoTableOnStack,
     /// Error when applying a scaling or an offset is attempted on unsupported data types.
     UnsupportedConversion(String),
+    /// Error indicating that the configuration is invalid (e.g., duplicate names, invalid paths).
+    InvalidConfig(String),
 }
 
 #[cfg(feature = "python")]
@@ -111,6 +113,14 @@ create_exception!(
 );
 
 #[cfg(feature = "python")]
+create_exception!(
+    xml2arrow,
+    InvalidConfigError,
+    Xml2ArrowError,
+    "Raised when the configuration is invalid (e.g., duplicate names, invalid paths)."
+);
+
+#[cfg(feature = "python")]
 impl From<Error> for PyErr {
     fn from(value: Error) -> Self {
         match value {
@@ -128,6 +138,7 @@ impl From<Error> for PyErr {
             }
             Error::ParseError(e) => ParseError::new_err(e.clone()),
             Error::UnsupportedConversion(e) => UnsupportedConversionError::new_err(e.clone()),
+            Error::InvalidConfig(e) => InvalidConfigError::new_err(e.clone()),
         }
     }
 }
