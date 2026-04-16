@@ -147,6 +147,23 @@ in-memory columnar representation and can be passed directly to libraries such a
 [Polars](https://github.com/pola-rs/polars), or written to Parquet via
 [parquet](https://crates.io/crates/parquet).
 
+#### Zero-copy parsing for in-memory data
+
+When the XML data is already in memory as a byte slice, use `parse_xml_slice` for
+better performance. It avoids per-event buffer copies by having quick-xml return
+events that borrow directly from the input:
+
+```rust
+use xml2arrow::{Config, parse_xml_slice};
+
+let xml = std::fs::read("data.xml")?;
+let config = Config::from_yaml_file("config.yaml")?;
+let record_batches = parse_xml_slice(&xml, &config)?;
+```
+
+Use `parse_xml` for streaming sources (files, network) and `parse_xml_slice` when
+the full XML is already loaded into memory.
+
 ---
 
 ## Example
@@ -344,14 +361,19 @@ parent station by row position, enabling a join on `stations.<station> = measure
 is a trie-based path registry that replaces string comparisons in the hot loop with
 direct integer indexing.
 
+Two parsing functions are available: `parse_xml` (buffered, for streaming readers)
+and `parse_xml_slice` (zero-copy, for in-memory byte slices). The zero-copy path
+avoids per-event buffer copies, yielding ~7-9% higher throughput when the XML is
+already in memory.
+
 Benchmarks were measured on an Apple M1 Pro using [Criterion.rs](https://github.com/bheisler/criterion.rs):
 
-| Benchmark                             | File size | Throughput     |
-| :------------------------------------ | --------: | :------------- |
-| 1K measurements, 2 sensors (small)    |   413 KB  | ~384 MiB/s     |
-| 10K measurements, 5 sensors (medium)  |    10 MB  | ~392 MiB/s     |
-| 100K measurements, 10 sensors (large) |   202 MB  | ~389 MiB/s     |
-| 200K measurements, 5 sensors (xlarge) |   203 MB  | ~388 MiB/s     |
+| Benchmark                             | File size | `parse_xml`  | `parse_xml_slice` |
+| :------------------------------------ | --------: | :----------- | :---------------- |
+| 1K measurements, 2 sensors (small)    |   413 KB  | ~381 MiB/s   | ~415 MiB/s        |
+| 10K measurements, 5 sensors (medium)  |    10 MB  | ~394 MiB/s   | ~423 MiB/s        |
+| 100K measurements, 10 sensors (large) |   202 MB  | ~394 MiB/s   | ~428 MiB/s        |
+| 200K measurements, 5 sensors (xlarge) |   203 MB  | ~394 MiB/s   | ~428 MiB/s        |
 
 Throughput stays consistent from sub-megabyte to 200 MB files, reflecting the
 predictable cost of the single-pass design.

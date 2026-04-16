@@ -2,7 +2,7 @@ use codspeed_criterion_compat::{
     BenchmarkId, Criterion, Throughput, criterion_group, criterion_main,
 };
 use std::time::Duration;
-use xml2arrow::{Config, parse_xml};
+use xml2arrow::{Config, parse_xml, parse_xml_slice};
 
 /// Generate realistic XML matching industrial use case
 fn generate_realistic_xml(num_measurements: usize, num_sensors: usize) -> String {
@@ -255,13 +255,27 @@ fn bench_parse_small(c: &mut Criterion) {
 
     group.bench_with_input(
         BenchmarkId::new(
-            "1K_measurements_2_sensors",
+            "buffered_1K_measurements_2_sensors",
             format!("{}KB", size_bytes / 1024),
         ),
         &xml,
         |b, xml| {
             b.iter(|| {
                 let result = parse_xml(xml.as_bytes(), &config);
+                result.unwrap()
+            });
+        },
+    );
+
+    group.bench_with_input(
+        BenchmarkId::new(
+            "zero_copy_1K_measurements_2_sensors",
+            format!("{}KB", size_bytes / 1024),
+        ),
+        &xml,
+        |b, xml| {
+            b.iter(|| {
+                let result = parse_xml_slice(xml.as_bytes(), &config);
                 result.unwrap()
             });
         },
@@ -283,13 +297,27 @@ fn bench_parse_medium(c: &mut Criterion) {
 
     group.bench_with_input(
         BenchmarkId::new(
-            "10K_measurements_5_sensors",
+            "buffered_10K_measurements_5_sensors",
             format!("{}MB", size_bytes / (1024 * 1024)),
         ),
         &xml,
         |b, xml| {
             b.iter(|| {
                 let result = parse_xml(xml.as_bytes(), &config);
+                result.unwrap()
+            });
+        },
+    );
+
+    group.bench_with_input(
+        BenchmarkId::new(
+            "zero_copy_10K_measurements_5_sensors",
+            format!("{}MB", size_bytes / (1024 * 1024)),
+        ),
+        &xml,
+        |b, xml| {
+            b.iter(|| {
+                let result = parse_xml_slice(xml.as_bytes(), &config);
                 result.unwrap()
             });
         },
@@ -311,13 +339,27 @@ fn bench_parse_large(c: &mut Criterion) {
 
     group.bench_with_input(
         BenchmarkId::new(
-            "100K_measurements_10_sensors",
+            "buffered_100K_measurements_10_sensors",
             format!("{}MB", size_bytes / (1024 * 1024)),
         ),
         &xml,
         |b, xml| {
             b.iter(|| {
                 let result = parse_xml(xml.as_bytes(), &config);
+                result.unwrap()
+            });
+        },
+    );
+
+    group.bench_with_input(
+        BenchmarkId::new(
+            "zero_copy_100K_measurements_10_sensors",
+            format!("{}MB", size_bytes / (1024 * 1024)),
+        ),
+        &xml,
+        |b, xml| {
+            b.iter(|| {
+                let result = parse_xml_slice(xml.as_bytes(), &config);
                 result.unwrap()
             });
         },
@@ -339,13 +381,27 @@ fn bench_parse_xlarge(c: &mut Criterion) {
 
     group.bench_with_input(
         BenchmarkId::new(
-            "200K_measurements_5_sensors",
+            "buffered_200K_measurements_5_sensors",
             format!("{}MB", size_bytes / (1024 * 1024)),
         ),
         &xml,
         |b, xml| {
             b.iter(|| {
                 let result = parse_xml(xml.as_bytes(), &config);
+                result.unwrap()
+            });
+        },
+    );
+
+    group.bench_with_input(
+        BenchmarkId::new(
+            "zero_copy_200K_measurements_5_sensors",
+            format!("{}MB", size_bytes / (1024 * 1024)),
+        ),
+        &xml,
+        |b, xml| {
+            b.iter(|| {
+                let result = parse_xml_slice(xml.as_bytes(), &config);
                 result.unwrap()
             });
         },
