@@ -1023,12 +1023,7 @@ mod tests {
         // values. Any nonempty `levels` list is therefore unreachable.
         let config = Config {
             parser_options: Default::default(),
-            tables: vec![TableConfig::new(
-                "root",
-                "/",
-                vec!["a".to_string()],
-                vec![],
-            )],
+            tables: vec![TableConfig::new("root", "/", vec!["a".to_string()], vec![])],
         };
         let err = config.validate().unwrap_err();
         assert!(matches!(err, Error::InvalidConfig(_)));
