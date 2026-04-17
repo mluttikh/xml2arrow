@@ -33,15 +33,8 @@ pub enum Error {
     /// Errors during UTF-8 string conversion
     #[from]
     Utf8Error(Utf8Error),
-    /// Custom error for unsupported data types, holding a descriptive message
-    UnsupportedDataType(String),
     /// Errors that occur during parsing of values from strings to specific data types.
     ParseError(String),
-    /// Error indicating that a table specified in the configuration was not found in the XML data.
-    /// Contains the XML path of the missing table.
-    TableNotFound(String),
-    /// Error indicating that there is no table on the stack.
-    NoTableOnStack,
     /// Error when applying a scaling or an offset is attempted on unsupported data types.
     UnsupportedConversion(String),
     /// Error indicating that the configuration is invalid (e.g., duplicate names, invalid paths).
@@ -70,30 +63,6 @@ create_exception!(
     YamlParsingError,
     Xml2ArrowError,
     "Raised when an error occurs during YAML configuration parsing."
-);
-
-#[cfg(feature = "python")]
-create_exception!(
-    xml2arrow,
-    UnsupportedDataTypeError,
-    Xml2ArrowError,
-    "Raised when an unsupported data type is encountered."
-);
-
-#[cfg(feature = "python")]
-create_exception!(
-    xml2arrow,
-    TableNotFoundError,
-    Xml2ArrowError,
-    "Raised when a table specified in the configuration is not found in the XML data."
-);
-
-#[cfg(feature = "python")]
-create_exception!(
-    xml2arrow,
-    NoTableOnStackError,
-    Xml2ArrowError,
-    "Raised when an operation is performed that requires a table to be on the stack, but none is present."
 );
 
 #[cfg(feature = "python")]
@@ -131,11 +100,6 @@ impl From<Error> for PyErr {
             Error::XmlParseAttr(e) => XmlParsingError::new_err(e.to_string()),
             Error::XmlParseEncoding(e) => XmlParsingError::new_err(e.to_string()),
             Error::Yaml(e) => YamlParsingError::new_err(e.to_string()),
-            Error::UnsupportedDataType(e) => UnsupportedDataTypeError::new_err(e.clone()),
-            Error::TableNotFound(e) => TableNotFoundError::new_err(e.clone()),
-            Error::NoTableOnStack => {
-                NoTableOnStackError::new_err("There is no table on the stack".to_string())
-            }
             Error::ParseError(e) => ParseError::new_err(e.clone()),
             Error::UnsupportedConversion(e) => UnsupportedConversionError::new_err(e.clone()),
             Error::InvalidConfig(e) => InvalidConfigError::new_err(e.clone()),

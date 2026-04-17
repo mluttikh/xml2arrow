@@ -11,7 +11,6 @@
 //! This means we front-load configuration validation and path compilation so the
 //! event loop can focus on direct indexing and appends.
 use std::io::BufRead;
-use std::num::IntErrorKind;
 use std::sync::Arc;
 
 use arrow::array::{
@@ -88,24 +87,53 @@ impl TypedArrayBuilder {
     }
 }
 
+/// The subset of a `FieldConfig` that the hot path and its error messages need.
+///
+/// `FieldBuilder` used to hold a full `FieldConfig` clone (including `data_type`,
+/// which is consumed once at construction). Storing only what the runtime reads
+/// keeps the builder narrower and decouples it from future additions to
+/// `FieldConfig`.
+struct FieldMeta {
+    name: String,
+    xml_path: String,
+    nullable: bool,
+    scale: Option<f64>,
+    offset: Option<f64>,
+}
+
+impl FieldMeta {
+    fn from_config(fc: &FieldConfig) -> Self {
+        Self {
+            name: fc.name.clone(),
+            xml_path: fc.xml_path.clone(),
+            nullable: fc.nullable,
+            scale: fc.scale,
+            offset: fc.offset,
+        }
+    }
+}
+
 /// Builds Arrow arrays for a single field based on parsed XML data.
 ///
 /// This struct manages the accumulation of values from the XML and their conversion
 /// to the appropriate Arrow data type. It also handles null values and applies
 /// scaling and offset transformations if configured.
 struct FieldBuilder {
-    /// Configuration of the field, including name, data type, nullability, scaling, and offset.
-    field_config: FieldConfig,
+    /// The runtime-relevant subset of the field's configuration.
+    meta: FieldMeta,
     /// The Arrow field description
     field: Field,
     /// The Arrow array builder used to construct the array (enum dispatch, no vtable).
     array_builder: TypedArrayBuilder,
     /// Indicates whether the builder has received any values for the current row.
     has_value: bool,
+    /// Pre-computed `meta.scale.is_some() || meta.offset.is_some()`. The
+    /// per-row float append path is hot enough that gating the `Option` loads
+    /// behind a single `bool` measurably outperforms unconditionally probing
+    /// both `scale` and `offset` on every value.
+    has_transform: bool,
     /// Temporary storage for accumulating the current value from potentially multiple XML text nodes.
     current_value: String,
-    /// Whether this field has scale or offset transforms that should be applied inline.
-    has_transform: bool,
 }
 
 /// Parses a boolean token from a string, trimming whitespace first.
@@ -138,34 +166,23 @@ fn parse_boolean_token(value: &str) -> std::result::Result<Option<bool>, ()> {
 }
 
 /// Helper macro to reduce boilerplate for parsing and appending integer values.
-/// Uses `atoi` for fast byte-level integer parsing.
+/// Uses `atoi` for fast byte-level integer parsing, with a `std::parse` fallback
+/// whose error message carries the underlying `IntErrorKind` (overflow, invalid
+/// digit, etc.).
 macro_rules! append_int {
     ($builder:expr, $value:expr, $has_value:expr, $field_config:expr, $ty:ty, $type_name:expr) => {
         if $has_value {
             match atoi::atoi::<$ty>($value.as_bytes()) {
                 Some(val) => $builder.append_value(val),
-                None => {
-                    // Fall back to std parse for better error messages
-                    match $value.parse::<$ty>() {
-                        Ok(val) => $builder.append_value(val),
-                        Err(e) => {
-                            let msg = if *e.kind() == IntErrorKind::PosOverflow
-                                || *e.kind() == IntErrorKind::NegOverflow
-                            {
-                                format!(
-                                    "Failed to parse value '{}' as {} for field '{}' at path {}: {}",
-                                    $value, $type_name, $field_config.name, $field_config.xml_path, e
-                                )
-                            } else {
-                                format!(
-                                    "Failed to parse value '{}' as {} for field '{}' at path {}: {}",
-                                    $value, $type_name, $field_config.name, $field_config.xml_path, e
-                                )
-                            };
-                            return Err(Error::ParseError(msg));
-                        }
+                None => match $value.parse::<$ty>() {
+                    Ok(val) => $builder.append_value(val),
+                    Err(e) => {
+                        return Err(Error::ParseError(format!(
+                            "Failed to parse value '{}' as {} for field '{}' at path {}: {}",
+                            $value, $type_name, $field_config.name, $field_config.xml_path, e
+                        )));
                     }
-                }
+                },
             }
         } else if $field_config.nullable {
             $builder.append_null();
@@ -179,11 +196,29 @@ macro_rules! append_int {
 }
 
 /// Helper macro for parsing and appending float values using `fast_float2`.
+///
+/// Applies `scale` and `offset` only when `$has_transform` is true. The flag
+/// is computed once at builder construction; gating the `Option` loads behind
+/// it avoids two memory loads + branches per value in the (very common) case
+/// where neither transform is configured. `scale as $ty` is a no-op for `f64`
+/// and a truncating cast for `f32`.
 macro_rules! append_float {
-    ($builder:expr, $value:expr, $has_value:expr, $field_config:expr, $ty:ty, $type_name:expr) => {
+    ($builder:expr, $value:expr, $has_value:expr, $field_config:expr, $has_transform:expr, $ty:ty, $type_name:expr) => {
         if $has_value {
             match fast_float2::parse::<$ty, _>($value) {
-                Ok(val) => $builder.append_value(val),
+                Ok(mut val) => {
+                    if $has_transform {
+                        #[allow(clippy::cast_possible_truncation)]
+                        if let Some(scale) = $field_config.scale {
+                            val *= scale as $ty;
+                        }
+                        #[allow(clippy::cast_possible_truncation)]
+                        if let Some(offset) = $field_config.offset {
+                            val += offset as $ty;
+                        }
+                    }
+                    $builder.append_value(val);
+                }
                 Err(e) => {
                     return Err(Error::ParseError(format!(
                         "Failed to parse value '{}' as {} for field '{}' at path {}: {}",
@@ -212,7 +247,7 @@ impl FieldBuilder {
         );
         let has_transform = field_config.scale.is_some() || field_config.offset.is_some();
         Self {
-            field_config: field_config.clone(),
+            meta: FieldMeta::from_config(field_config),
             field,
             array_builder,
             has_value: false,
@@ -229,11 +264,11 @@ impl FieldBuilder {
 
     /// Appends the currently accumulated value to the Arrow array builder,
     /// performing type conversion and handling nulls.
-    #[allow(clippy::too_many_lines)]
     fn append_current_value(&mut self) -> Result<()> {
         let value = self.current_value.as_str();
         let has_value = self.has_value;
-        let fc = &self.field_config;
+        let has_transform = self.has_transform;
+        let fc = &self.meta;
 
         match &mut self.array_builder {
             TypedArrayBuilder::Utf8(b) => {
@@ -254,69 +289,10 @@ impl FieldBuilder {
             TypedArrayBuilder::Int64(b) => append_int!(b, value, has_value, fc, i64, "i64"),
             TypedArrayBuilder::UInt64(b) => append_int!(b, value, has_value, fc, u64, "u64"),
             TypedArrayBuilder::Float32(b) => {
-                if self.has_transform {
-                    if has_value {
-                        match fast_float2::parse::<f32, _>(value) {
-                            #[allow(clippy::cast_possible_truncation)]
-                            Ok(mut val) => {
-                                if let Some(scale) = fc.scale {
-                                    val *= scale as f32;
-                                }
-                                if let Some(offset) = fc.offset {
-                                    val += offset as f32;
-                                }
-                                b.append_value(val);
-                            }
-                            Err(e) => {
-                                return Err(Error::ParseError(format!(
-                                    "Failed to parse value '{}' as f32 for field '{}' at path {}: {}",
-                                    value, fc.name, fc.xml_path, e
-                                )));
-                            }
-                        }
-                    } else if fc.nullable {
-                        b.append_null();
-                    } else {
-                        return Err(Error::ParseError(format!(
-                            "Missing value for non-nullable field '{}' at path {}",
-                            fc.name, fc.xml_path
-                        )));
-                    }
-                } else {
-                    append_float!(b, value, has_value, fc, f32, "f32");
-                }
+                append_float!(b, value, has_value, fc, has_transform, f32, "f32")
             }
             TypedArrayBuilder::Float64(b) => {
-                if self.has_transform {
-                    if has_value {
-                        match fast_float2::parse::<f64, _>(value) {
-                            Ok(mut val) => {
-                                if let Some(scale) = fc.scale {
-                                    val *= scale;
-                                }
-                                if let Some(offset) = fc.offset {
-                                    val += offset;
-                                }
-                                b.append_value(val);
-                            }
-                            Err(e) => {
-                                return Err(Error::ParseError(format!(
-                                    "Failed to parse value '{}' as f64 for field '{}' at path {}: {}",
-                                    value, fc.name, fc.xml_path, e
-                                )));
-                            }
-                        }
-                    } else if fc.nullable {
-                        b.append_null();
-                    } else {
-                        return Err(Error::ParseError(format!(
-                            "Missing value for non-nullable field '{}' at path {}",
-                            fc.name, fc.xml_path
-                        )));
-                    }
-                } else {
-                    append_float!(b, value, has_value, fc, f64, "f64");
-                }
+                append_float!(b, value, has_value, fc, has_transform, f64, "f64")
             }
             TypedArrayBuilder::Boolean(b) => {
                 if has_value {
@@ -358,14 +334,36 @@ impl FieldBuilder {
 // A TableBuilder owns per-field builders plus index builders for nested levels.
 // It finalizes rows into a RecordBatch in a single, ordered pass.
 ///
+/// The subset of a `TableConfig` that finalization needs.
+///
+/// `TableBuilder` used to hold a full `TableConfig` clone (including the
+/// `fields` vector, which is consumed once when constructing the per-field
+/// builders). Storing only the pieces used at `finish()` / error-reporting
+/// time keeps the builder narrower.
+struct TableMeta {
+    name: String,
+    xml_path: String,
+    levels: Vec<String>,
+}
+
+impl TableMeta {
+    fn from_config(tc: &TableConfig) -> Self {
+        Self {
+            name: tc.name.clone(),
+            xml_path: tc.xml_path.clone(),
+            levels: tc.levels.clone(),
+        }
+    }
+}
+
 /// Builds an Arrow `RecordBatch` for a single table defined in the configuration.
 ///
 /// This struct manages the building of a single Arrow `RecordBatch` by collecting
 /// data for each field defined in the table's configuration. It also handles
 /// parent/child relationships between tables through index builders.
 struct TableBuilder {
-    /// The table's configuration.
-    table_config: TableConfig,
+    /// The table's runtime-relevant metadata.
+    meta: TableMeta,
     // Builders for the parent row indices, used for representing nested tables.
     index_builders: Vec<UInt32Builder>,
     /// Builders for each field in the table, indexed by field position.
@@ -387,7 +385,7 @@ impl TableBuilder {
             field_builders.push(FieldBuilder::new(field_config));
         }
         Self {
-            table_config: table_config.clone(),
+            meta: TableMeta::from_config(table_config),
             index_builders,
             field_builders,
             row_index: 0,
@@ -435,12 +433,7 @@ impl TableBuilder {
         let num_arrays = self.field_builders.len() + self.index_builders.len();
         let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(num_arrays);
         let mut fields: Vec<Field> = Vec::with_capacity(num_arrays);
-        for (level, index_builder) in self
-            .table_config
-            .levels
-            .iter()
-            .zip(&mut self.index_builders)
-        {
+        for (level, index_builder) in self.meta.levels.iter().zip(&mut self.index_builders) {
             arrays.push(Arc::new(index_builder.finish()));
             fields.push(Field::new(format!("<{level}>"), DataType::UInt32, false));
         }
@@ -453,7 +446,7 @@ impl TableBuilder {
         Ok(RecordBatch::try_new(Arc::new(schema), arrays).map_err(|e| {
             arrow::error::ArrowError::InvalidArgumentError(format!(
                 "Failed to create RecordBatch for table with name {} and XML path {}: {}",
-                self.table_config.name, self.table_config.xml_path, e
+                self.meta.name, self.meta.xml_path, e
             ))
         })?)
     }
@@ -589,7 +582,7 @@ impl XmlToArrowConverter {
         for table_builder in &mut self.table_builders {
             if !table_builder.field_builders.is_empty() {
                 let record_batch = table_builder.finish()?;
-                record_batches.insert(table_builder.table_config.name.clone(), record_batch);
+                record_batches.insert(table_builder.meta.name.clone(), record_batch);
             }
         }
         Ok(record_batches)
@@ -639,40 +632,14 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
     if config.parser_options.trim_text {
         reader.config_mut().trim_text(true);
     }
-    let mut xml_to_arrow_converter = XmlToArrowConverter::from_config(config)?;
-    let mut path_tracker = PathTracker::new();
-
-    // Start the root-level table (xml_path: /) if it exists AND has fields defined.
-    // We only start it if it has fields, because adding it to the builder_stack
-    // would affect parent_row_indices for all nested tables, breaking their
-    // level indexing. Tables with xml_path: / and no fields are just used for
-    // hierarchy purposes and don't need to be on the stack.
-    if xml_to_arrow_converter.has_root_table_with_fields() {
-        xml_to_arrow_converter.start_table(PathNodeId::ROOT);
-    }
-
-    // Use specialized parsing logic based on whether attribute parsing is required.
-    // This avoids unnecessary attribute processing and Empty event handling
-    // when attributes are not needed, improving performance.
-    let stop_node_ids = std::mem::take(&mut xml_to_arrow_converter.stop_node_ids);
-    if config.requires_attribute_parsing() {
-        process_xml_events::<_, true>(
-            &mut reader,
-            &mut path_tracker,
-            &mut xml_to_arrow_converter,
-            &stop_node_ids,
-        )?;
-    } else {
-        process_xml_events::<_, false>(
-            &mut reader,
-            &mut path_tracker,
-            &mut xml_to_arrow_converter,
-            &stop_node_ids,
-        )?;
-    }
-
-    let batches = xml_to_arrow_converter.finish()?;
-    Ok(batches)
+    let needs_attrs = config.requires_attribute_parsing();
+    run_parse(&mut reader, config, |r, t, c, s| {
+        if needs_attrs {
+            process_xml_events::<_, true>(r, t, c, s)
+        } else {
+            process_xml_events::<_, false>(r, t, c, s)
+        }
+    })
 }
 
 /// Parses XML data from an in-memory byte slice into Arrow record batches.
@@ -712,32 +679,53 @@ pub fn parse_xml_slice(xml: &[u8], config: &Config) -> Result<IndexMap<String, R
     if config.parser_options.trim_text {
         reader.config_mut().trim_text(true);
     }
+    let needs_attrs = config.requires_attribute_parsing();
+    run_parse(&mut reader, config, |r, t, c, s| {
+        if needs_attrs {
+            process_xml_events_slice::<true>(r, t, c, s)
+        } else {
+            process_xml_events_slice::<false>(r, t, c, s)
+        }
+    })
+}
+
+/// Shared parser driver used by both `parse_xml` and `parse_xml_slice`.
+///
+/// The two entry points differ only in how they obtain events from their
+/// reader and whether attribute parsing is required; everything else —
+/// converter setup, root-table priming, stop-path capture, and finalization —
+/// is identical. Accepting the event loop as a closure lets each caller stay
+/// specialized (buffered vs zero-copy, attrs on vs off) without duplicating
+/// the surrounding orchestration.
+fn run_parse<R, F>(
+    reader: &mut R,
+    config: &Config,
+    run_events: F,
+) -> Result<IndexMap<String, RecordBatch>>
+where
+    F: FnOnce(&mut R, &mut PathTracker, &mut XmlToArrowConverter, &[PathNodeId]) -> Result<()>,
+{
     let mut xml_to_arrow_converter = XmlToArrowConverter::from_config(config)?;
     let mut path_tracker = PathTracker::new();
 
+    // Start the root-level table (xml_path: /) if it exists AND has fields
+    // defined. We only start it if it has fields, because adding it to the
+    // builder_stack would affect parent_row_indices for all nested tables,
+    // breaking their level indexing. Tables with xml_path: / and no fields are
+    // just used for hierarchy purposes and don't need to be on the stack.
     if xml_to_arrow_converter.has_root_table_with_fields() {
         xml_to_arrow_converter.start_table(PathNodeId::ROOT);
     }
 
     let stop_node_ids = std::mem::take(&mut xml_to_arrow_converter.stop_node_ids);
-    if config.requires_attribute_parsing() {
-        process_xml_events_slice::<true>(
-            &mut reader,
-            &mut path_tracker,
-            &mut xml_to_arrow_converter,
-            &stop_node_ids,
-        )?;
-    } else {
-        process_xml_events_slice::<false>(
-            &mut reader,
-            &mut path_tracker,
-            &mut xml_to_arrow_converter,
-            &stop_node_ids,
-        )?;
-    }
+    run_events(
+        reader,
+        &mut path_tracker,
+        &mut xml_to_arrow_converter,
+        &stop_node_ids,
+    )?;
 
-    let batches = xml_to_arrow_converter.finish()?;
-    Ok(batches)
+    xml_to_arrow_converter.finish()
 }
 
 // --- Event loop implementations ---
@@ -761,13 +749,59 @@ enum LoopAction {
     Break,
 }
 
+/// Closes the currently entered element: pops the table (if any), leaves the
+/// path tracker, finalizes the parent row (if the parent is a table or we are
+/// at the root table), and signals a break when a stop path matches.
+///
+/// Called by both `Event::End` (after popping the element stack) and
+/// `Event::Empty` (after entering and handling attributes). Keeping the
+/// closing semantics in one place avoids subtle drift between the two.
+#[inline]
+fn close_element(
+    node_id: Option<PathNodeId>,
+    is_table: bool,
+    path_tracker: &mut PathTracker,
+    xml_to_arrow_converter: &mut XmlToArrowConverter,
+    stop_node_ids: &[PathNodeId],
+    element_stack: &[(Option<PathNodeId>, bool)],
+) -> Result<LoopAction> {
+    if is_table {
+        xml_to_arrow_converter.end_table();
+    }
+    path_tracker.leave();
+
+    // End the parent row if the parent is a table. The parent is either the
+    // last entry on the element stack (nested case) or the implicit root
+    // table when `xml_path: "/"` is configured and we've returned to root.
+    let parent_is_table = match element_stack.last() {
+        Some((_, is_table)) => *is_table,
+        None => {
+            xml_to_arrow_converter
+                .registry
+                .is_table_path(PathNodeId::ROOT)
+                && path_tracker.current() == Some(PathNodeId::ROOT)
+        }
+    };
+    if parent_is_table {
+        xml_to_arrow_converter.end_current_row()?;
+    }
+
+    // Stop after closing the configured path, so header-only reads can exit
+    // without scanning the remainder of the XML.
+    if let Some(node_id) = node_id
+        && stop_node_ids.contains(&node_id)
+    {
+        return Ok(LoopAction::Break);
+    }
+    Ok(LoopAction::Continue)
+}
+
 /// Processes a single XML event, updating path tracking, table builders, and field values.
 ///
 /// This function encapsulates the core event-handling logic shared by both the
 /// buffered and zero-copy parsing paths. Extracting it avoids duplicating the
 /// match arms while keeping each loop wrapper focused solely on how it obtains
 /// the next event.
-#[allow(clippy::too_many_lines)]
 #[inline]
 fn handle_event<const PARSE_ATTRIBUTES: bool>(
     event: Event<'_>,
@@ -827,31 +861,17 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
                 )?;
             }
 
-            // Immediately close: empty elements have no children or text
-            if is_table {
-                xml_to_arrow_converter.end_table();
-            }
-            path_tracker.leave();
-
-            // Check if parent is a table - need to end row
-            if let Some(&(_parent_node_id, parent_is_table)) = element_stack.last() {
-                if parent_is_table {
-                    xml_to_arrow_converter.end_current_row()?;
-                }
-            } else if xml_to_arrow_converter
-                .registry
-                .is_table_path(PathNodeId::ROOT)
-                && path_tracker.current() == Some(PathNodeId::ROOT)
-            {
-                xml_to_arrow_converter.end_current_row()?;
-            }
-
-            // Check stop paths
-            if let Some(node_id) = node_id
-                && stop_node_ids.contains(&node_id)
-            {
-                return Ok(LoopAction::Break);
-            }
+            // Empty elements have no children or text; close immediately. The
+            // element is NOT on `element_stack`, so `close_element` sees the
+            // *parent* on top, matching the `Event::End` call below.
+            return close_element(
+                node_id,
+                is_table,
+                path_tracker,
+                xml_to_arrow_converter,
+                stop_node_ids,
+                element_stack,
+            );
         }
         Event::GeneralRef(e) => {
             if let Some(node_id) = path_tracker.current() {
@@ -876,36 +896,15 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
             }
         }
         Event::End(_) => {
-            // Pop from our element stack
             if let Some((node_id, is_table)) = element_stack.pop() {
-                if is_table {
-                    xml_to_arrow_converter.end_table();
-                }
-
-                // Leave the current path
-                path_tracker.leave();
-
-                // Check if parent is a table - need to end row
-                if let Some(&(_parent_node_id, parent_is_table)) = element_stack.last() {
-                    if parent_is_table {
-                        xml_to_arrow_converter.end_current_row()?;
-                    }
-                } else if xml_to_arrow_converter
-                    .registry
-                    .is_table_path(PathNodeId::ROOT)
-                    && path_tracker.current() == Some(PathNodeId::ROOT)
-                {
-                    // Check root table case
-                    xml_to_arrow_converter.end_current_row()?;
-                }
-
-                // Stop after closing the configured path, so header-only reads
-                // can exit without scanning the remainder of the XML.
-                if let Some(node_id) = node_id
-                    && stop_node_ids.contains(&node_id)
-                {
-                    return Ok(LoopAction::Break);
-                }
+                return close_element(
+                    node_id,
+                    is_table,
+                    path_tracker,
+                    xml_to_arrow_converter,
+                    stop_node_ids,
+                    element_stack,
+                );
             }
         }
         Event::Eof => {
