@@ -484,14 +484,19 @@ impl XmlToArrowConverter {
         config.validate()?;
 
         // Build path registry for efficient lookups
-        let registry = PathRegistry::from_config(config);
+        let mut registry = PathRegistry::from_config(config);
 
+        // Register every stop path, rejecting entries whose parent path is
+        // unknown. The lenient check still allows stopping at elements that
+        // aren't otherwise referenced in the config (e.g. stopping at a
+        // `<summary>` sibling of a configured table) while catching obvious
+        // typos where even the parent segment doesn't exist.
         let stop_node_ids = config
             .parser_options
             .stop_at_paths
             .iter()
-            .filter_map(|path| registry.resolve_path(path))
-            .collect::<Vec<_>>();
+            .map(|path| registry.register_stop_path(path))
+            .collect::<Result<Vec<_>>>()?;
 
         let mut table_builders = Vec::with_capacity(config.tables.len());
         for table_config in &config.tables {
@@ -4098,6 +4103,72 @@ mod tests {
         // Data should be empty (parsing stopped before it)
         let data = record_batches.get("data").unwrap();
         assert_eq!(data.num_rows(), 0);
+    }
+
+    #[test]
+    fn test_stop_at_paths_typo_parent_rejected() {
+        // `/ruto/something` is a typo — the parent `/ruto` is not configured
+        // anywhere, so the stop path can never trigger. We reject it at setup
+        // time rather than silently parsing the whole document.
+        let config = config_from_yaml!(
+            r#"
+            parser_options:
+                stop_at_paths:
+                    - /ruto/something
+            tables:
+                - name: items
+                  xml_path: /root/items
+                  levels: [item]
+                  fields:
+                    - name: value
+                      xml_path: /root/items/item/value
+                      data_type: Int32
+            "#
+        );
+
+        let xml = b"<root><items><item><value>1</value></item></items></root>";
+        let err = parse_xml_slice(xml, &config).unwrap_err();
+        assert!(matches!(err, Error::InvalidConfig(_)));
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("/ruto/something") && msg.contains("/ruto"),
+            "expected error to mention the typo'd path and the unknown parent, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_stop_at_paths_known_parent_accepted_even_if_leaf_unreferenced() {
+        // `/root/summary` is not otherwise referenced in the config, but its
+        // parent `/root` is known (via the `/root/items/...` field), so the
+        // lenient check accepts it. The stop still fires when `<summary>`
+        // closes during parsing.
+        let xml = br#"
+        <root>
+            <items><item><value>1</value></item></items>
+            <summary><count>99</count></summary>
+            <tail><item><value>2</value></item></tail>
+        </root>
+        "#;
+
+        let config = config_from_yaml!(
+            r#"
+            parser_options:
+                stop_at_paths:
+                    - /root/summary
+            tables:
+                - name: items
+                  xml_path: /root/items
+                  levels: [item]
+                  fields:
+                    - name: value
+                      xml_path: /root/items/item/value
+                      data_type: Int32
+            "#
+        );
+
+        let batches = parse_xml_slice(xml, &config).unwrap();
+        let items = batches.get("items").unwrap();
+        assert_eq!(items.num_rows(), 1);
     }
 
     // =========================================================================

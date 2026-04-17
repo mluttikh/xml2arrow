@@ -24,6 +24,7 @@
 use fxhash::FxHashMap;
 
 use crate::config::Config;
+use crate::errors::{Error, Result};
 
 /// A node ID in the path registry trie.
 ///
@@ -150,13 +151,54 @@ impl PathRegistry {
             registry.node_info[node_id_idx].has_attribute_children = has_attr_child;
         }
 
-        // Phase 4: register optional stop paths so the parser can resolve them
-        // without string lookups in the hot loop.
-        for stop_path in &config.parser_options.stop_at_paths {
-            registry.get_or_create_path(stop_path);
-        }
+        // Note: `stop_at_paths` are intentionally *not* registered here. They go
+        // through `register_stop_path` separately so typos can be rejected as
+        // `Error::InvalidConfig` rather than silently creating phantom nodes
+        // the parser would never encounter.
 
         registry
+    }
+
+    /// Registers an optional `stop_at_paths` entry in the trie.
+    ///
+    /// Stop paths are allowed to point at elements the user otherwise ignores
+    /// (e.g. stopping at `/root/summary` when only `/root/meta` is configured),
+    /// so we can't require them to already exist in full. But we *can* catch
+    /// obvious typos cheaply by requiring the parent path to be known from the
+    /// table/field registrations (Phases 1-3). A typo like `/root/sumary` where
+    /// `/root/sumary`'s parent `/root` is known still slips through — but a
+    /// typo like `/ruto/summary` where even the parent is unknown is flagged.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::InvalidConfig` if the parent path of `path_str` is not
+    /// already in the registry.
+    pub fn register_stop_path(&mut self, path_str: &str) -> Result<PathNodeId> {
+        let segments: Vec<&str> = path_str
+            .trim_start_matches('/')
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        // A stop path of "/" (no segments) targets the root, which always exists.
+        let Some((leaf, parent_segments)) = segments.split_last() else {
+            return Ok(PathNodeId::ROOT);
+        };
+
+        // Walk the parent path strictly against existing nodes.
+        let mut parent = PathNodeId::ROOT;
+        for (depth, part) in parent_segments.iter().enumerate() {
+            parent = self.get_child(parent, part.as_bytes()).ok_or_else(|| {
+                let unknown_prefix = format!("/{}", parent_segments[..=depth].join("/"));
+                Error::InvalidConfig(format!(
+                    "stop_at_paths entry '{path_str}' references unknown parent path \
+                     '{unknown_prefix}' — no table or field is configured under it"
+                ))
+            })?;
+        }
+
+        // Parent is known; create (or reuse) the leaf node.
+        Ok(self.get_or_create_child(parent, leaf.as_bytes()))
     }
 
     /// Gets or creates a path in the trie, returning its node ID.
@@ -176,23 +218,6 @@ impl PathRegistry {
         }
 
         current_node
-    }
-
-    /// Resolves a path string to an existing node ID without creating new nodes.
-    ///
-    /// Returns `None` if the path doesn't exist in the registry.
-    pub fn resolve_path(&self, path_str: &str) -> Option<PathNodeId> {
-        let mut current_node = PathNodeId::ROOT;
-
-        for part in path_str
-            .trim_start_matches('/')
-            .split('/')
-            .filter(|s| !s.is_empty())
-        {
-            current_node = self.get_child(current_node, part.as_bytes())?;
-        }
-
-        Some(current_node)
     }
 
     /// Gets or creates a child node for the given parent and name.

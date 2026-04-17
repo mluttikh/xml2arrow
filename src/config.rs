@@ -44,11 +44,24 @@ impl Config {
     /// - Field `xml_path` must be a descendant of (or equal to) the parent table's `xml_path`,
     ///   unless the table's `xml_path` is `/` (root table, which allows any field path).
     /// - Scale/offset may only be used with Float32 and Float64 fields.
+    /// - `TableConfig::levels` must not exceed the number of non-root tables
+    ///   along the table's path (including itself). Over-specifying `levels`
+    ///   produces empty index columns that fail Arrow's length checks at
+    ///   finalization; under-specifying is allowed for singleton tables that
+    ///   don't want index columns.
     ///
     /// # Errors
     ///
     /// Returns an error if any of the above constraints are violated.
     pub fn validate(&self) -> Result<()> {
+        // Pre-compute segment slices once so the levels-depth check below
+        // doesn't re-parse every table's xml_path for every other table.
+        let table_segments: Vec<Vec<&str>> = self
+            .tables
+            .iter()
+            .map(|t| path_segments(&t.xml_path))
+            .collect();
+
         // --- Table-level checks ---
         let mut table_names = HashSet::with_capacity(self.tables.len());
         for table in &self.tables {
@@ -101,6 +114,37 @@ impl Config {
                 field.validate()?;
             }
         }
+
+        // --- Cross-table levels check ---
+        //
+        // Each time a row of table T is finalized, the parser emits one index
+        // value per non-root table currently on the builder stack — i.e. T
+        // itself plus every non-root table whose xml_path is a path-prefix of
+        // T's xml_path. If `levels.len()` exceeds this depth, the extra
+        // `index_builders` never receive values, and `RecordBatch::try_new`
+        // will fail on mismatched array lengths. Reject that case up front
+        // with a readable error instead.
+        for (i, table) in self.tables.iter().enumerate() {
+            let target = &table_segments[i];
+            let depth = self
+                .tables
+                .iter()
+                .zip(&table_segments)
+                .filter(|(t, _)| t.xml_path != "/")
+                .filter(|(_, segs)| is_path_prefix(segs, target))
+                .count();
+            if table.levels.len() > depth {
+                return Err(Error::InvalidConfig(format!(
+                    "Table '{}' has {} levels but its xml_path '{}' supports at most {} \
+                     (one per non-root ancestor table plus itself)",
+                    table.name,
+                    table.levels.len(),
+                    table.xml_path,
+                    depth,
+                )));
+            }
+        }
+
         Ok(())
     }
 
@@ -409,6 +453,24 @@ impl DType {
             DType::UInt64 => DataType::UInt64,
         }
     }
+}
+
+/// Splits an `xml_path` into non-empty segments, normalizing leading slashes
+/// and collapsing any double/trailing slashes. Matches the segmentation
+/// `PathRegistry::get_or_create_path` performs, so validation and registry
+/// lookups agree on what "depth" means.
+fn path_segments(path: &str) -> Vec<&str> {
+    path.trim_start_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Returns true if `prefix` is a path-prefix of `full` by segment equality.
+/// Uses segment-wise comparison so that `/a/bc` is not treated as a prefix of
+/// `/a/bcd/e`.
+fn is_path_prefix(prefix: &[&str], full: &[&str]) -> bool {
+    prefix.len() <= full.len() && full[..prefix.len()] == *prefix
 }
 
 /// Creates a `Config` struct from a YAML string literal.
@@ -878,6 +940,132 @@ mod tests {
             )],
         };
         assert!(config.validate().is_ok());
+    }
+
+    // --- Levels-depth validation tests ---
+
+    #[test]
+    fn test_levels_over_specified_rejected() {
+        // The table sits at /doc with no non-root ancestors, so depth = 1
+        // (self). Two levels means one extra index builder that would never
+        // receive values and would fail RecordBatch::try_new.
+        let config = Config {
+            parser_options: Default::default(),
+            tables: vec![TableConfig::new(
+                "items",
+                "/doc",
+                vec!["a".to_string(), "b".to_string()],
+                vec![
+                    FieldConfigBuilder::new("value", "/doc/item/value", DType::Int32)
+                        .build()
+                        .unwrap(),
+                ],
+            )],
+        };
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, Error::InvalidConfig(_)));
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("items") && msg.contains("2 levels") && msg.contains("at most 1"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_levels_under_specified_accepted_for_singleton() {
+        // Singleton tables (no iteration) legitimately opt out of their
+        // self-index column by using levels: []. The parser handles this by
+        // emitting only the configured field columns.
+        let config = Config {
+            parser_options: Default::default(),
+            tables: vec![TableConfig::new(
+                "metadata",
+                "/root/metadata",
+                vec![],
+                vec![
+                    FieldConfigBuilder::new("version", "/root/metadata/version", DType::Utf8)
+                        .build()
+                        .unwrap(),
+                ],
+            )],
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_levels_match_full_nested_depth_accepted() {
+        // Four nested non-root tables; the innermost has levels for every
+        // ancestor plus itself.
+        let mk = |name: &str, path: &str, levels: &[&str]| {
+            TableConfig::new(
+                name,
+                path,
+                levels.iter().map(|s| (*s).to_string()).collect(),
+                vec![],
+            )
+        };
+        let config = Config {
+            parser_options: Default::default(),
+            tables: vec![
+                mk("as", "/root", &["a"]),
+                mk("bs", "/root/a", &["a", "b"]),
+                mk("cs", "/root/a/b", &["a", "b", "c"]),
+                mk("ds", "/root/a/b/c", &["a", "b", "c", "d"]),
+            ],
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_root_table_with_nonempty_levels_rejected() {
+        // The root table "/" is explicitly skipped in the parser's
+        // parent-indices collection, so it can never receive any level index
+        // values. Any nonempty `levels` list is therefore unreachable.
+        let config = Config {
+            parser_options: Default::default(),
+            tables: vec![TableConfig::new(
+                "root",
+                "/",
+                vec!["a".to_string()],
+                vec![],
+            )],
+        };
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, Error::InvalidConfig(_)));
+        let msg = format!("{err:?}");
+        assert!(msg.contains("root"), "unexpected error message: {msg}");
+    }
+
+    #[test]
+    fn test_levels_depth_uses_segment_equality_not_string_prefix() {
+        // String prefixing would treat `/a/bc` as a prefix of `/a/bcd`, but
+        // segment-wise prefixing (what the parser actually applies) does not.
+        // The inner table has only itself as a non-root prefix table.
+        let config = Config {
+            parser_options: Default::default(),
+            tables: vec![
+                TableConfig::new("outer", "/a/bc", vec!["outer".to_string()], vec![]),
+                TableConfig::new("inner", "/a/bcd", vec!["inner".to_string()], vec![]),
+            ],
+        };
+        assert!(config.validate().is_ok());
+
+        // Now over-specify: asking for 2 levels on the inner table should
+        // fail since `/a/bc` is not a segment-prefix of `/a/bcd`.
+        let bad = Config {
+            parser_options: Default::default(),
+            tables: vec![
+                TableConfig::new("outer", "/a/bc", vec!["outer".to_string()], vec![]),
+                TableConfig::new(
+                    "inner",
+                    "/a/bcd",
+                    vec!["outer".to_string(), "inner".to_string()],
+                    vec![],
+                ),
+            ],
+        };
+        let err = bad.validate().unwrap_err();
+        assert!(matches!(err, Error::InvalidConfig(_)));
     }
 
     #[test]
