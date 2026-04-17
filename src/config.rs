@@ -411,10 +411,18 @@ impl DType {
     }
 }
 
-/// Creates a `Config` struct from a YAML string at compile time.
+/// Creates a `Config` struct from a YAML string literal.
 ///
-/// This macro takes a YAML string literal as input and parses it into a `Config` struct at compile time.
-/// It panics if the YAML is invalid.
+/// This is a convenience wrapper around `yaml_serde::from_str` followed by
+/// `Config::validate`. It is intended for tests and small examples where the
+/// YAML is known to be valid at the call site — invalid YAML or a failing
+/// validation will `panic!`. For production code that loads YAML from user
+/// input or files, use [`Config::from_yaml_file`] or `yaml_serde::from_str`
+/// directly and handle the error.
+///
+/// Despite the name, parsing happens at runtime when the macro is expanded
+/// and evaluated; Rust does not support compile-time YAML deserialization
+/// without a procedural macro.
 #[macro_export]
 macro_rules! config_from_yaml {
     ($yaml:expr) => {{
