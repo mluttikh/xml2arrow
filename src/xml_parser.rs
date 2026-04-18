@@ -29,6 +29,7 @@ use quick_xml::events::attributes::Attributes;
 use crate::Config;
 use crate::config::{DType, FieldConfig, TableConfig};
 use crate::errors::Error;
+use crate::errors::ParseKind;
 use crate::errors::Result;
 use crate::path_registry::{PathNodeId, PathRegistry, PathTracker};
 
@@ -177,20 +178,25 @@ macro_rules! append_int {
                 None => match $value.parse::<$ty>() {
                     Ok(val) => $builder.append_value(val),
                     Err(e) => {
-                        return Err(Error::ParseError(format!(
-                            "Failed to parse value '{}' as {} for field '{}' at path {}: {}",
-                            $value, $type_name, $field_config.name, $field_config.xml_path, e
-                        )));
+                        return Err(Error::ParseError {
+                            field: Arc::from($field_config.name.as_str()),
+                            path: Arc::from($field_config.xml_path.as_str()),
+                            value: $value.to_string(),
+                            kind: ParseKind::InvalidNumber {
+                                type_name: $type_name,
+                                reason: e.to_string(),
+                            },
+                        });
                     }
                 },
             }
         } else if $field_config.nullable {
             $builder.append_null();
         } else {
-            return Err(Error::ParseError(format!(
-                "Missing value for non-nullable field '{}' at path {}",
-                $field_config.name, $field_config.xml_path
-            )));
+            return Err(Error::MissingRequiredField {
+                field: Arc::from($field_config.name.as_str()),
+                path: Arc::from($field_config.xml_path.as_str()),
+            });
         }
     };
 }
@@ -220,19 +226,24 @@ macro_rules! append_float {
                     $builder.append_value(val);
                 }
                 Err(e) => {
-                    return Err(Error::ParseError(format!(
-                        "Failed to parse value '{}' as {} for field '{}' at path {}: {}",
-                        $value, $type_name, $field_config.name, $field_config.xml_path, e
-                    )));
+                    return Err(Error::ParseError {
+                        field: Arc::from($field_config.name.as_str()),
+                        path: Arc::from($field_config.xml_path.as_str()),
+                        value: $value.to_string(),
+                        kind: ParseKind::InvalidNumber {
+                            type_name: $type_name,
+                            reason: e.to_string(),
+                        },
+                    });
                 }
             }
         } else if $field_config.nullable {
             $builder.append_null();
         } else {
-            return Err(Error::ParseError(format!(
-                "Missing value for non-nullable field '{}' at path {}",
-                $field_config.name, $field_config.xml_path
-            )));
+            return Err(Error::MissingRequiredField {
+                field: Arc::from($field_config.name.as_str()),
+                path: Arc::from($field_config.xml_path.as_str()),
+            });
         }
     };
 }
@@ -300,25 +311,27 @@ impl FieldBuilder {
                         Ok(Some(val)) => b.append_value(val),
                         Ok(None) if fc.nullable => b.append_null(),
                         Ok(None) => {
-                            return Err(Error::ParseError(format!(
-                                "Missing value for non-nullable field '{}' at path {}",
-                                fc.name, fc.xml_path
-                            )));
+                            return Err(Error::MissingRequiredField {
+                                field: Arc::from(fc.name.as_str()),
+                                path: Arc::from(fc.xml_path.as_str()),
+                            });
                         }
                         Err(()) => {
-                            return Err(Error::ParseError(format!(
-                                "Failed to parse value '{}' as boolean for field '{}' at path {}: expected one of 'true', 'false', '1', '0', 'yes', 'no', 'on', 'off', 't', 'f', 'y', or 'n'",
-                                value, fc.name, fc.xml_path
-                            )));
+                            return Err(Error::ParseError {
+                                field: Arc::from(fc.name.as_str()),
+                                path: Arc::from(fc.xml_path.as_str()),
+                                value: value.to_string(),
+                                kind: ParseKind::InvalidBoolean,
+                            });
                         }
                     }
                 } else if fc.nullable {
                     b.append_null();
                 } else {
-                    return Err(Error::ParseError(format!(
-                        "Missing value for non-nullable field '{}' at path {}",
-                        fc.name, fc.xml_path
-                    )));
+                    return Err(Error::MissingRequiredField {
+                        field: Arc::from(fc.name.as_str()),
+                        path: Arc::from(fc.xml_path.as_str()),
+                    });
                 }
             }
         }
@@ -1868,12 +1881,16 @@ mod tests {
         let result = parse_xml(xml_content.as_bytes(), &config);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        match err {
-            Error::ParseError(msg) => {
-                assert!(msg.contains("maybe"));
-                assert!(msg.contains("boolean"));
+        match &err {
+            Error::ParseError {
+                value,
+                kind: ParseKind::InvalidBoolean,
+                ..
+            } => {
+                assert_eq!(value, "maybe");
+                assert!(err.to_string().contains("boolean"));
             }
-            _ => panic!("Expected ParseError, got {:?}", err),
+            other => panic!("Expected ParseError with InvalidBoolean, got {other:?}"),
         }
 
         Ok(())
@@ -2043,7 +2060,7 @@ mod tests {
         );
         assert!(result.is_err());
         match result.unwrap_err() {
-            Error::ParseError(msg) => assert!(msg.contains("not_a_number")),
+            e @ Error::ParseError { .. } => assert!(e.to_string().contains("not_a_number")),
             e => panic!("Expected ParseError, got {:?}", e),
         }
     }
@@ -2665,8 +2682,10 @@ mod tests {
         let result = parse_xml(xml_content.as_bytes(), &config);
         assert!(result.is_err());
         match result.unwrap_err() {
-            Error::ParseError(msg) => assert!(msg.contains("Missing value")),
-            e => panic!("Expected ParseError, got {:?}", e),
+            e @ Error::MissingRequiredField { .. } => {
+                assert!(e.to_string().contains("Missing value"));
+            }
+            e => panic!("Expected MissingRequiredField, got {:?}", e),
         }
 
         Ok(())
@@ -3588,7 +3607,7 @@ mod tests {
         );
         assert!(result.is_err());
         match result.unwrap_err() {
-            Error::ParseError(msg) => assert!(msg.contains("not_a_float")),
+            e @ Error::ParseError { .. } => assert!(e.to_string().contains("not_a_float")),
             e => panic!("Expected ParseError, got {:?}", e),
         }
     }
@@ -3615,7 +3634,7 @@ mod tests {
         );
         assert!(result.is_err());
         match result.unwrap_err() {
-            Error::ParseError(msg) => assert!(msg.contains("abc")),
+            e @ Error::ParseError { .. } => assert!(e.to_string().contains("abc")),
             e => panic!("Expected ParseError, got {:?}", e),
         }
     }
@@ -3670,8 +3689,10 @@ mod tests {
         let result = parse_xml("<data><row></row></data>".as_bytes(), &config);
         assert!(result.is_err());
         match result.unwrap_err() {
-            Error::ParseError(msg) => assert!(msg.contains("Missing value")),
-            e => panic!("Expected ParseError, got {:?}", e),
+            e @ Error::MissingRequiredField { .. } => {
+                assert!(e.to_string().contains("Missing value"));
+            }
+            e => panic!("Expected MissingRequiredField, got {:?}", e),
         }
     }
 
@@ -3971,8 +3992,10 @@ mod tests {
         );
         assert!(result.is_err());
         match result.unwrap_err() {
-            Error::ParseError(msg) => assert!(msg.contains("Missing value")),
-            e => panic!("Expected ParseError, got {:?}", e),
+            e @ Error::MissingRequiredField { .. } => {
+                assert!(e.to_string().contains("Missing value"));
+            }
+            e => panic!("Expected MissingRequiredField, got {:?}", e),
         }
     }
 
