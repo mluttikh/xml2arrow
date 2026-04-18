@@ -5,7 +5,7 @@ use std::{
     path::Path,
 };
 
-use crate::errors::{Error, Result};
+use crate::errors::{ConfigIssue, ConversionKind, Error, Result};
 use arrow::datatypes::DataType;
 use serde::{Deserialize, Serialize};
 
@@ -53,49 +53,62 @@ impl Config {
         let mut table_names = HashSet::with_capacity(self.tables.len());
         for table in &self.tables {
             if table.name.is_empty() {
-                return Err(Error::InvalidConfig("Table name must not be empty".into()));
+                return Err(Error::InvalidConfig {
+                    reason: ConfigIssue::EmptyTableName,
+                });
             }
             if !table_names.insert(&table.name) {
-                return Err(Error::InvalidConfig(format!(
-                    "Duplicate table name '{}'",
-                    table.name
-                )));
+                return Err(Error::InvalidConfig {
+                    reason: ConfigIssue::DuplicateTableName {
+                        name: table.name.clone(),
+                    },
+                });
             }
             if table.xml_path.is_empty() {
-                return Err(Error::InvalidConfig(format!(
-                    "Table '{}' has an empty xml_path",
-                    table.name
-                )));
+                return Err(Error::InvalidConfig {
+                    reason: ConfigIssue::EmptyTableXmlPath {
+                        table: table.name.clone(),
+                    },
+                });
             }
 
             // --- Field-level checks within this table ---
             let mut field_names = HashSet::with_capacity(table.fields.len());
             for field in &table.fields {
                 if field.name.is_empty() {
-                    return Err(Error::InvalidConfig(format!(
-                        "Field name must not be empty in table '{}'",
-                        table.name
-                    )));
+                    return Err(Error::InvalidConfig {
+                        reason: ConfigIssue::EmptyFieldName {
+                            table: table.name.clone(),
+                        },
+                    });
                 }
                 if !field_names.insert(&field.name) {
-                    return Err(Error::InvalidConfig(format!(
-                        "Duplicate field name '{}' in table '{}'",
-                        field.name, table.name
-                    )));
+                    return Err(Error::InvalidConfig {
+                        reason: ConfigIssue::DuplicateFieldName {
+                            table: table.name.clone(),
+                            field: field.name.clone(),
+                        },
+                    });
                 }
                 if field.xml_path.is_empty() {
-                    return Err(Error::InvalidConfig(format!(
-                        "Field '{}' in table '{}' has an empty xml_path",
-                        field.name, table.name
-                    )));
+                    return Err(Error::InvalidConfig {
+                        reason: ConfigIssue::EmptyFieldXmlPath {
+                            table: table.name.clone(),
+                            field: field.name.clone(),
+                        },
+                    });
                 }
 
                 // Field path must be under the table path (skip for root table "/").
                 if table.xml_path != "/" && !field.xml_path.starts_with(&table.xml_path) {
-                    return Err(Error::InvalidConfig(format!(
-                        "Field '{}' has xml_path '{}' which is not under table '{}' xml_path '{}'",
-                        field.name, field.xml_path, table.name, table.xml_path
-                    )));
+                    return Err(Error::InvalidConfig {
+                        reason: ConfigIssue::FieldPathNotUnderTable {
+                            table: table.name.clone(),
+                            table_path: table.xml_path.clone(),
+                            field: field.name.clone(),
+                            field_path: field.xml_path.clone(),
+                        },
+                    });
                 }
 
                 field.validate()?;
@@ -244,16 +257,16 @@ impl FieldConfig {
             DType::Float32 | DType::Float64 => Ok(()),
             _ => {
                 if self.scale.is_some() {
-                    return Err(Error::UnsupportedConversion(format!(
-                        "Scaling is only supported for Float32 and Float64, not {:?}",
-                        self.data_type
-                    )));
+                    return Err(Error::UnsupportedConversion {
+                        conversion: ConversionKind::Scaling,
+                        data_type: format!("{:?}", self.data_type),
+                    });
                 }
                 if self.offset.is_some() {
-                    return Err(Error::UnsupportedConversion(format!(
-                        "Offset is only supported for Float32 and Float64, not {:?}",
-                        self.data_type
-                    )));
+                    return Err(Error::UnsupportedConversion {
+                        conversion: ConversionKind::Offset,
+                        data_type: format!("{:?}", self.data_type),
+                    });
                 }
                 Ok(())
             }
@@ -705,8 +718,8 @@ mod tests {
             ],
         };
         let err = config.validate().unwrap_err();
-        assert!(matches!(err, Error::InvalidConfig(_)));
-        assert!(format!("{err:?}").contains("Duplicate table name 'items'"));
+        assert!(matches!(err, Error::InvalidConfig { .. }));
+        assert!(err.to_string().contains("Duplicate table name 'items'"));
     }
 
     #[test]
@@ -716,8 +729,8 @@ mod tests {
             tables: vec![TableConfig::new("", "/root", vec![], vec![])],
         };
         let err = config.validate().unwrap_err();
-        assert!(matches!(err, Error::InvalidConfig(_)));
-        assert!(format!("{err:?}").contains("Table name must not be empty"));
+        assert!(matches!(err, Error::InvalidConfig { .. }));
+        assert!(err.to_string().contains("Table name must not be empty"));
     }
 
     #[test]
@@ -727,8 +740,8 @@ mod tests {
             tables: vec![TableConfig::new("items", "", vec![], vec![])],
         };
         let err = config.validate().unwrap_err();
-        assert!(matches!(err, Error::InvalidConfig(_)));
-        assert!(format!("{err:?}").contains("empty xml_path"));
+        assert!(matches!(err, Error::InvalidConfig { .. }));
+        assert!(err.to_string().contains("empty xml_path"));
     }
 
     #[test]
@@ -750,8 +763,8 @@ mod tests {
             )],
         };
         let err = config.validate().unwrap_err();
-        assert!(matches!(err, Error::InvalidConfig(_)));
-        assert!(format!("{err:?}").contains("Duplicate field name 'value'"));
+        assert!(matches!(err, Error::InvalidConfig { .. }));
+        assert!(err.to_string().contains("Duplicate field name 'value'"));
     }
 
     #[test]
@@ -800,8 +813,8 @@ mod tests {
             )],
         };
         let err = config.validate().unwrap_err();
-        assert!(matches!(err, Error::InvalidConfig(_)));
-        assert!(format!("{err:?}").contains("Field name must not be empty"));
+        assert!(matches!(err, Error::InvalidConfig { .. }));
+        assert!(err.to_string().contains("Field name must not be empty"));
     }
 
     #[test]
@@ -820,8 +833,8 @@ mod tests {
             )],
         };
         let err = config.validate().unwrap_err();
-        assert!(matches!(err, Error::InvalidConfig(_)));
-        assert!(format!("{err:?}").contains("empty xml_path"));
+        assert!(matches!(err, Error::InvalidConfig { .. }));
+        assert!(err.to_string().contains("empty xml_path"));
     }
 
     #[test]
@@ -840,8 +853,8 @@ mod tests {
             )],
         };
         let err = config.validate().unwrap_err();
-        assert!(matches!(err, Error::InvalidConfig(_)));
-        assert!(format!("{err:?}").contains("not under table"));
+        assert!(matches!(err, Error::InvalidConfig { .. }));
+        assert!(err.to_string().contains("not under table"));
     }
 
     #[test]
