@@ -133,32 +133,38 @@ struct FieldBuilder {
     /// behind a single `bool` measurably outperforms unconditionally probing
     /// both `scale` and `offset` on every value.
     has_transform: bool,
-    /// Temporary storage for accumulating the current value from potentially multiple XML text nodes.
-    current_value: String,
+    /// Temporary storage for accumulating the current value from potentially
+    /// multiple XML text nodes. Held as raw bytes so the hot loop never pays
+    /// `str::from_utf8` per event — validation happens once, at append time,
+    /// and only for `Utf8` fields. Numeric and boolean parsers consume bytes
+    /// directly.
+    current_value: Vec<u8>,
 }
 
-/// Parses a boolean token from a string, trimming whitespace first.
+/// Parses a boolean token from a byte slice, trimming ASCII whitespace first.
 /// Returns `Ok(Some(bool))` for valid tokens, `Ok(None)` for empty/whitespace-only input,
-/// or `Err(())` for unrecognized values.
-fn parse_boolean_token(value: &str) -> std::result::Result<Option<bool>, ()> {
-    let trimmed = value.trim();
+/// or `Err(())` for unrecognized values. Operating on bytes lets the caller skip
+/// `str::from_utf8` on the hot path; the boolean vocabulary is ASCII-only so
+/// `eq_ignore_ascii_case` on bytes is semantically equivalent to the string form.
+fn parse_boolean_token(value: &[u8]) -> std::result::Result<Option<bool>, ()> {
+    let trimmed = value.trim_ascii();
     if trimmed.is_empty() {
         return Ok(None);
     }
-    if trimmed.eq_ignore_ascii_case("false")
-        || trimmed == "0"
-        || trimmed.eq_ignore_ascii_case("no")
-        || trimmed.eq_ignore_ascii_case("n")
-        || trimmed.eq_ignore_ascii_case("f")
-        || trimmed.eq_ignore_ascii_case("off")
+    if trimmed.eq_ignore_ascii_case(b"false")
+        || trimmed == b"0"
+        || trimmed.eq_ignore_ascii_case(b"no")
+        || trimmed.eq_ignore_ascii_case(b"n")
+        || trimmed.eq_ignore_ascii_case(b"f")
+        || trimmed.eq_ignore_ascii_case(b"off")
     {
         Ok(Some(false))
-    } else if trimmed.eq_ignore_ascii_case("true")
-        || trimmed == "1"
-        || trimmed.eq_ignore_ascii_case("yes")
-        || trimmed.eq_ignore_ascii_case("y")
-        || trimmed.eq_ignore_ascii_case("t")
-        || trimmed.eq_ignore_ascii_case("on")
+    } else if trimmed.eq_ignore_ascii_case(b"true")
+        || trimmed == b"1"
+        || trimmed.eq_ignore_ascii_case(b"yes")
+        || trimmed.eq_ignore_ascii_case(b"y")
+        || trimmed.eq_ignore_ascii_case(b"t")
+        || trimmed.eq_ignore_ascii_case(b"on")
     {
         Ok(Some(true))
     } else {
@@ -167,28 +173,33 @@ fn parse_boolean_token(value: &str) -> std::result::Result<Option<bool>, ()> {
 }
 
 /// Helper macro to reduce boilerplate for parsing and appending integer values.
-/// Uses `atoi` for fast byte-level integer parsing, with a `std::parse` fallback
-/// whose error message carries the underlying `IntErrorKind` (overflow, invalid
-/// digit, etc.).
+/// `$value` is a `&[u8]`; `atoi` already consumes bytes, so this is the natural
+/// representation. On failure we fall back to `str::parse` purely to surface
+/// the underlying `IntErrorKind` (overflow, invalid digit, etc.) in the error
+/// message — this path only runs when parsing fails, so the extra UTF-8 check
+/// is free for the hot case.
 macro_rules! append_int {
     ($builder:expr, $value:expr, $has_value:expr, $field_config:expr, $ty:ty, $type_name:expr) => {
         if $has_value {
-            match atoi::atoi::<$ty>($value.as_bytes()) {
+            match atoi::atoi::<$ty>($value) {
                 Some(val) => $builder.append_value(val),
-                None => match $value.parse::<$ty>() {
-                    Ok(val) => $builder.append_value(val),
-                    Err(e) => {
-                        return Err(Error::ParseError {
-                            field: Arc::from($field_config.name.as_str()),
-                            path: Arc::from($field_config.xml_path.as_str()),
-                            value: $value.to_string(),
-                            kind: ParseKind::InvalidNumber {
-                                type_name: $type_name,
-                                reason: e.to_string(),
-                            },
-                        });
+                None => {
+                    let as_str = std::str::from_utf8($value).unwrap_or("");
+                    match as_str.parse::<$ty>() {
+                        Ok(val) => $builder.append_value(val),
+                        Err(e) => {
+                            return Err(Error::ParseError {
+                                field: Arc::from($field_config.name.as_str()),
+                                path: Arc::from($field_config.xml_path.as_str()),
+                                value: String::from_utf8_lossy($value).into_owned(),
+                                kind: ParseKind::InvalidNumber {
+                                    type_name: $type_name,
+                                    reason: e.to_string(),
+                                },
+                            });
+                        }
                     }
-                },
+                }
             }
         } else if $field_config.nullable {
             $builder.append_null();
@@ -229,7 +240,7 @@ macro_rules! append_float {
                     return Err(Error::ParseError {
                         field: Arc::from($field_config.name.as_str()),
                         path: Arc::from($field_config.xml_path.as_str()),
-                        value: $value.to_string(),
+                        value: String::from_utf8_lossy($value).into_owned(),
                         kind: ParseKind::InvalidNumber {
                             type_name: $type_name,
                             reason: e.to_string(),
@@ -263,20 +274,20 @@ impl FieldBuilder {
             array_builder,
             has_value: false,
             has_transform,
-            current_value: String::with_capacity(128),
+            current_value: Vec::with_capacity(128),
         }
     }
 
     #[inline]
-    fn set_current_value(&mut self, value: &str) {
-        self.current_value.push_str(value);
+    fn set_current_value(&mut self, value: &[u8]) {
+        self.current_value.extend_from_slice(value);
         self.has_value = true;
     }
 
     /// Appends the currently accumulated value to the Arrow array builder,
     /// performing type conversion and handling nulls.
     fn append_current_value(&mut self) -> Result<()> {
-        let value = self.current_value.as_str();
+        let value = self.current_value.as_slice();
         let has_value = self.has_value;
         let has_transform = self.has_transform;
         let fc = &self.meta;
@@ -284,7 +295,11 @@ impl FieldBuilder {
         match &mut self.array_builder {
             TypedArrayBuilder::Utf8(b) => {
                 if has_value {
-                    b.append_value(value);
+                    // UTF-8 is validated exactly once per row per Utf8 field
+                    // (here), rather than once per text event in the hot loop.
+                    // Numeric/boolean fields never pay this cost.
+                    let s = std::str::from_utf8(value)?;
+                    b.append_value(s);
                 } else if fc.nullable {
                     b.append_null();
                 } else {
@@ -320,7 +335,7 @@ impl FieldBuilder {
                             return Err(Error::ParseError {
                                 field: Arc::from(fc.name.as_str()),
                                 path: Arc::from(fc.xml_path.as_str()),
-                                value: value.to_string(),
+                                value: String::from_utf8_lossy(value).into_owned(),
                                 kind: ParseKind::InvalidBoolean,
                             });
                         }
@@ -417,7 +432,7 @@ impl TableBuilder {
 
     /// Sets a field value by field index.
     #[inline]
-    fn set_field_value_by_index(&mut self, field_idx: usize, value: &str) {
+    fn set_field_value_by_index(&mut self, field_idx: usize, value: &[u8]) {
         if let Some(field_builder) = self.field_builders.get_mut(field_idx) {
             field_builder.set_current_value(value);
         }
@@ -539,7 +554,7 @@ impl XmlToArrowConverter {
 
     /// Sets a field value for the current table using path node information.
     #[inline]
-    pub fn set_field_value_for_node(&mut self, node_id: PathNodeId, value: &str) {
+    pub fn set_field_value_for_node(&mut self, node_id: PathNodeId, value: &[u8]) {
         let info = self.registry.get_node_info(node_id);
         if info.field_indices.is_empty() {
             return;
@@ -889,23 +904,28 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
         Event::GeneralRef(e) => {
             if let Some(node_id) = path_tracker.current() {
                 let text = e.into_inner();
-                let text = std::str::from_utf8(&text)?;
-                let resolved = escape::resolve_predefined_entity(text).unwrap_or_default();
-                xml_to_arrow_converter.set_field_value_for_node(node_id, resolved);
+                // The predefined-entity lookup requires a `&str`, but the
+                // vocabulary (`amp`, `lt`, `gt`, `quot`, `apos`) is ASCII, so
+                // invalid UTF-8 here just yields no resolution — consistent
+                // with the previous unwrap_or_default behavior for unknown
+                // entities.
+                let resolved = std::str::from_utf8(&text)
+                    .ok()
+                    .and_then(escape::resolve_predefined_entity)
+                    .unwrap_or_default();
+                xml_to_arrow_converter.set_field_value_for_node(node_id, resolved.as_bytes());
             }
         }
         Event::Text(e) => {
             if let Some(node_id) = path_tracker.current() {
                 let text = e.into_inner();
-                let text = std::str::from_utf8(&text)?;
-                xml_to_arrow_converter.set_field_value_for_node(node_id, text);
+                xml_to_arrow_converter.set_field_value_for_node(node_id, &text);
             }
         }
         Event::CData(e) => {
             if let Some(node_id) = path_tracker.current() {
                 let text = e.into_inner();
-                let text = std::str::from_utf8(&text)?;
-                xml_to_arrow_converter.set_field_value_for_node(node_id, text);
+                xml_to_arrow_converter.set_field_value_for_node(node_id, &text);
             }
         }
         Event::End(_) => {
@@ -1018,7 +1038,7 @@ fn parse_attributes(
             path_tracker.enter(attr_name_buffer, &xml_to_arrow_converter.registry)
         {
             let value = attribute.decode_and_unescape_value(decoder)?;
-            xml_to_arrow_converter.set_field_value_for_node(attr_node_id, &value);
+            xml_to_arrow_converter.set_field_value_for_node(attr_node_id, value.as_bytes());
         }
         path_tracker.leave();
     }
