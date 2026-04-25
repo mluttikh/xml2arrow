@@ -410,11 +410,100 @@ fn bench_parse_xlarge(c: &mut Criterion) {
     group.finish();
 }
 
+/// Generates XML where each `<record>` has many distinct child element names.
+///
+/// This stresses the path registry's child lookup: under a wide fan-out the
+/// `record` trie node has `num_fields` siblings, so resolving each child name
+/// requires the registry to find one entry among many. The existing benches
+/// all sit at low branching factor; this variant exercises the high-fan-out
+/// regime so changes to child-storage strategy can be validated against it.
+fn generate_wide_xml(num_records: usize, num_fields: usize) -> String {
+    let mut xml = String::with_capacity(num_records * num_fields * 32 + 256);
+    xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<root><records>\n");
+    for record_idx in 0..num_records {
+        xml.push_str("<record>");
+        for field_idx in 0..num_fields {
+            // Field names are deliberately similar so byte comparisons must
+            // walk a few characters before diverging — closer to real XML
+            // schemas than single-letter tags would be.
+            xml.push_str(&format!(
+                "<field_{:02}>{}</field_{:02}>",
+                field_idx,
+                record_idx * num_fields + field_idx,
+                field_idx,
+            ));
+        }
+        xml.push_str("</record>\n");
+    }
+    xml.push_str("</records></root>");
+    xml
+}
+
+fn get_wide_config(num_fields: usize) -> Config {
+    let mut yaml = String::from(
+        "parser_options:\n  trim_text: false\ntables:\n  - name: records\n    xml_path: /root/records\n    levels:\n      - record\n    fields:\n",
+    );
+    for field_idx in 0..num_fields {
+        yaml.push_str(&format!(
+            "      - name: field_{:02}\n        xml_path: /root/records/record/field_{:02}\n        data_type: Int64\n        nullable: false\n",
+            field_idx, field_idx,
+        ));
+    }
+    yaml_serde::from_str(&yaml).expect("Failed to parse wide config")
+}
+
+fn bench_parse_wide_fanout(c: &mut Criterion) {
+    // 24 sibling element names per record is high enough to differentiate
+    // hash-based from scan-based child lookup strategies. 5,000 records
+    // gives a hot-path iteration count comparable to parse_small while
+    // shifting cost from value parsing to element-name resolution.
+    let xml = generate_wide_xml(5_000, 24);
+    let config = get_wide_config(24);
+    let size_bytes = xml.len();
+
+    let mut group = c.benchmark_group("parse_wide_fanout");
+    group.sample_size(50);
+    group.measurement_time(Duration::from_secs(15));
+    group.warm_up_time(Duration::from_secs(5));
+    group.throughput(Throughput::Bytes(size_bytes as u64));
+
+    group.bench_with_input(
+        BenchmarkId::new(
+            "buffered_5K_records_24_fields",
+            format!("{}KB", size_bytes / 1024),
+        ),
+        &xml,
+        |b, xml| {
+            b.iter(|| {
+                let result = parse_xml(xml.as_bytes(), &config);
+                result.unwrap()
+            });
+        },
+    );
+
+    group.bench_with_input(
+        BenchmarkId::new(
+            "zero_copy_5K_records_24_fields",
+            format!("{}KB", size_bytes / 1024),
+        ),
+        &xml,
+        |b, xml| {
+            b.iter(|| {
+                let result = parse_xml_slice(xml.as_bytes(), &config);
+                result.unwrap()
+            });
+        },
+    );
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_parse_small,
     bench_parse_medium,
     bench_parse_large,
-    bench_parse_xlarge
+    bench_parse_xlarge,
+    bench_parse_wide_fanout
 );
 criterion_main!(benches);
