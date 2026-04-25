@@ -25,6 +25,15 @@ use fxhash::FxHashMap;
 
 use crate::config::Config;
 
+/// Threshold at which a node's child list switches from a linear-scan `Vec`
+/// to an `FxHashMap`. Chosen empirically: at small fan-out the linear scan
+/// wins by skipping the hash + heap indirection (one or two short byte-slice
+/// comparisons against cache-resident strings); above ~8 children the per-
+/// lookup work outgrows the hash cost and the map starts paying off. Real
+/// XML schemas almost always sit well below this threshold per node, so the
+/// `Small` arm is the default hot path.
+const SMALL_CHILDREN_THRESHOLD: usize = 8;
+
 /// A node ID in the path registry trie.
 ///
 /// Node 0 is always the root node (representing "/").
@@ -101,14 +110,82 @@ impl PathNodeInfo {
 ///                                                                                            └── "@id" ──▶ [ID: 6] ── (Metadata: Field 0, Table 1)
 /// ```
 ///
-/// Under the hood, this tree is flattened into parallel vectors to ensure cache-friendly, O(1) lookups:
-/// * `children`: Uses the node's `PathNodeId` as an index to find a map of `child_name -> child_id`.
+/// Under the hood, this tree is flattened into parallel vectors to ensure cache-friendly lookups:
+/// * `children`: Uses the node's `PathNodeId` as an index to find a `NodeChildren`
+///   container. Small child sets (the common case) live in an inline `Vec` and are
+///   resolved by linear scan; large child sets promote to an `FxHashMap`.
 /// * `node_info`: Uses the node's `PathNodeId` as an index to retrieve `PathNodeInfo` (whether this node is a table boundary or contains fields).
 pub struct PathRegistry {
-    /// For each node, map child element name to child node ID.
-    children: Vec<FxHashMap<Box<[u8]>, PathNodeId>>,
+    /// For each node, the container of its children.
+    children: Vec<NodeChildren>,
     /// Information about each node (is it a table? which fields?).
     node_info: Vec<PathNodeInfo>,
+}
+
+/// Per-node child storage with a representation that adapts to fan-out.
+///
+/// `Small` is the hot path: real XML configs almost always have a handful of
+/// children per node, where a contiguous `Vec` of `(name, id)` pairs beats a
+/// hash map — no hash to compute, no bucket indirection, and the whole list
+/// typically fits in a cache line or two. `Large` exists purely so worst-case
+/// configurations (dozens of distinct sibling element names) don't regress
+/// vs. the prior hashmap implementation.
+enum NodeChildren {
+    Small(Vec<(Box<[u8]>, PathNodeId)>),
+    Large(FxHashMap<Box<[u8]>, PathNodeId>),
+}
+
+impl NodeChildren {
+    fn new() -> Self {
+        NodeChildren::Small(Vec::new())
+    }
+
+    #[inline]
+    fn get(&self, name: &[u8]) -> Option<PathNodeId> {
+        match self {
+            NodeChildren::Small(entries) => {
+                for (child_name, child_id) in entries {
+                    if child_name.as_ref() == name {
+                        return Some(*child_id);
+                    }
+                }
+                None
+            }
+            NodeChildren::Large(map) => map.get(name).copied(),
+        }
+    }
+
+    /// Inserts a child name → ID mapping. Caller must have verified the name
+    /// is not already present (the registry's `get_or_create_child` does that
+    /// via `get_child` first). Promotes from `Small` to `Large` once the
+    /// linear scan would start to lose to hashing.
+    fn insert(&mut self, name: Box<[u8]>, id: PathNodeId) {
+        match self {
+            NodeChildren::Small(entries) => {
+                if entries.len() >= SMALL_CHILDREN_THRESHOLD {
+                    let mut map =
+                        FxHashMap::with_capacity_and_hasher(entries.len() + 1, Default::default());
+                    for (n, i) in entries.drain(..) {
+                        map.insert(n, i);
+                    }
+                    map.insert(name, id);
+                    *self = NodeChildren::Large(map);
+                } else {
+                    entries.push((name, id));
+                }
+            }
+            NodeChildren::Large(map) => {
+                map.insert(name, id);
+            }
+        }
+    }
+
+    fn any_attribute_name(&self) -> bool {
+        match self {
+            NodeChildren::Small(entries) => entries.iter().any(|(n, _)| n.starts_with(b"@")),
+            NodeChildren::Large(map) => map.keys().any(|n| n.starts_with(b"@")),
+        }
+    }
 }
 
 impl PathRegistry {
@@ -118,7 +195,7 @@ impl PathRegistry {
     /// strings for configured paths. This is the main performance lever.
     pub fn from_config(config: &Config) -> Self {
         let mut registry = Self {
-            children: vec![FxHashMap::default()],     // Root node
+            children: vec![NodeChildren::new()],      // Root node
             node_info: vec![PathNodeInfo::default()], // Root info
         };
 
@@ -144,10 +221,8 @@ impl PathRegistry {
         // Phase 3: mark nodes that have attribute children so the parser can
         // skip attribute iteration for elements with no attribute fields.
         for node_id_idx in 0..registry.children.len() {
-            let has_attr_child = registry.children[node_id_idx]
-                .keys()
-                .any(|name| name.starts_with(b"@"));
-            registry.node_info[node_id_idx].has_attribute_children = has_attr_child;
+            registry.node_info[node_id_idx].has_attribute_children =
+                registry.children[node_id_idx].any_attribute_name();
         }
 
         // Phase 4: register optional stop paths so the parser can resolve them
@@ -200,14 +275,14 @@ impl PathRegistry {
     /// This is the only place we mutate the trie. By isolating that logic, we
     /// avoid duplicating bookkeeping for new nodes.
     fn get_or_create_child(&mut self, parent: PathNodeId, name: &[u8]) -> PathNodeId {
-        if let Some(&child_id) = self.children[parent.index()].get(name) {
+        if let Some(child_id) = self.get_child(parent, name) {
             return child_id;
         }
 
         // Create a new node and wire it into the trie.
         #[allow(clippy::cast_possible_truncation)] // Node count will never exceed u32::MAX
         let new_id = PathNodeId(self.children.len() as u32);
-        self.children.push(FxHashMap::default());
+        self.children.push(NodeChildren::new());
         self.node_info.push(PathNodeInfo::default());
         self.children[parent.index()].insert(name.into(), new_id);
 
@@ -217,9 +292,13 @@ impl PathRegistry {
     /// Looks up a child node by name.
     ///
     /// Returns `None` if the child doesn't exist (path not in config).
+    ///
+    /// The underlying container adapts to fan-out: a linear scan when there
+    /// are only a handful of children (the common case for XML element
+    /// nodes), promoting to a hash map past the small-set threshold.
     #[inline]
     pub fn get_child(&self, parent: PathNodeId, name: &[u8]) -> Option<PathNodeId> {
-        self.children.get(parent.index())?.get(name).copied()
+        self.children.get(parent.index())?.get(name)
     }
 
     /// Gets information about a node.
@@ -240,12 +319,6 @@ impl PathRegistry {
         self.node_info[node_id.index()].table_index
     }
 
-    /// Returns true if the given node has any attribute children in the trie.
-    #[inline]
-    pub fn has_attribute_children(&self, node_id: PathNodeId) -> bool {
-        self.node_info[node_id.index()].has_attribute_children
-    }
-
     /// Returns the root node info.
     #[inline]
     #[allow(dead_code)]
@@ -254,51 +327,100 @@ impl PathRegistry {
     }
 }
 
+/// One frame on the `PathTracker` stack — a single open XML element.
+///
+/// Carries the metadata the parser needs to react to the matching close
+/// without a second registry lookup. `is_table` is materialized at `enter()`
+/// time from `PathNodeInfo` so `Event::End` and `Event::Empty` can decide
+/// whether to finalize a row using only the stack.
+#[derive(Debug, Clone, Copy)]
+struct StackEntry {
+    /// Node ID for known paths; `ROOT` for unknown subtrees (placeholder).
+    node_id: PathNodeId,
+    /// Whether `node_id` corresponds to a configured path.
+    is_known: bool,
+    /// Whether this node is a table boundary. Only meaningful when `is_known`.
+    is_table: bool,
+}
+
 /// Tracks the current position in the path trie during parsing.
 ///
-/// The parser operates on streaming XML events. We maintain a stack that mirrors
-/// the XML nesting depth. Each entry records:
-/// - the node ID (if known)
-/// - whether this path exists in the registry
+/// The parser operates on streaming XML events. We maintain a stack that
+/// mirrors XML nesting depth; the bottom is always the implicit document
+/// root, so the stack is never empty.
 ///
-/// If a path is unknown, we keep pushing "unknown" entries until we exit that
-/// subtree. This avoids repeated registry lookups for irrelevant branches.
+/// Each frame carries the few bits the parser needs at `Event::End` /
+/// `Event::Empty` time (is_table, is_known). The previous design kept those
+/// in a parallel `element_stack` plus a separate `node_info[]` lookup at
+/// close time; folding them onto this stack saves a Vec push/pop and a
+/// cache-line read per element.
+///
+/// If a path is unknown, we keep pushing "unknown" placeholder frames until
+/// we exit that subtree. This avoids repeated registry lookups for
+/// irrelevant branches.
 #[derive(Debug)]
 pub struct PathTracker {
-    /// Stack of (`node_id`, `is_known_path`) pairs representing current XML nesting.
-    /// `is_known_path` is true if the node exists in the registry (path is in config).
-    node_stack: Vec<(PathNodeId, bool)>,
+    node_stack: Vec<StackEntry>,
 }
 
 impl PathTracker {
     /// Creates a new path tracker starting at the root.
-    pub fn new() -> Self {
+    ///
+    /// `registry` is consulted exactly once to seed the root frame's
+    /// `is_table` flag (so `top_is_table()` works at root depth without
+    /// re-querying).
+    pub fn new(registry: &PathRegistry) -> Self {
+        let root_is_table = registry.is_table_path(PathNodeId::ROOT);
         Self {
-            node_stack: vec![(PathNodeId::ROOT, true)],
+            node_stack: vec![StackEntry {
+                node_id: PathNodeId::ROOT,
+                is_known: true,
+                is_table: root_is_table,
+            }],
         }
     }
 
     /// Enters a child element, updating the current path position.
     ///
-    /// Returns the new node ID if the path exists in the registry, or None if
-    /// the path is not configured (and thus can be ignored).
+    /// On a successful resolve, returns the new node ID together with a
+    /// borrow of its `PathNodeInfo` so the caller can read every per-node
+    /// flag (table_index, has_attribute_children, field_indices) without a
+    /// second array lookup. Returns `None` if the path is not configured;
+    /// a placeholder frame is still pushed to keep depth aligned with XML
+    /// nesting.
     #[inline]
-    pub fn enter(&mut self, name: &[u8], registry: &PathRegistry) -> Option<PathNodeId> {
-        let (current_node, current_is_known) = self.node_stack.last().copied().unwrap();
+    pub fn enter<'r>(
+        &mut self,
+        name: &[u8],
+        registry: &'r PathRegistry,
+    ) -> Option<(PathNodeId, &'r PathNodeInfo)> {
+        let top = *self.node_stack.last().unwrap();
 
-        if !current_is_known {
+        if !top.is_known {
             // Parent path is not in config, so children can't be either.
-            // We still push to keep depth aligned with XML nesting.
-            self.node_stack.push((PathNodeId::ROOT, false));
+            // Push a placeholder so leave() pops at the right depth.
+            self.node_stack.push(StackEntry {
+                node_id: PathNodeId::ROOT,
+                is_known: false,
+                is_table: false,
+            });
             return None;
         }
 
-        if let Some(child_id) = registry.get_child(current_node, name) {
-            self.node_stack.push((child_id, true));
-            Some(child_id)
+        if let Some(child_id) = registry.get_child(top.node_id, name) {
+            let info = registry.get_node_info(child_id);
+            self.node_stack.push(StackEntry {
+                node_id: child_id,
+                is_known: true,
+                is_table: info.is_table(),
+            });
+            Some((child_id, info))
         } else {
-            // Path not in config; mark as unknown and keep depth aligned.
-            self.node_stack.push((PathNodeId::ROOT, false));
+            self.node_stack.push(StackEntry {
+                node_id: PathNodeId::ROOT,
+                is_known: false,
+                is_table: false,
+            });
             None
         }
     }
@@ -309,9 +431,9 @@ impl PathTracker {
     #[inline]
     pub fn leave(&mut self) -> Option<PathNodeId> {
         if self.node_stack.len() > 1 {
-            let (node_id, is_known) = self.node_stack.pop().unwrap();
-            if is_known {
-                return Some(node_id);
+            let entry = self.node_stack.pop().unwrap();
+            if entry.is_known {
+                return Some(entry.node_id);
             }
         }
         None
@@ -320,8 +442,40 @@ impl PathTracker {
     /// Returns the current node ID if it's a known path.
     #[inline]
     pub fn current(&self) -> Option<PathNodeId> {
-        let (node_id, is_known) = self.node_stack.last().copied().unwrap();
-        if is_known { Some(node_id) } else { None }
+        let top = *self.node_stack.last().unwrap();
+        if top.is_known {
+            Some(top.node_id)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the top frame's `(node_id_if_known, is_table)` when an element
+    /// is open above root, or `None` at root depth (no element to close).
+    ///
+    /// Used by `Event::End` to read the closing element's attributes without
+    /// popping (the pop happens later inside `close_element` via `leave()`).
+    #[inline]
+    pub fn peek_top(&self) -> Option<(Option<PathNodeId>, bool)> {
+        if self.node_stack.len() > 1 {
+            let top = self.node_stack.last().unwrap();
+            let id = if top.is_known {
+                Some(top.node_id)
+            } else {
+                None
+            };
+            Some((id, top.is_table))
+        } else {
+            None
+        }
+    }
+
+    /// Returns true if the top of the stack is currently a table-boundary
+    /// path. After `leave()` this answers "is the parent a table?", which is
+    /// what `close_element` needs to decide whether to finalize a row.
+    #[inline]
+    pub fn top_is_table(&self) -> bool {
+        self.node_stack.last().unwrap().is_table
     }
 
     /// Returns the current node ID, or ROOT if unknown.
@@ -330,14 +484,14 @@ impl PathTracker {
     pub fn current_or_root(&self) -> PathNodeId {
         self.node_stack
             .last()
-            .map_or(PathNodeId::ROOT, |(id, _)| *id)
+            .map_or(PathNodeId::ROOT, |e| e.node_id)
     }
 
     /// Returns true if the current path is known (exists in the registry).
     #[inline]
     #[allow(dead_code)]
     pub fn is_current_known(&self) -> bool {
-        self.node_stack.last().is_some_and(|(_, known)| *known)
+        self.node_stack.last().is_some_and(|e| e.is_known)
     }
 
     /// Returns the depth of the current path (number of segments from root).
@@ -345,12 +499,6 @@ impl PathTracker {
     #[allow(dead_code)]
     pub fn depth(&self) -> usize {
         self.node_stack.len().saturating_sub(1)
-    }
-}
-
-impl Default for PathTracker {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -432,17 +580,21 @@ mod tests {
     fn test_path_tracker_tracks_known_paths() {
         let config = create_test_config();
         let registry = PathRegistry::from_config(&config);
-        let mut tracker = PathTracker::new();
+        let mut tracker = PathTracker::new(&registry);
 
         // Enter /root
-        let node = tracker.enter(b"root", &registry);
-        assert!(node.is_some());
-        assert!(!registry.is_table_path(node.unwrap()));
+        let entered = tracker.enter(b"root", &registry);
+        assert!(entered.is_some());
+        let (node, info) = entered.unwrap();
+        assert!(!info.is_table());
+        assert!(!registry.is_table_path(node));
 
         // Enter /root/items
-        let node = tracker.enter(b"items", &registry);
-        assert!(node.is_some());
-        assert!(registry.is_table_path(node.unwrap()));
+        let entered = tracker.enter(b"items", &registry);
+        assert!(entered.is_some());
+        let (node, info) = entered.unwrap();
+        assert!(info.is_table());
+        assert!(registry.is_table_path(node));
 
         // Leave /root/items
         let left = tracker.leave();
@@ -457,16 +609,16 @@ mod tests {
     fn test_path_tracker_ignores_unknown_paths() {
         let config = create_test_config();
         let registry = PathRegistry::from_config(&config);
-        let mut tracker = PathTracker::new();
+        let mut tracker = PathTracker::new(&registry);
 
         // Enter unknown path
-        let node = tracker.enter(b"unknown", &registry);
-        assert!(node.is_none());
+        let entered = tracker.enter(b"unknown", &registry);
+        assert!(entered.is_none());
         assert!(!tracker.is_current_known());
 
         // Children of unknown paths are also unknown
-        let node = tracker.enter(b"child", &registry);
-        assert!(node.is_none());
+        let entered = tracker.enter(b"child", &registry);
+        assert!(entered.is_none());
 
         // Leave unknown child
         tracker.leave();
@@ -515,7 +667,7 @@ mod tests {
         );
 
         let registry = PathRegistry::from_config(&config);
-        let mut tracker = PathTracker::new();
+        let mut tracker = PathTracker::new(&registry);
 
         // Navigate to /root/items/item
         tracker.enter(b"root", &registry);
@@ -523,10 +675,11 @@ mod tests {
         tracker.enter(b"item", &registry);
 
         // Enter attribute path @id
-        let node = tracker.enter(b"@id", &registry);
-        assert!(node.is_some());
+        let entered = tracker.enter(b"@id", &registry);
+        assert!(entered.is_some());
+        let (node_id, _) = entered.unwrap();
 
-        let info = registry.get_node_info(node.unwrap());
+        let info = registry.get_node_info(node_id);
         assert!(info.has_fields());
         assert_eq!(info.field_indices[0], (0, 0)); // table 0, field 0
     }
