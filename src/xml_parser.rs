@@ -962,10 +962,12 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
     let mut buf = Vec::with_capacity(4096);
     let mut attr_name_buffer = Vec::with_capacity(64);
     let mut element_stack: Vec<(Option<PathNodeId>, bool)> = Vec::with_capacity(32);
+    // Decoder is `Copy` and reflects the reader's encoding, which does not
+    // change once parsing begins — read it once outside the hot loop.
+    let decoder = reader.decoder();
 
     loop {
         let event = reader.read_event_into(&mut buf)?;
-        let decoder = reader.decoder();
         let action = handle_event::<PARSE_ATTRIBUTES>(
             event,
             decoder,
@@ -997,10 +999,12 @@ fn process_xml_events_slice<const PARSE_ATTRIBUTES: bool>(
 ) -> Result<()> {
     let mut attr_name_buffer = Vec::with_capacity(64);
     let mut element_stack: Vec<(Option<PathNodeId>, bool)> = Vec::with_capacity(32);
+    // Decoder is `Copy` and reflects the reader's encoding, which does not
+    // change once parsing begins — read it once outside the hot loop.
+    let decoder = reader.decoder();
 
     loop {
         let event = reader.read_event()?;
-        let decoder = reader.decoder();
         let action = handle_event::<PARSE_ATTRIBUTES>(
             event,
             decoder,

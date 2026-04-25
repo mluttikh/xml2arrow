@@ -25,6 +25,15 @@ use fxhash::FxHashMap;
 
 use crate::config::Config;
 
+/// Threshold at which a node's child list switches from a linear-scan `Vec`
+/// to an `FxHashMap`. Chosen empirically: at small fan-out the linear scan
+/// wins by skipping the hash + heap indirection (one or two short byte-slice
+/// comparisons against cache-resident strings); above ~8 children the per-
+/// lookup work outgrows the hash cost and the map starts paying off. Real
+/// XML schemas almost always sit well below this threshold per node, so the
+/// `Small` arm is the default hot path.
+const SMALL_CHILDREN_THRESHOLD: usize = 8;
+
 /// A node ID in the path registry trie.
 ///
 /// Node 0 is always the root node (representing "/").
@@ -101,14 +110,82 @@ impl PathNodeInfo {
 ///                                                                                            └── "@id" ──▶ [ID: 6] ── (Metadata: Field 0, Table 1)
 /// ```
 ///
-/// Under the hood, this tree is flattened into parallel vectors to ensure cache-friendly, O(1) lookups:
-/// * `children`: Uses the node's `PathNodeId` as an index to find a map of `child_name -> child_id`.
+/// Under the hood, this tree is flattened into parallel vectors to ensure cache-friendly lookups:
+/// * `children`: Uses the node's `PathNodeId` as an index to find a `NodeChildren`
+///   container. Small child sets (the common case) live in an inline `Vec` and are
+///   resolved by linear scan; large child sets promote to an `FxHashMap`.
 /// * `node_info`: Uses the node's `PathNodeId` as an index to retrieve `PathNodeInfo` (whether this node is a table boundary or contains fields).
 pub struct PathRegistry {
-    /// For each node, map child element name to child node ID.
-    children: Vec<FxHashMap<Box<[u8]>, PathNodeId>>,
+    /// For each node, the container of its children.
+    children: Vec<NodeChildren>,
     /// Information about each node (is it a table? which fields?).
     node_info: Vec<PathNodeInfo>,
+}
+
+/// Per-node child storage with a representation that adapts to fan-out.
+///
+/// `Small` is the hot path: real XML configs almost always have a handful of
+/// children per node, where a contiguous `Vec` of `(name, id)` pairs beats a
+/// hash map — no hash to compute, no bucket indirection, and the whole list
+/// typically fits in a cache line or two. `Large` exists purely so worst-case
+/// configurations (dozens of distinct sibling element names) don't regress
+/// vs. the prior hashmap implementation.
+enum NodeChildren {
+    Small(Vec<(Box<[u8]>, PathNodeId)>),
+    Large(FxHashMap<Box<[u8]>, PathNodeId>),
+}
+
+impl NodeChildren {
+    fn new() -> Self {
+        NodeChildren::Small(Vec::new())
+    }
+
+    #[inline]
+    fn get(&self, name: &[u8]) -> Option<PathNodeId> {
+        match self {
+            NodeChildren::Small(entries) => {
+                for (child_name, child_id) in entries {
+                    if child_name.as_ref() == name {
+                        return Some(*child_id);
+                    }
+                }
+                None
+            }
+            NodeChildren::Large(map) => map.get(name).copied(),
+        }
+    }
+
+    /// Inserts a child name → ID mapping. Caller must have verified the name
+    /// is not already present (the registry's `get_or_create_child` does that
+    /// via `get_child` first). Promotes from `Small` to `Large` once the
+    /// linear scan would start to lose to hashing.
+    fn insert(&mut self, name: Box<[u8]>, id: PathNodeId) {
+        match self {
+            NodeChildren::Small(entries) => {
+                if entries.len() >= SMALL_CHILDREN_THRESHOLD {
+                    let mut map =
+                        FxHashMap::with_capacity_and_hasher(entries.len() + 1, Default::default());
+                    for (n, i) in entries.drain(..) {
+                        map.insert(n, i);
+                    }
+                    map.insert(name, id);
+                    *self = NodeChildren::Large(map);
+                } else {
+                    entries.push((name, id));
+                }
+            }
+            NodeChildren::Large(map) => {
+                map.insert(name, id);
+            }
+        }
+    }
+
+    fn any_attribute_name(&self) -> bool {
+        match self {
+            NodeChildren::Small(entries) => entries.iter().any(|(n, _)| n.starts_with(b"@")),
+            NodeChildren::Large(map) => map.keys().any(|n| n.starts_with(b"@")),
+        }
+    }
 }
 
 impl PathRegistry {
@@ -118,7 +195,7 @@ impl PathRegistry {
     /// strings for configured paths. This is the main performance lever.
     pub fn from_config(config: &Config) -> Self {
         let mut registry = Self {
-            children: vec![FxHashMap::default()],     // Root node
+            children: vec![NodeChildren::new()],      // Root node
             node_info: vec![PathNodeInfo::default()], // Root info
         };
 
@@ -144,10 +221,8 @@ impl PathRegistry {
         // Phase 3: mark nodes that have attribute children so the parser can
         // skip attribute iteration for elements with no attribute fields.
         for node_id_idx in 0..registry.children.len() {
-            let has_attr_child = registry.children[node_id_idx]
-                .keys()
-                .any(|name| name.starts_with(b"@"));
-            registry.node_info[node_id_idx].has_attribute_children = has_attr_child;
+            registry.node_info[node_id_idx].has_attribute_children =
+                registry.children[node_id_idx].any_attribute_name();
         }
 
         // Phase 4: register optional stop paths so the parser can resolve them
@@ -200,14 +275,14 @@ impl PathRegistry {
     /// This is the only place we mutate the trie. By isolating that logic, we
     /// avoid duplicating bookkeeping for new nodes.
     fn get_or_create_child(&mut self, parent: PathNodeId, name: &[u8]) -> PathNodeId {
-        if let Some(&child_id) = self.children[parent.index()].get(name) {
+        if let Some(child_id) = self.get_child(parent, name) {
             return child_id;
         }
 
         // Create a new node and wire it into the trie.
         #[allow(clippy::cast_possible_truncation)] // Node count will never exceed u32::MAX
         let new_id = PathNodeId(self.children.len() as u32);
-        self.children.push(FxHashMap::default());
+        self.children.push(NodeChildren::new());
         self.node_info.push(PathNodeInfo::default());
         self.children[parent.index()].insert(name.into(), new_id);
 
@@ -217,9 +292,13 @@ impl PathRegistry {
     /// Looks up a child node by name.
     ///
     /// Returns `None` if the child doesn't exist (path not in config).
+    ///
+    /// The underlying container adapts to fan-out: a linear scan when there
+    /// are only a handful of children (the common case for XML element
+    /// nodes), promoting to a hash map past the small-set threshold.
     #[inline]
     pub fn get_child(&self, parent: PathNodeId, name: &[u8]) -> Option<PathNodeId> {
-        self.children.get(parent.index())?.get(name).copied()
+        self.children.get(parent.index())?.get(name)
     }
 
     /// Gets information about a node.
