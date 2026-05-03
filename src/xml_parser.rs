@@ -537,21 +537,6 @@ impl XmlToArrowConverter {
         })
     }
 
-    /// Check if the given node represents a table path.
-    #[inline]
-    fn is_table_path(&self, node_id: PathNodeId) -> bool {
-        self.registry.is_table_path(node_id)
-    }
-
-    /// Check if there's a root-level table (`xml_path`: /) that has fields defined.
-    fn has_root_table_with_fields(&self) -> bool {
-        if let Some(table_idx) = self.registry.get_table_index(PathNodeId::ROOT) {
-            !self.table_builders[table_idx].field_builders.is_empty()
-        } else {
-            false
-        }
-    }
-
     /// Sets a field value for the current table using path node information.
     #[inline]
     pub fn set_field_value_for_node(&mut self, node_id: PathNodeId, value: &[u8]) {
@@ -593,12 +578,17 @@ impl XmlToArrowConverter {
         Ok(())
     }
 
-    fn start_table(&mut self, node_id: PathNodeId) {
-        if let Some(table_idx) = self.registry.get_table_index(node_id) {
-            self.builder_stack
-                .push(TableStackEntry { table_idx, node_id });
-            self.table_builders[table_idx].row_index = 0;
-        }
+    /// Pushes a new table scope onto the builder stack.
+    ///
+    /// `table_idx` is taken as a parameter (rather than re-derived from
+    /// `node_id` via `registry.get_table_index`) because every hot-path
+    /// caller already has the index in hand from the same `PathNodeInfo`
+    /// read that decided this node was a table boundary. Avoiding the
+    /// re-lookup keeps the per-Start path to a single `node_info[]` access.
+    fn start_table(&mut self, table_idx: usize, node_id: PathNodeId) {
+        self.builder_stack
+            .push(TableStackEntry { table_idx, node_id });
+        self.table_builders[table_idx].row_index = 0;
     }
 
     fn end_table(&mut self) {
@@ -734,15 +724,21 @@ where
     F: FnOnce(&mut R, &mut PathTracker, &mut XmlToArrowConverter, &[PathNodeId]) -> Result<()>,
 {
     let mut xml_to_arrow_converter = XmlToArrowConverter::from_config(config)?;
-    let mut path_tracker = PathTracker::new();
+    let mut path_tracker = PathTracker::new(&xml_to_arrow_converter.registry);
 
     // Start the root-level table (xml_path: /) if it exists AND has fields
     // defined. We only start it if it has fields, because adding it to the
     // builder_stack would affect parent_row_indices for all nested tables,
     // breaking their level indexing. Tables with xml_path: / and no fields are
     // just used for hierarchy purposes and don't need to be on the stack.
-    if xml_to_arrow_converter.has_root_table_with_fields() {
-        xml_to_arrow_converter.start_table(PathNodeId::ROOT);
+    if let Some(table_idx) = xml_to_arrow_converter
+        .registry
+        .get_table_index(PathNodeId::ROOT)
+        && !xml_to_arrow_converter.table_builders[table_idx]
+            .field_builders
+            .is_empty()
+    {
+        xml_to_arrow_converter.start_table(table_idx, PathNodeId::ROOT);
     }
 
     let stop_node_ids = std::mem::take(&mut xml_to_arrow_converter.stop_node_ids);
@@ -781,9 +777,17 @@ enum LoopAction {
 /// path tracker, finalizes the parent row (if the parent is a table or we are
 /// at the root table), and signals a break when a stop path matches.
 ///
-/// Called by both `Event::End` (after popping the element stack) and
-/// `Event::Empty` (after entering and handling attributes). Keeping the
-/// closing semantics in one place avoids subtle drift between the two.
+/// Called by both `Event::End` (capturing the top frame's data first) and
+/// `Event::Empty` (which enters and immediately closes). Keeping the closing
+/// semantics in one place avoids subtle drift between the two.
+///
+/// `is_table` is the closing element's own table flag, captured by the
+/// caller from the path-tracker frame before this function pops it. After
+/// `path_tracker.leave()`, the new top of the stack is the parent — so
+/// `top_is_table()` answers "do we need to finalize a parent row?" without
+/// any second `node_info` lookup. The implicit root frame carries its own
+/// `is_table` (seeded at construction), so the root-table case does not
+/// need a special branch.
 #[inline]
 fn close_element(
     node_id: Option<PathNodeId>,
@@ -791,26 +795,13 @@ fn close_element(
     path_tracker: &mut PathTracker,
     xml_to_arrow_converter: &mut XmlToArrowConverter,
     stop_node_ids: &[PathNodeId],
-    element_stack: &[(Option<PathNodeId>, bool)],
 ) -> Result<LoopAction> {
     if is_table {
         xml_to_arrow_converter.end_table();
     }
     path_tracker.leave();
 
-    // End the parent row if the parent is a table. The parent is either the
-    // last entry on the element stack (nested case) or the implicit root
-    // table when `xml_path: "/"` is configured and we've returned to root.
-    let parent_is_table = match element_stack.last() {
-        Some((_, is_table)) => *is_table,
-        None => {
-            xml_to_arrow_converter
-                .registry
-                .is_table_path(PathNodeId::ROOT)
-                && path_tracker.current() == Some(PathNodeId::ROOT)
-        }
-    };
-    if parent_is_table {
+    if path_tracker.top_is_table() {
         xml_to_arrow_converter.end_current_row()?;
     }
 
@@ -830,6 +821,15 @@ fn close_element(
 /// buffered and zero-copy parsing paths. Extracting it avoids duplicating the
 /// match arms while keeping each loop wrapper focused solely on how it obtains
 /// the next event.
+///
+/// On every `Event::Start` / `Event::Empty`, `path_tracker.enter()` returns
+/// the new node together with a borrow of its `PathNodeInfo`. We extract the
+/// few fields the arm actually needs (`table_index`, `has_attribute_children`)
+/// before doing any further work on the converter, so the immutable borrow
+/// of the registry ends and the converter is free to be mutated. The parent's
+/// `is_table` flag — needed when this element later closes — was cached onto
+/// the path-tracker frame by `enter()`, so we never re-read `node_info[]` at
+/// `Event::End` time.
 #[inline]
 fn handle_event<const PARSE_ATTRIBUTES: bool>(
     event: Event<'_>,
@@ -837,26 +837,28 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
     path_tracker: &mut PathTracker,
     xml_to_arrow_converter: &mut XmlToArrowConverter,
     stop_node_ids: &[PathNodeId],
-    element_stack: &mut Vec<(Option<PathNodeId>, bool)>,
     attr_name_buffer: &mut Vec<u8>,
 ) -> Result<LoopAction> {
     match event {
         Event::Start(e) => {
             let name_bytes = e.local_name().into_inner();
-            let node_id = path_tracker.enter(name_bytes, &xml_to_arrow_converter.registry);
 
-            let is_table = node_id.is_some_and(|id| xml_to_arrow_converter.is_table_path(id));
+            // Fused lookup: child resolution + node-info read in one pass.
+            // The `&PathNodeInfo` borrow is dropped before any mutable use
+            // of the converter by extracting the bits we need into Copy
+            // locals.
+            let (node_id_opt, table_index, has_attrs) =
+                match path_tracker.enter(name_bytes, &xml_to_arrow_converter.registry) {
+                    Some((id, info)) => (Some(id), info.table_index, info.has_attribute_children),
+                    None => (None, None, false),
+                };
 
-            if is_table {
-                xml_to_arrow_converter.start_table(node_id.unwrap());
+            if let Some(table_idx) = table_index {
+                // node_id is Some when info was returned, so this unwrap holds.
+                xml_to_arrow_converter.start_table(table_idx, node_id_opt.unwrap());
             }
 
-            element_stack.push((node_id, is_table));
-
-            if PARSE_ATTRIBUTES
-                && let Some(id) = node_id
-                && xml_to_arrow_converter.registry.has_attribute_children(id)
-            {
+            if PARSE_ATTRIBUTES && has_attrs {
                 parse_attributes(
                     decoder,
                     e.attributes(),
@@ -868,18 +870,23 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
         }
         Event::Empty(e) => {
             let name_bytes = e.local_name().into_inner();
-            let node_id = path_tracker.enter(name_bytes, &xml_to_arrow_converter.registry);
 
-            let is_table = node_id.is_some_and(|id| xml_to_arrow_converter.is_table_path(id));
+            let (node_id_opt, table_index, has_attrs, is_table) =
+                match path_tracker.enter(name_bytes, &xml_to_arrow_converter.registry) {
+                    Some((id, info)) => (
+                        Some(id),
+                        info.table_index,
+                        info.has_attribute_children,
+                        info.is_table(),
+                    ),
+                    None => (None, None, false, false),
+                };
 
-            if is_table {
-                xml_to_arrow_converter.start_table(node_id.unwrap());
+            if let Some(table_idx) = table_index {
+                xml_to_arrow_converter.start_table(table_idx, node_id_opt.unwrap());
             }
 
-            if PARSE_ATTRIBUTES
-                && let Some(id) = node_id
-                && xml_to_arrow_converter.registry.has_attribute_children(id)
-            {
+            if PARSE_ATTRIBUTES && has_attrs {
                 parse_attributes(
                     decoder,
                     e.attributes(),
@@ -889,16 +896,16 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
                 )?;
             }
 
-            // Empty elements have no children or text; close immediately. The
-            // element is NOT on `element_stack`, so `close_element` sees the
-            // *parent* on top, matching the `Event::End` call below.
+            // Empty elements have no children or text; close immediately.
+            // `close_element` will pop this element's frame via leave(), so
+            // top_is_table() then reads the parent — exactly matching the
+            // Event::End behavior below.
             return close_element(
-                node_id,
+                node_id_opt,
                 is_table,
                 path_tracker,
                 xml_to_arrow_converter,
                 stop_node_ids,
-                element_stack,
             );
         }
         Event::GeneralRef(e) => {
@@ -929,14 +936,17 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
             }
         }
         Event::End(_) => {
-            if let Some((node_id, is_table)) = element_stack.pop() {
+            // Read this element's own (node_id, is_table) from the top of
+            // the merged stack BEFORE close_element pops it via leave().
+            // peek_top() returns None when the stack is at root, matching
+            // the prior "End with empty element_stack ⇒ no-op" behavior.
+            if let Some((node_id_opt, is_table)) = path_tracker.peek_top() {
                 return close_element(
-                    node_id,
+                    node_id_opt,
                     is_table,
                     path_tracker,
                     xml_to_arrow_converter,
                     stop_node_ids,
-                    element_stack,
                 );
             }
         }
@@ -961,18 +971,18 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
 ) -> Result<()> {
     let mut buf = Vec::with_capacity(4096);
     let mut attr_name_buffer = Vec::with_capacity(64);
-    let mut element_stack: Vec<(Option<PathNodeId>, bool)> = Vec::with_capacity(32);
+    // Decoder is `Copy` and reflects the reader's encoding, which does not
+    // change once parsing begins — read it once outside the hot loop.
+    let decoder = reader.decoder();
 
     loop {
         let event = reader.read_event_into(&mut buf)?;
-        let decoder = reader.decoder();
         let action = handle_event::<PARSE_ATTRIBUTES>(
             event,
             decoder,
             path_tracker,
             xml_to_arrow_converter,
             stop_node_ids,
-            &mut element_stack,
             &mut attr_name_buffer,
         )?;
         if matches!(action, LoopAction::Break) {
@@ -996,18 +1006,18 @@ fn process_xml_events_slice<const PARSE_ATTRIBUTES: bool>(
     stop_node_ids: &[PathNodeId],
 ) -> Result<()> {
     let mut attr_name_buffer = Vec::with_capacity(64);
-    let mut element_stack: Vec<(Option<PathNodeId>, bool)> = Vec::with_capacity(32);
+    // Decoder is `Copy` and reflects the reader's encoding, which does not
+    // change once parsing begins — read it once outside the hot loop.
+    let decoder = reader.decoder();
 
     loop {
         let event = reader.read_event()?;
-        let decoder = reader.decoder();
         let action = handle_event::<PARSE_ATTRIBUTES>(
             event,
             decoder,
             path_tracker,
             xml_to_arrow_converter,
             stop_node_ids,
-            &mut element_stack,
             &mut attr_name_buffer,
         )?;
         if matches!(action, LoopAction::Break) {
@@ -1034,11 +1044,15 @@ fn parse_attributes(
         attr_name_buffer.push(b'@');
         attr_name_buffer.extend_from_slice(key);
 
-        if let Some(attr_node_id) =
-            path_tracker.enter(attr_name_buffer, &xml_to_arrow_converter.registry)
-        {
+        // Attributes only need the node ID; the `&PathNodeInfo` borrow
+        // returned by enter() is dropped immediately so the converter can
+        // be mutated below.
+        let attr_node_id = path_tracker
+            .enter(attr_name_buffer, &xml_to_arrow_converter.registry)
+            .map(|(id, _)| id);
+        if let Some(id) = attr_node_id {
             let value = attribute.decode_and_unescape_value(decoder)?;
-            xml_to_arrow_converter.set_field_value_for_node(attr_node_id, value.as_bytes());
+            xml_to_arrow_converter.set_field_value_for_node(id, value.as_bytes());
         }
         path_tracker.leave();
     }
