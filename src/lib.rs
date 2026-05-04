@@ -6,7 +6,7 @@
 pub mod config;
 
 pub mod errors;
-pub use errors::{Error, Result};
+pub use errors::{Error, Result, XmlLocation};
 
 mod path_registry;
 mod xml_parser;

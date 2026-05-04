@@ -1632,6 +1632,7 @@ dependencies = [
  "fast-float2",
  "fxhash",
  "indexmap",
+ "memchr",
  "pyo3",
  "quick-xml",
  "rstest",

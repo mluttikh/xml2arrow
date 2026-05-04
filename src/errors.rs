@@ -28,6 +28,39 @@ use pyo3::create_exception;
 
 pub type Result<T> = core::result::Result<T, Error>;
 
+/// A location in the source XML, attached to errors that originate from a
+/// specific point in the input.
+///
+/// `byte_offset` is the absolute byte position reported by `quick-xml` at
+/// the moment the error was raised — typically just past the closing tag of
+/// the offending element. `line` and `column` are 1-based and are derived
+/// from a running newline count maintained by the reader wrapper.
+///
+/// Surfacing the offset, line, and column together is intentional: byte
+/// offsets are precise but unfriendly when the source is hundreds of MB,
+/// and line/column are friendly but ambiguous when the same content is
+/// rendered with different line endings or when a tool (e.g. an editor)
+/// already speaks in offsets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct XmlLocation {
+    /// 0-based byte offset into the input.
+    pub byte_offset: u64,
+    /// 1-based line number (number of `\n` seen before this offset, +1).
+    pub line: u64,
+    /// 1-based column number measured in bytes from the last newline.
+    pub column: u64,
+}
+
+impl fmt::Display for XmlLocation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "line {}, column {} (byte offset {})",
+            self.line, self.column, self.byte_offset
+        )
+    }
+}
+
 /// The crate's top-level error type.
 ///
 /// Marked `#[non_exhaustive]` to keep future variant additions backward
@@ -61,17 +94,31 @@ pub enum Error {
     /// `field` and `path` use `Arc<str>` so repeated errors for the same
     /// field (common when a whole column is malformed) share the name and
     /// path allocations across clones.
+    ///
+    /// `location` is `Some` when the parser was able to attach a position
+    /// from the underlying reader (the common case); it is `None` only if
+    /// the failure occurs outside an event read — currently unreachable from
+    /// the public entry points, but modeled as `Option` so future error
+    /// sites can omit it without an API break. Boxed so adding the field
+    /// does not bloat `Result<T, Error>` past clippy's
+    /// `result_large_err` threshold; the heap allocation only happens on
+    /// the error path.
     ParseError {
         field: Arc<str>,
         path: Arc<str>,
         value: String,
         kind: ParseKind,
+        location: Option<Box<XmlLocation>>,
     },
     /// A non-nullable field had no text (or whitespace-only text) in a row.
     /// Promoted out of `ParseError` because the handling differs — there is
     /// no raw value to show, and the fix is a configuration change
     /// (`nullable: true`) rather than cleaning input data.
-    MissingRequiredField { field: Arc<str>, path: Arc<str> },
+    MissingRequiredField {
+        field: Arc<str>,
+        path: Arc<str>,
+        location: Option<Box<XmlLocation>>,
+    },
     /// A scale or offset was configured on a data type that doesn't support it.
     UnsupportedConversion {
         conversion: ConversionKind,
@@ -161,20 +208,37 @@ impl fmt::Display for Error {
                 path,
                 value,
                 kind,
-            } => match kind {
-                ParseKind::InvalidNumber { type_name, reason } => write!(
+                location,
+            } => {
+                match kind {
+                    ParseKind::InvalidNumber { type_name, reason } => write!(
+                        f,
+                        "Failed to parse value '{value}' as {type_name} for field '{field}' at path {path}: {reason}"
+                    )?,
+                    ParseKind::InvalidBoolean => write!(
+                        f,
+                        "Failed to parse value '{value}' as boolean for field '{field}' at path {path}: expected one of 'true', 'false', '1', '0', 'yes', 'no', 'on', 'off', 't', 'f', 'y', or 'n'"
+                    )?,
+                }
+                if let Some(loc) = location {
+                    write!(f, " ({loc})")?;
+                }
+                Ok(())
+            }
+            Error::MissingRequiredField {
+                field,
+                path,
+                location,
+            } => {
+                write!(
                     f,
-                    "Failed to parse value '{value}' as {type_name} for field '{field}' at path {path}: {reason}"
-                ),
-                ParseKind::InvalidBoolean => write!(
-                    f,
-                    "Failed to parse value '{value}' as boolean for field '{field}' at path {path}: expected one of 'true', 'false', '1', '0', 'yes', 'no', 'on', 'off', 't', 'f', 'y', or 'n'"
-                ),
-            },
-            Error::MissingRequiredField { field, path } => write!(
-                f,
-                "Missing value for non-nullable field '{field}' at path {path}"
-            ),
+                    "Missing value for non-nullable field '{field}' at path {path}"
+                )?;
+                if let Some(loc) = location {
+                    write!(f, " ({loc})")?;
+                }
+                Ok(())
+            }
             Error::UnsupportedConversion {
                 conversion,
                 data_type,
@@ -389,16 +453,23 @@ mod pyerr_tests {
                     type_name: "i32",
                     reason: "bad digit".into(),
                 },
+                location: None,
             },
             Error::ParseError {
                 field: Arc::from("f"),
                 path: Arc::from("/p"),
                 value: "maybe".into(),
                 kind: ParseKind::InvalidBoolean,
+                location: Some(Box::new(XmlLocation {
+                    byte_offset: 42,
+                    line: 3,
+                    column: 7,
+                })),
             },
             Error::MissingRequiredField {
                 field: Arc::from("f"),
                 path: Arc::from("/p"),
+                location: None,
             },
             Error::UnsupportedConversion {
                 conversion: ConversionKind::Scaling,

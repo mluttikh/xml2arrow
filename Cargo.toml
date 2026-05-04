@@ -19,6 +19,7 @@ yaml_serde = "0.10"
 fxhash = "0.2.1"
 fast-float2 = "0.2.3"
 atoi = "2.0.0"
+memchr = "2.7"
 
 [dev-dependencies]
 rstest = "0.25"

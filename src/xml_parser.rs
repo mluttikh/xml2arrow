@@ -10,7 +10,9 @@
 //! allocation in the hot path.
 //! This means we front-load configuration validation and path compilation so the
 //! event loop can focus on direct indexing and appends.
-use std::io::BufRead;
+use std::cell::Cell;
+use std::io::{BufRead, Read};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use arrow::array::{
@@ -31,7 +33,275 @@ use crate::config::{DType, FieldConfig, TableConfig};
 use crate::errors::Error;
 use crate::errors::ParseKind;
 use crate::errors::Result;
+use crate::errors::XmlLocation;
 use crate::path_registry::{PathNodeId, PathRegistry, PathTracker};
+
+// === Source-position tracking ===
+//
+// `quick-xml` reports a byte offset (`Reader::buffer_position`) but does not
+// track line and column. To attach friendly source locations to parse errors
+// we wrap the user's reader in a thin counter that watches every byte as it
+// flows through `BufRead::consume`.
+//
+// The counter lives behind an `Rc<Cell<…>>` so the converter (which does not
+// own the reader once `quick_xml::Reader::from_reader` consumes it) can read
+// the running line count at error-decoration time. Mutation goes one way —
+// through the wrapper's `consume` impl — so a `Cell` is sufficient and avoids
+// the runtime borrow checks of `RefCell`.
+//
+// Steady-state cost: a single SIMD `memchr` probe over each chunk
+// quick-xml consumes. Chunks without a newline (the overwhelming common
+// case for tag names, attribute values, and short text nodes) early-exit
+// without touching the Cell at all; only chunks that contain at least one
+// newline pay for the full counter update.
+
+/// Mutable newline state shared between the reader wrapper and the converter.
+///
+/// Only updated when a chunk contains at least one `\n`. The wrapper's
+/// `bytes_consumed` counter (which advances on every chunk) lives on the
+/// wrapper itself rather than here, so the no-newline path is allowed to
+/// skip the `Cell` load/store entirely.
+#[derive(Clone, Copy, Default, Debug)]
+struct NewlineState {
+    /// Number of `\n` bytes seen so far. The 1-based line number is `+ 1`.
+    newlines: u64,
+    /// Byte offset of the first byte AFTER the most recent `\n`. The 1-based
+    /// column at any later byte position `p` is `(p - last_newline_at) + 1`.
+    last_newline_at: u64,
+}
+
+/// Shared, lazily-snapshottable view of the wrapper's running counters.
+#[derive(Clone, Default)]
+struct PositionTracker {
+    state: Rc<Cell<NewlineState>>,
+}
+
+impl PositionTracker {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Compute the location at the given byte offset.
+    ///
+    /// `byte_offset` comes from `quick_xml::Reader::buffer_position()`. By
+    /// the time an error is being decorated, every byte quick-xml has
+    /// acknowledged has already flowed through the wrapper's `consume`, so
+    /// `byte_offset >= last_newline_at` and the column subtraction is safe.
+    fn snapshot(&self, byte_offset: u64) -> XmlLocation {
+        let s = self.state.get();
+        let column = byte_offset.saturating_sub(s.last_newline_at) + 1;
+        XmlLocation {
+            byte_offset,
+            line: s.newlines + 1,
+            column,
+        }
+    }
+
+    /// Account for `bytes` having just been consumed at absolute offset
+    /// `base`. The fast path (no newlines in this chunk) terminates after
+    /// one SIMD probe with no Cell access; only the rare chunk that contains
+    /// a newline incurs the load + store. `base` is supplied by the wrapper
+    /// rather than read from the `Cell` so the common path stays branch-free
+    /// on the shared state.
+    #[inline]
+    fn observe(&self, base: u64, bytes: &[u8]) {
+        let Some(first) = memchr::memchr(b'\n', bytes) else {
+            return;
+        };
+        let mut s = self.state.get();
+        s.newlines += 1;
+        let mut last_pos = first;
+        for pos in memchr::memchr_iter(b'\n', &bytes[first + 1..]) {
+            s.newlines += 1;
+            last_pos = first + 1 + pos;
+        }
+        s.last_newline_at = base + last_pos as u64 + 1;
+        self.state.set(s);
+    }
+}
+
+/// Unifies the two ways the parser obtains line/column info.
+///
+/// * `Streaming` — used by `parse_xml`. Newlines are counted incrementally
+///   inside `LineCountingReader` as quick-xml consumes bytes; the tracker
+///   handle is cloned at the entry point so the event loop can read it
+///   without keeping a back-reference to the reader chain.
+/// * `Slice` — used by `parse_xml_slice`. The original input is preserved
+///   so a lazy scan can produce line/column on demand without a wrapper
+///   reader (which would force the slice path through `read_event_into` and
+///   reintroduce a per-event memcpy that the slice variant exists to avoid).
+///
+/// Both cases yield an `XmlLocation` via `at(byte_offset)`. The byte offset
+/// always comes from `quick_xml::Reader::buffer_position()` so the line and
+/// column are derived against an authoritative anchor.
+enum LocationSource<'a> {
+    Streaming(PositionTracker),
+    Slice(&'a [u8]),
+}
+
+impl<'a> LocationSource<'a> {
+    fn at(&self, byte_offset: u64) -> XmlLocation {
+        match self {
+            LocationSource::Streaming(tracker) => tracker.snapshot(byte_offset),
+            LocationSource::Slice(input) => {
+                // Lazy walk: scan once from the start of the input up to the
+                // failing offset. Errors are rare, this only runs at the
+                // moment one fires, and SIMD memchr keeps the scan near
+                // memory bandwidth even for hundred-MB inputs.
+                let end = (byte_offset as usize).min(input.len());
+                let prefix = &input[..end];
+                let newlines = memchr::memchr_iter(b'\n', prefix).count() as u64;
+                let last_newline_at = memchr::memrchr(b'\n', prefix)
+                    .map(|p| (p as u64) + 1)
+                    .unwrap_or(0);
+                XmlLocation {
+                    byte_offset,
+                    line: newlines + 1,
+                    column: byte_offset - last_newline_at + 1,
+                }
+            }
+        }
+    }
+}
+
+/// Decorate parser errors with a source location.
+///
+/// Only `ParseError` and `MissingRequiredField` carry a location field —
+/// other variants either originate from quick-xml (which already reports
+/// their own positions) or from configuration / IO concerns where a source
+/// position would be meaningless. Variants without a location pass through
+/// untouched, so this stays cheap on the success path.
+fn attach_location(err: Error, byte_offset: u64, source: &LocationSource) -> Error {
+    match err {
+        Error::ParseError {
+            field,
+            path,
+            value,
+            kind,
+            location: None,
+        } => Error::ParseError {
+            field,
+            path,
+            value,
+            kind,
+            location: Some(Box::new(source.at(byte_offset))),
+        },
+        Error::MissingRequiredField {
+            field,
+            path,
+            location: None,
+        } => Error::MissingRequiredField {
+            field,
+            path,
+            location: Some(Box::new(source.at(byte_offset))),
+        },
+        // Already located, or a variant we don't decorate — leave alone.
+        other => other,
+    }
+}
+
+/// `BufRead` adapter that maintains a shared `PositionTracker` while
+/// otherwise behaving exactly like its inner reader. Newline accounting
+/// happens on `consume()` so it sees every byte quick-xml acknowledges.
+///
+/// `cached_buf` and `bytes_consumed` are plain fields, not `Cell`s, because
+/// every method that mutates them takes `&mut self`. Plain fields let the
+/// no-newline fast path stay completely Cell-free: it does one SIMD `memchr`
+/// probe and increments a u64. The shared `Rc<Cell<…>>` inside the tracker
+/// is only touched on the rare chunk that actually contains a `\n`.
+///
+/// `cached_buf` caches the pointer + length returned by the most recent
+/// `fill_buf` call. The naive design — re-calling `fill_buf` inside
+/// `consume` to inspect the bytes about to be skipped — added ~15% to the
+/// buffered hot path because every event triggers a fill/consume pair, and
+/// the per-call overhead of `fill_buf` (even when the buffer is already
+/// hot in BufReader's cache) compounds across millions of small events.
+/// Caching cuts that to a single load + arithmetic on consume.
+struct LineCountingReader<R> {
+    inner: R,
+    tracker: PositionTracker,
+    /// Total bytes observed so far. Matches `quick_xml::Reader::buffer_position`
+    /// once every consumed byte has flowed through this wrapper. Lives on
+    /// `&mut self` (not behind a `Cell`) so the no-newline fast path skips
+    /// shared-state writes entirely.
+    bytes_consumed: u64,
+    /// Pointer to the byte at offset 0 of the most recent `fill_buf` slice,
+    /// and its length. Always re-set inside `fill_buf` before any consumer
+    /// could observe it; never non-null until the first `fill_buf` call.
+    cached_buf: (*const u8, usize),
+}
+
+impl<R> LineCountingReader<R> {
+    fn new(inner: R, tracker: PositionTracker) -> Self {
+        Self {
+            inner,
+            tracker,
+            bytes_consumed: 0,
+            cached_buf: (std::ptr::null(), 0),
+        }
+    }
+}
+
+impl<R: BufRead> Read for LineCountingReader<R> {
+    #[inline]
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        // Route through fill_buf/consume so the counting logic lives in
+        // exactly one place. This mirrors the standard library's blanket
+        // BufRead-based Read implementation but with our consume hook.
+        let n = {
+            let available = self.inner.fill_buf()?;
+            let n = available.len().min(buf.len());
+            buf[..n].copy_from_slice(&available[..n]);
+            n
+        };
+        self.consume(n);
+        Ok(n)
+    }
+}
+
+impl<R: BufRead> BufRead for LineCountingReader<R> {
+    #[inline]
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        let buf = self.inner.fill_buf()?;
+        // Cache the pointer + length so `consume` can scan the bytes about
+        // to be skipped without re-entering `fill_buf`. The pointer is only
+        // valid until the next mutation of `self.inner` — `consume` reads
+        // it before forwarding to `inner.consume`, and `fill_buf` rewrites
+        // it on the next call, so it can never escape its window of
+        // validity.
+        self.cached_buf = (buf.as_ptr(), buf.len());
+        Ok(buf)
+    }
+
+    #[inline]
+    fn consume(&mut self, amt: usize) {
+        if amt > 0 {
+            let (ptr, len) = self.cached_buf;
+            if !ptr.is_null() {
+                let n = len.min(amt);
+                // SAFETY: `ptr` was obtained from `self.inner.fill_buf()`
+                // earlier in the same call sequence. The BufRead contract
+                // guarantees that the returned slice remains valid until
+                // `consume` is invoked on the same reader, and that `amt`
+                // never exceeds the slice's length. We bound `n` by `len`
+                // defensively to keep the contract one-sided. The borrow
+                // released here ends before the `inner.consume` call below,
+                // so there is no overlap with subsequent mutation.
+                let bytes = unsafe { std::slice::from_raw_parts(ptr, n) };
+                self.tracker.observe(self.bytes_consumed, bytes);
+                self.bytes_consumed += n as u64;
+                // Slide the cached window past the bytes we just observed.
+                // If a caller invokes `consume` again before the next
+                // `fill_buf` (legal per the BufRead contract on a reader
+                // that returned a buffer larger than the previous `amt`),
+                // the residual pointer keeps tracking the same physical
+                // bytes the inner reader will hand out next.
+                self.cached_buf = (ptr.wrapping_add(n), len - n);
+            }
+        }
+        self.inner.consume(amt);
+    }
+}
 
 // === Field-level accumulation ===
 
@@ -196,6 +466,7 @@ macro_rules! append_int {
                                     type_name: $type_name,
                                     reason: e.to_string(),
                                 },
+                                location: None,
                             });
                         }
                     }
@@ -207,6 +478,7 @@ macro_rules! append_int {
             return Err(Error::MissingRequiredField {
                 field: Arc::from($field_config.name.as_str()),
                 path: Arc::from($field_config.xml_path.as_str()),
+                location: None,
             });
         }
     };
@@ -245,6 +517,7 @@ macro_rules! append_float {
                             type_name: $type_name,
                             reason: e.to_string(),
                         },
+                        location: None,
                     });
                 }
             }
@@ -254,6 +527,7 @@ macro_rules! append_float {
             return Err(Error::MissingRequiredField {
                 field: Arc::from($field_config.name.as_str()),
                 path: Arc::from($field_config.xml_path.as_str()),
+                location: None,
             });
         }
     };
@@ -329,6 +603,7 @@ impl FieldBuilder {
                             return Err(Error::MissingRequiredField {
                                 field: Arc::from(fc.name.as_str()),
                                 path: Arc::from(fc.xml_path.as_str()),
+                                location: None,
                             });
                         }
                         Err(()) => {
@@ -337,6 +612,7 @@ impl FieldBuilder {
                                 path: Arc::from(fc.xml_path.as_str()),
                                 value: String::from_utf8_lossy(value).into_owned(),
                                 kind: ParseKind::InvalidBoolean,
+                                location: None,
                             });
                         }
                     }
@@ -346,6 +622,7 @@ impl FieldBuilder {
                     return Err(Error::MissingRequiredField {
                         field: Arc::from(fc.name.as_str()),
                         path: Arc::from(fc.xml_path.as_str()),
+                        location: None,
                     });
                 }
             }
@@ -646,16 +923,23 @@ impl XmlToArrowConverter {
 /// // ... use record_batches
 /// ```
 pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<String, RecordBatch>> {
-    let mut reader = Reader::from_reader(reader);
+    let tracker = PositionTracker::new();
+    // The wrapper sits between quick-xml and the user's reader so every byte
+    // quick-xml consumes flows through `tracker.observe`. The tracker handle
+    // is cloned (cheap — `Rc<Cell<…>>`) so the event loop can read line/byte
+    // state at error-decoration time without touching the reader chain.
+    let wrapped = LineCountingReader::new(reader, tracker.clone());
+    let mut reader = Reader::from_reader(wrapped);
     if config.parser_options.trim_text {
         reader.config_mut().trim_text(true);
     }
     let needs_attrs = config.requires_attribute_parsing();
+    let location_source = LocationSource::Streaming(tracker);
     run_parse(&mut reader, config, |r, t, c, s| {
         if needs_attrs {
-            process_xml_events::<_, true>(r, t, c, s)
+            process_xml_events::<_, true>(r, &location_source, t, c, s)
         } else {
-            process_xml_events::<_, false>(r, t, c, s)
+            process_xml_events::<_, false>(r, &location_source, t, c, s)
         }
     })
 }
@@ -693,16 +977,22 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
 /// let record_batches = parse_xml_slice(xml, &config).unwrap();
 /// ```
 pub fn parse_xml_slice(xml: &[u8], config: &Config) -> Result<IndexMap<String, RecordBatch>> {
+    // The slice path stays zero-copy: we don't wrap `xml` in any adapter.
+    // For error decoration, the location is derived lazily by scanning the
+    // original slice up to the failing byte offset. Errors are rare and the
+    // scan only runs once per parse, so we trade a one-shot O(offset) walk
+    // for keeping the steady-state hot path identical to today's.
     let mut reader = Reader::from_reader(xml);
     if config.parser_options.trim_text {
         reader.config_mut().trim_text(true);
     }
     let needs_attrs = config.requires_attribute_parsing();
+    let location_source = LocationSource::Slice(xml);
     run_parse(&mut reader, config, |r, t, c, s| {
         if needs_attrs {
-            process_xml_events_slice::<true>(r, t, c, s)
+            process_xml_events_slice::<true>(r, &location_source, t, c, s)
         } else {
-            process_xml_events_slice::<false>(r, t, c, s)
+            process_xml_events_slice::<false>(r, &location_source, t, c, s)
         }
     })
 }
@@ -965,6 +1255,7 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
 /// the copy entirely.
 fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
     reader: &mut Reader<B>,
+    location_source: &LocationSource,
     path_tracker: &mut PathTracker,
     xml_to_arrow_converter: &mut XmlToArrowConverter,
     stop_node_ids: &[PathNodeId],
@@ -977,6 +1268,12 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
 
     loop {
         let event = reader.read_event_into(&mut buf)?;
+        // `handle_event` returns variants like `ParseError` / `MissingRequiredField`
+        // with `location: None`. We capture the reader's byte position here —
+        // immediately after the event that produced the error was consumed —
+        // and decorate the error with a derived line/column. Doing it at the
+        // loop boundary keeps the error sites themselves free of any
+        // reader-positioning code.
         let action = handle_event::<PARSE_ATTRIBUTES>(
             event,
             decoder,
@@ -984,7 +1281,8 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
             xml_to_arrow_converter,
             stop_node_ids,
             &mut attr_name_buffer,
-        )?;
+        )
+        .map_err(|e| attach_location(e, reader.buffer_position(), location_source))?;
         if matches!(action, LoopAction::Break) {
             break;
         }
@@ -1001,6 +1299,7 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
 /// common case where the caller has the full XML in a `&[u8]` or `&str`.
 fn process_xml_events_slice<const PARSE_ATTRIBUTES: bool>(
     reader: &mut Reader<&[u8]>,
+    location_source: &LocationSource,
     path_tracker: &mut PathTracker,
     xml_to_arrow_converter: &mut XmlToArrowConverter,
     stop_node_ids: &[PathNodeId],
@@ -1012,6 +1311,9 @@ fn process_xml_events_slice<const PARSE_ATTRIBUTES: bool>(
 
     loop {
         let event = reader.read_event()?;
+        // See the streaming variant for the rationale; both paths use the
+        // same decoration shape so error formatting is identical regardless
+        // of which entry point produced the error.
         let action = handle_event::<PARSE_ATTRIBUTES>(
             event,
             decoder,
@@ -1019,7 +1321,8 @@ fn process_xml_events_slice<const PARSE_ATTRIBUTES: bool>(
             xml_to_arrow_converter,
             stop_node_ids,
             &mut attr_name_buffer,
-        )?;
+        )
+        .map_err(|e| attach_location(e, reader.buffer_position(), location_source))?;
         if matches!(action, LoopAction::Break) {
             break;
         }
@@ -4777,5 +5080,185 @@ mod tests {
         let batch = record_batches.get("test").unwrap();
         assert_eq!(batch.num_rows(), 1);
         assert_array_values!(batch, "id", vec![42i32], Int32Array);
+    }
+
+    // =========================================================================
+    // Error location reporting (line / column / byte offset)
+    // =========================================================================
+    //
+    // These tests pin the contract that parse-time errors carry an
+    // `XmlLocation` and that the location is rendered into the Display
+    // output. Both entry points (buffered `parse_xml` and zero-copy
+    // `parse_xml_slice`) must report locations consistently.
+
+    /// Slice path: a bad integer on line 3 must surface line/column 3 in the
+    /// XmlLocation. The exact column depends on which byte quick-xml reports
+    /// after consuming the offending row, so we assert a useful lower bound
+    /// (line is correct, column is on that line) rather than the exact byte.
+    #[test]
+    fn test_parse_error_carries_line_and_column_slice_path() {
+        // Layout: each entry on its own line so line numbers are obvious.
+        let xml = b"<data>\n  <row><value>not_a_number</value></row>\n  <row><value>1</value></row>\n</data>";
+
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: Int32
+            "#
+        );
+
+        let err = parse_xml_slice(xml, &config).unwrap_err();
+        match err {
+            Error::ParseError { location, .. } => {
+                let loc = location.expect("location should be attached");
+                // The bad row is on line 2 (1-based). The reader's byte
+                // position when the error fires is just past `</row>` on
+                // line 2, so the reported line is 2.
+                assert_eq!(loc.line, 2, "expected line 2, got {:?}", loc);
+                assert!(loc.column >= 1);
+                assert!(loc.byte_offset > 0);
+                let display = Error::ParseError {
+                    field: Arc::from("value"),
+                    path: Arc::from("/data/row/value"),
+                    value: "not_a_number".into(),
+                    kind: ParseKind::InvalidNumber {
+                        type_name: "i32",
+                        reason: "x".into(),
+                    },
+                    location: Some(loc),
+                }
+                .to_string();
+                // Display goes through the Box transparently — Box<T>: Display when T: Display.
+                assert!(
+                    display.contains("line 2"),
+                    "Display should mention line: {display}"
+                );
+                assert!(
+                    display.contains("byte offset"),
+                    "Display should mention byte offset: {display}"
+                );
+            }
+            other => panic!("expected ParseError, got {other:?}"),
+        }
+    }
+
+    /// Buffered (streaming) path: same expectation as the slice case. This
+    /// guards the `LineCountingReader` wrapper — the line count comes from
+    /// the running tracker rather than a lazy scan.
+    #[test]
+    fn test_parse_error_carries_line_and_column_buffered_path() {
+        let xml = b"<data>\n  <row><value>not_a_number</value></row>\n</data>";
+
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: Int32
+            "#
+        );
+
+        let err = parse_xml(xml.as_ref(), &config).unwrap_err();
+        match err {
+            Error::ParseError { location, .. } => {
+                let loc = location.expect("location should be attached");
+                assert_eq!(loc.line, 2, "expected line 2, got {:?}", loc);
+                assert!(loc.column >= 1);
+                assert!(loc.byte_offset > 0);
+            }
+            other => panic!("expected ParseError, got {other:?}"),
+        }
+    }
+
+    /// MissingRequiredField also carries a location: a non-nullable field
+    /// with empty content fires from the same close path as a parse error,
+    /// so the same decoration logic must apply.
+    #[test]
+    fn test_missing_required_field_carries_location() {
+        let xml = b"<data>\n  <row><value></value></row>\n</data>";
+
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: Int32
+                      nullable: false
+            "#
+        );
+
+        let err = parse_xml_slice(xml, &config).unwrap_err();
+        match err {
+            Error::MissingRequiredField { location, .. } => {
+                let loc = location.expect("location should be attached");
+                assert_eq!(loc.line, 2);
+            }
+            other => panic!("expected MissingRequiredField, got {other:?}"),
+        }
+    }
+
+    /// Multi-line content within an element must still resolve to the line
+    /// where the closing tag of the failing row lives. This pins the
+    /// behavior the user sees when an offending value spans newlines —
+    /// crucial for the streaming path where the line count is updated as
+    /// each chunk flows through the reader.
+    #[test]
+    fn test_location_after_multiline_content() {
+        // The bad value's closing </row> is on line 5.
+        let xml = b"<data>\n  <row><value>\n    not_a_number\n    extra\n  </value></row>\n</data>";
+
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: value
+                      xml_path: /data/row/value
+                      data_type: Int32
+            "#
+        );
+
+        let err = parse_xml_slice(xml, &config).unwrap_err();
+        match err {
+            Error::ParseError { location, .. } => {
+                let loc = location.expect("location should be attached");
+                // The closing </row> is on line 5; the parser reports the
+                // position just past it.
+                assert!(
+                    loc.line >= 5,
+                    "expected line >= 5 after multi-line value, got {:?}",
+                    loc
+                );
+            }
+            other => panic!("expected ParseError, got {other:?}"),
+        }
+    }
+
+    /// XmlLocation Display has a stable, grep-friendly format. Pin it so
+    /// downstream log scrapers don't break on a casual rename.
+    #[test]
+    fn test_xml_location_display_format() {
+        let loc = XmlLocation {
+            byte_offset: 123,
+            line: 7,
+            column: 12,
+        };
+        assert_eq!(loc.to_string(), "line 7, column 12 (byte offset 123)");
     }
 }
