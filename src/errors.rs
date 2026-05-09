@@ -319,26 +319,28 @@ impl From<Error> for PyErr {
     }
 }
 
-#[cfg(all(test, feature = "python"))]
-mod pyerr_tests {
-    //! Guards against `From<Error> for PyErr` silently falling out of sync
-    //! with the `Error` enum.
+#[cfg(test)]
+mod tests {
+    //! Round-trip checks for `Display`, `Error::source`, and (under the
+    //! `python` feature) the `PyErr` mapping.
     //!
-    //! There are two guards here, in order of importance:
+    //! Two guards in priority order:
     //!
     //! 1. `exhaustiveness_guard` — a match that names every `Error` variant.
     //!    Adding a new variant fails to compile here, forcing the author to
-    //!    update `sample_of_each_variant` (and by extension the PyErr
-    //!    mapping) before the code even builds. This is the real load-bearing
-    //!    check because the CI matrix only runs `cargo clippy` for the
-    //!    `python` feature (not `cargo test`) — so this compile-time guard
-    //!    is what catches drift in CI.
+    //!    update `sample_of_each_variant` (and by extension the runtime
+    //!    checks below, including the PyErr mapping) before the code even
+    //!    builds. This is the load-bearing check because the CI matrix only
+    //!    runs `cargo clippy` for the `python` feature (not `cargo test`),
+    //!    so this compile-time guard is what catches drift in CI.
     //!
-    //! 2. `pyerr_mapping_round_trips` — converts one sample of every variant
-    //!    through `PyErr::from` at runtime. `PyErr::new_err` defers the
-    //!    actual Python-object construction, so this test doesn't require
-    //!    an initialized interpreter and still flags runtime panics in the
-    //!    mapping's argument construction.
+    //! 2. The runtime tests round-trip one sample of every variant through
+    //!    `Display::fmt` and `Error::source`, plus (under `python`) through
+    //!    `PyErr::from`. `PyErr::new_err` defers the actual Python-object
+    //!    construction, so the python test doesn't require an initialized
+    //!    interpreter and still flags runtime panics in the mapping's
+    //!    argument construction.
+
     use super::*;
 
     /// Compile-time check: adding a new `Error` variant without updating
@@ -415,15 +417,84 @@ mod pyerr_tests {
     }
 
     #[test]
-    fn pyerr_mapping_round_trips() {
+    fn display_is_non_empty_for_every_variant() {
+        // Every variant's Display arm must produce a user-facing string.
+        // The header comment above `impl fmt::Display for Error` promises
+        // textual stability across refactors; this guards the "is anything
+        // produced at all" floor of that promise.
         for err in sample_of_each_variant() {
+            let display = err.to_string();
+            assert!(
+                !display.is_empty(),
+                "Display::fmt produced empty string for {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn source_is_set_only_for_wrapped_variants() {
+        // Wrapping variants delegate to the inner error so callers walking
+        // the `Error::source` chain (e.g. `anyhow::Chain`) reach the root
+        // cause. Native variants (`ParseError`, `MissingRequiredField`,
+        // `UnsupportedConversion`, `InvalidConfig`) carry all their context
+        // inline and intentionally return `None`.
+        for err in sample_of_each_variant() {
+            let expected = matches!(
+                err,
+                Error::XmlParsing(_)
+                    | Error::XmlParseAttr(_)
+                    | Error::XmlParseEncoding(_)
+                    | Error::Yaml(_)
+                    | Error::Io(_)
+                    | Error::Arrow(_)
+                    | Error::Utf8Error(_)
+            );
+            let actual = std::error::Error::source(&err).is_some();
+            assert_eq!(
+                expected, actual,
+                "source() mismatch for {err:?}: expected Some={expected}, got Some={actual}"
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_conversion_display_distinguishes_kind_and_dtype() {
+        // The two `ConversionKind` arms render different sentences so the
+        // user can see whether `scale` or `offset` was the offending field.
+        // Both must also surface the rejected dtype name so the user knows
+        // exactly which configuration line to fix.
+        let scaling = Error::UnsupportedConversion {
+            conversion: ConversionKind::Scaling,
+            data_type: "Int32".into(),
+        }
+        .to_string();
+        assert!(scaling.contains("Scaling"), "got: {scaling}");
+        assert!(scaling.contains("Int32"), "got: {scaling}");
+
+        let offset = Error::UnsupportedConversion {
+            conversion: ConversionKind::Offset,
+            data_type: "Int32".into(),
+        }
+        .to_string();
+        assert!(offset.contains("Offset"), "got: {offset}");
+        assert!(offset.contains("Int32"), "got: {offset}");
+    }
+
+    #[cfg(feature = "python")]
+    mod pyerr_tests {
+        use super::*;
+
+        #[test]
+        fn pyerr_mapping_round_trips() {
             // `PyErr::new_err` is lazy — it stores arguments without touching
             // the interpreter — so this runs even when Python isn't linked
             // at runtime. The assertion is simply that conversion doesn't
             // panic and Display still produces non-empty output.
-            let display = err.to_string();
-            let _py_err: PyErr = err.into();
-            assert!(!display.is_empty());
+            for err in sample_of_each_variant() {
+                let display = err.to_string();
+                let _py_err: PyErr = err.into();
+                assert!(!display.is_empty());
+            }
         }
     }
 }
