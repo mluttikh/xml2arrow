@@ -592,6 +592,51 @@ mod tests {
         );
     }
 
+    /// Users embed extra annotations (`unit`, `description`, custom metadata)
+    /// in their YAML for downstream tooling. The parser must ignore those
+    /// keys at every level so the same file can serve both purposes. This
+    /// is currently emergent from serde's default behavior — pin it down so
+    /// a future `#[serde(deny_unknown_fields)]` cannot break user configs
+    /// without a failing test.
+    #[test]
+    fn test_unknown_yaml_fields_are_ignored_at_every_level() {
+        let yaml_string = r#"
+            parser_options:
+              trim_text: true
+              custom_option: 42
+            schema_version: "1.0"
+            tables:
+              - name: sensors
+                xml_path: /root/sensors
+                levels: [sensor]
+                description: "Sensor readings table"
+                owner: instrumentation-team
+                fields:
+                  - name: temperature
+                    xml_path: /root/sensors/sensor/temperature
+                    data_type: Float64
+                    unit: celsius
+                    description: "Air temperature"
+                    meta:
+                      source: probe-A
+                      tags: [thermal, env]
+            "#;
+
+        let config: Config = yaml_serde::from_str(yaml_string)
+            .expect("unknown YAML keys must not block deserialization");
+        config
+            .validate()
+            .expect("unknown YAML keys must not cause validation to fail");
+
+        // Known fields still come through correctly.
+        assert!(config.parser_options.trim_text);
+        assert_eq!(config.tables.len(), 1);
+        assert_eq!(config.tables[0].name, "sensors");
+        assert_eq!(config.tables[0].fields.len(), 1);
+        assert_eq!(config.tables[0].fields[0].name, "temperature");
+        assert_eq!(config.tables[0].fields[0].data_type, DType::Float64);
+    }
+
     #[test]
     fn test_requires_attr_parsing_with_attribute_fields() {
         let config: Config = yaml_serde::from_str(
