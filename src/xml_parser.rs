@@ -504,6 +504,11 @@ struct XmlToArrowConverter {
     stop_node_ids: Vec<PathNodeId>,
     /// Reusable buffer for collecting parent row indices, avoiding per-row allocation.
     parent_indices_buffer: Vec<u32>,
+    /// Mirror of `ParserOptions::validate_attributes`. When `false`, the
+    /// attribute iterator skips quick-xml's per-element duplicate-key check
+    /// (and its backing allocation). Cached here so `parse_attributes` reads
+    /// a plain `bool` rather than re-deriving it from the config each call.
+    validate_attributes: bool,
 }
 
 impl XmlToArrowConverter {
@@ -534,6 +539,7 @@ impl XmlToArrowConverter {
             registry,
             stop_node_ids,
             parent_indices_buffer: Vec::new(),
+            validate_attributes: config.parser_options.validate_attributes,
         })
     }
 
@@ -1042,11 +1048,18 @@ fn process_xml_events_slice<const PARSE_ATTRIBUTES: bool>(
 #[inline]
 fn parse_attributes(
     decoder: Decoder,
-    attributes: Attributes,
+    mut attributes: Attributes,
     path_tracker: &mut PathTracker,
     xml_to_arrow_converter: &mut XmlToArrowConverter,
     attr_name_buffer: &mut Vec<u8>,
 ) -> Result<()> {
+    // For trusted inputs, skip quick-xml's duplicate-attribute detection.
+    // That check is O(n²) in the element's attribute count and, more
+    // importantly, allocates a `Vec` per attribute-bearing element to record
+    // the seen key ranges — pure overhead when we don't act on duplicates.
+    if !xml_to_arrow_converter.validate_attributes {
+        attributes.with_checks(false);
+    }
     for attribute in attributes {
         let attribute = attribute?;
         let key = attribute.key.local_name().into_inner();
@@ -1633,6 +1646,69 @@ mod tests {
             vec!["Content 1", "Content 2"],
             StringArray
         );
+    }
+
+    #[test]
+    fn test_validate_attributes_false_still_parses_attributes() {
+        // Disabling quick-xml's duplicate-attribute check (the N2 fast path)
+        // must not change how well-formed attributes are read.
+        let xml_content = r#"
+        <data>
+            <item id="1" name="First">Content 1</item>
+            <item id="2" name="Second">Content 2</item>
+        </data>
+        "#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            parser_options:
+                validate_attributes: false
+            tables:
+                - name: items
+                  xml_path: /data
+                  levels: [item]
+                  fields:
+                    - name: id
+                      xml_path: /data/item/@id
+                      data_type: Int32
+                    - name: name
+                      xml_path: /data/item/@name
+                      data_type: Utf8
+            "#,
+        );
+        let batch = record_batches.get("items").unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        assert_array_values!(batch, "id", vec![1i32, 2], Int32Array);
+        assert_array_values!(batch, "name", vec!["First", "Second"], StringArray);
+    }
+
+    #[test]
+    fn test_validate_attributes_false_tolerates_duplicate_attribute() {
+        // With the check disabled, a duplicated attribute is no longer a
+        // hard error. quick-xml yields both, and our accumulator appends —
+        // documenting the (intentionally unguarded) trusted-input behavior.
+        let xml_content = r#"<data><item name="a" name="b"/></data>"#;
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            parser_options:
+                validate_attributes: false
+            tables:
+                - name: items
+                  xml_path: /data
+                  levels: [item]
+                  fields:
+                    - name: name
+                      xml_path: /data/item/@name
+                      data_type: Utf8
+            "#,
+        );
+        let batch = record_batches.get("items").unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        // Both attribute values are concatenated rather than rejected.
+        assert_array_values!(batch, "name", vec!["ab"], StringArray);
     }
 
     #[test]

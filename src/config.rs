@@ -31,6 +31,21 @@ pub struct ParserOptions {
     /// to be well-formed (e.g. produced by your own pipeline).
     #[serde(default = "default_true")]
     pub validate_closing_tags: bool,
+    /// Whether quick-xml should reject duplicate attribute names on a single
+    /// element. Defaults to `true` — duplicates surface as a parsing error.
+    ///
+    /// Setting `false` disables that check. Beyond skipping an O(n²) scan
+    /// over an element's attributes, this removes a heap allocation that
+    /// quick-xml otherwise makes **per attribute-bearing element** (it
+    /// records each key's byte range in a `Vec` to compare against). On
+    /// attribute-heavy documents that allocation is the dominant cost of
+    /// the check. The trade-off mirrors `validate_closing_tags`: a
+    /// malformed element with a duplicated attribute is no longer rejected.
+    /// Because field values accumulate by appending, a duplicated attribute's
+    /// values are concatenated rather than reported as an error. Only disable
+    /// when the input is trusted to be well-formed.
+    #[serde(default = "default_true")]
+    pub validate_attributes: bool,
 }
 
 impl Default for ParserOptions {
@@ -39,6 +54,7 @@ impl Default for ParserOptions {
             trim_text: false,
             stop_at_paths: Vec::new(),
             validate_closing_tags: true,
+            validate_attributes: true,
         }
     }
 }
