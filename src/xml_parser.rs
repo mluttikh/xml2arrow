@@ -647,9 +647,7 @@ impl XmlToArrowConverter {
 /// ```
 pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<String, RecordBatch>> {
     let mut reader = Reader::from_reader(reader);
-    if config.parser_options.trim_text {
-        reader.config_mut().trim_text(true);
-    }
+    configure_reader(&mut reader, config);
     let needs_attrs = config.requires_attribute_parsing();
     run_parse(&mut reader, config, |r, t, c, s| {
         if needs_attrs {
@@ -694,9 +692,7 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
 /// ```
 pub fn parse_xml_slice(xml: &[u8], config: &Config) -> Result<IndexMap<String, RecordBatch>> {
     let mut reader = Reader::from_reader(xml);
-    if config.parser_options.trim_text {
-        reader.config_mut().trim_text(true);
-    }
+    configure_reader(&mut reader, config);
     let needs_attrs = config.requires_attribute_parsing();
     run_parse(&mut reader, config, |r, t, c, s| {
         if needs_attrs {
@@ -705,6 +701,22 @@ pub fn parse_xml_slice(xml: &[u8], config: &Config) -> Result<IndexMap<String, R
             process_xml_events_slice::<false>(r, t, c, s)
         }
     })
+}
+
+/// Applies `ParserOptions` to the shared `quick_xml::Reader` config.
+///
+/// Both entry points configure the reader identically; isolating that
+/// here means each option lives in one place and the public API stays
+/// readable. `validate_closing_tags = false` is the per-event optimization
+/// described in `ParserOptions::validate_closing_tags`.
+fn configure_reader<R>(reader: &mut Reader<R>, config: &Config) {
+    let rc = reader.config_mut();
+    if config.parser_options.trim_text {
+        rc.trim_text(true);
+    }
+    if !config.parser_options.validate_closing_tags {
+        rc.check_end_names = false;
+    }
 }
 
 /// Shared parser driver used by both `parse_xml` and `parse_xml_slice`.

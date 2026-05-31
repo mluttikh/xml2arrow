@@ -10,7 +10,7 @@ use arrow::datatypes::DataType;
 use serde::{Deserialize, Serialize};
 
 /// Configuration for the XML parser.
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct ParserOptions {
     /// Whether to trim whitespace from text nodes. Defaults to false.
     #[serde(default)]
@@ -18,6 +18,33 @@ pub struct ParserOptions {
     /// Optional XML paths where parsing should stop after the closing tag.
     #[serde(default)]
     pub stop_at_paths: Vec<String>,
+    /// Whether quick-xml should verify each closing tag's name matches the
+    /// most recently opened tag. Defaults to `true` — malformed inputs
+    /// surface as a parsing error.
+    ///
+    /// Setting `false` skips that per-end-tag check, a measurable ~2–6%
+    /// throughput improvement on representative workloads. The trade-off
+    /// is that an opening/closing-tag mismatch (e.g. `<a>...</b>`) is no
+    /// longer rejected; the parser will silently emit an `Event::End` and
+    /// our `PathTracker` will pop the top frame regardless, which can
+    /// yield subtly wrong row counts. Only use when you trust the input
+    /// to be well-formed (e.g. produced by your own pipeline).
+    #[serde(default = "default_true")]
+    pub validate_closing_tags: bool,
+}
+
+impl Default for ParserOptions {
+    fn default() -> Self {
+        Self {
+            trim_text: false,
+            stop_at_paths: Vec::new(),
+            validate_closing_tags: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Top-level configuration for XML to Arrow conversion.
