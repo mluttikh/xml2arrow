@@ -15,7 +15,7 @@ use std::io::{BufReader, Write};
 
 use arrow::array::{Array, Float64Array, Int32Array, StringArray, UInt32Array};
 use tempfile::NamedTempFile;
-use xml2arrow::{Config, parse_xml};
+use xml2arrow::{Config, Parser, parse_xml};
 
 use common::{parse_xml_file, write_xml_tempfile};
 
@@ -206,6 +206,66 @@ fn test_config_reused_across_multiple_files() {
     let batch_b = batches_b.get("items").unwrap();
     assert_eq!(batch_b.num_rows(), 2);
     assert_array_values!(batch_b, "value", &[10, 20], Int32Array);
+}
+
+#[test]
+fn test_reused_parser_isolates_state_across_documents() {
+    // A `Parser` compiles the path trie once and is reused for many documents.
+    // Each `parse`/`parse_slice` must build fresh state, so results from one
+    // document must never leak into the next — including nested tables where a
+    // stale builder_stack or row counter would corrupt parent-index foreign
+    // keys. This exercises a multi-level config across heterogeneous inputs.
+    let config: Config = yaml_serde::from_str(
+        r#"
+        tables:
+          - name: groups
+            xml_path: /data
+            levels:
+              - group
+            fields:
+              - name: gid
+                xml_path: /data/group/@id
+                data_type: Int32
+          - name: items
+            xml_path: /data/group/items
+            levels:
+              - group
+              - item
+            fields:
+              - name: value
+                xml_path: /data/group/items/item/value
+                data_type: Int32
+        "#,
+    )
+    .unwrap();
+
+    let parser = Parser::new(&config).unwrap();
+
+    // First document: two groups, with 1 and 2 items respectively.
+    let xml_a = r#"<data>
+        <group id="1"><items><item><value>10</value></item></items></group>
+        <group id="2"><items><item><value>20</value></item><item><value>21</value></item></items></group>
+    </data>"#;
+    let batches_a = parser.parse_slice(xml_a.as_bytes()).unwrap();
+    let groups_a = batches_a.get("groups").unwrap();
+    let items_a = batches_a.get("items").unwrap();
+    assert_eq!(groups_a.num_rows(), 2);
+    assert_array_values!(groups_a, "gid", &[1, 2], Int32Array);
+    assert_eq!(items_a.num_rows(), 3);
+    assert_array_values!(items_a, "value", &[10, 20, 21], Int32Array);
+
+    // Second, smaller document through the SAME parser. Row counts and parent
+    // indices must reflect only this document, proving no carryover.
+    let xml_b = r#"<data>
+        <group id="7"><items><item><value>99</value></item></items></group>
+    </data>"#;
+    let batches_b = parser.parse_slice(xml_b.as_bytes()).unwrap();
+    let groups_b = batches_b.get("groups").unwrap();
+    let items_b = batches_b.get("items").unwrap();
+    assert_eq!(groups_b.num_rows(), 1);
+    assert_array_values!(groups_b, "gid", &[7], Int32Array);
+    assert_eq!(items_b.num_rows(), 1);
+    assert_array_values!(items_b, "value", &[99], Int32Array);
 }
 
 // ---------------------------------------------------------------------------

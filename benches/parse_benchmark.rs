@@ -2,7 +2,7 @@ use codspeed_criterion_compat::{
     BenchmarkId, Criterion, Throughput, criterion_group, criterion_main,
 };
 use std::time::Duration;
-use xml2arrow::{Config, parse_xml, parse_xml_slice};
+use xml2arrow::{Config, Parser, parse_xml, parse_xml_slice};
 
 /// Generate realistic XML matching industrial use case
 fn generate_realistic_xml(num_measurements: usize, num_sensors: usize) -> String {
@@ -242,6 +242,89 @@ tables:
 "#,
     )
     .expect("Failed to parse config")
+}
+
+/// Tiny document used to isolate the *fixed* per-parse setup cost.
+///
+/// Every `parse_xml` call rebuilds the `PathRegistry` trie and re-validates the
+/// `Config` before reading a single byte. On large documents this is amortized
+/// to nothing, but on a ~KB document it can dominate. By measuring a tiny parse
+/// and a small parse we have two points on `time = setup + rate·bytes` and can
+/// solve for `setup` — the ceiling for any "compile-once, parse-many" change.
+fn bench_parse_tiny(c: &mut Criterion) {
+    let xml = generate_realistic_xml(2, 1);
+    let config = get_config();
+    let size_bytes = xml.len();
+
+    let mut group = c.benchmark_group("parse_tiny");
+    group.sample_size(100);
+    group.measurement_time(Duration::from_secs(10));
+    group.warm_up_time(Duration::from_secs(3));
+    group.throughput(Throughput::Bytes(size_bytes as u64));
+
+    group.bench_with_input(
+        BenchmarkId::new(
+            "buffered_2_measurements_1_sensor",
+            format!("{}B", size_bytes),
+        ),
+        &xml,
+        |b, xml| {
+            b.iter(|| {
+                let result = parse_xml(xml.as_bytes(), &config);
+                result.unwrap()
+            });
+        },
+    );
+
+    group.bench_with_input(
+        BenchmarkId::new(
+            "zero_copy_2_measurements_1_sensor",
+            format!("{}B", size_bytes),
+        ),
+        &xml,
+        |b, xml| {
+            b.iter(|| {
+                let result = parse_xml_slice(xml.as_bytes(), &config);
+                result.unwrap()
+            });
+        },
+    );
+
+    // Reused-`Parser` variants: the path trie is compiled once, outside the
+    // measured loop, so each iteration pays only per-parse builder allocation —
+    // the "compile-once, parse-many" workload. Comparing these against the two
+    // benches above isolates the fixed setup cost a reused `Parser` eliminates.
+    let parser = Parser::new(&config).expect("Failed to build parser");
+
+    group.bench_with_input(
+        BenchmarkId::new(
+            "reused_parser_buffered_2_measurements_1_sensor",
+            format!("{}B", size_bytes),
+        ),
+        &xml,
+        |b, xml| {
+            b.iter(|| {
+                let result = parser.parse(xml.as_bytes());
+                result.unwrap()
+            });
+        },
+    );
+
+    group.bench_with_input(
+        BenchmarkId::new(
+            "reused_parser_zero_copy_2_measurements_1_sensor",
+            format!("{}B", size_bytes),
+        ),
+        &xml,
+        |b, xml| {
+            b.iter(|| {
+                let result = parser.parse_slice(xml.as_bytes());
+                result.unwrap()
+            });
+        },
+    );
+
+    group.finish();
 }
 
 fn bench_parse_small(c: &mut Criterion) {
@@ -502,6 +585,7 @@ fn bench_parse_wide_fanout(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    bench_parse_tiny,
     bench_parse_small,
     bench_parse_medium,
     bench_parse_large,
