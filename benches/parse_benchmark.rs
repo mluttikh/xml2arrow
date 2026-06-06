@@ -2,7 +2,9 @@ use codspeed_criterion_compat::{
     BenchmarkId, Criterion, Throughput, criterion_group, criterion_main,
 };
 use std::time::Duration;
-use xml2arrow::{Config, Parser, parse_xml, parse_xml_slice};
+use xml2arrow::{
+    Config, Parser, parse_xml, parse_xml_batched, parse_xml_slice, parse_xml_slice_batched,
+};
 
 /// Generate realistic XML matching industrial use case
 fn generate_realistic_xml(num_measurements: usize, num_sensors: usize) -> String {
@@ -411,6 +413,68 @@ fn bench_parse_medium(c: &mut Criterion) {
     group.finish();
 }
 
+/// Chunked-output counterpart to `bench_parse_medium`.
+///
+/// N4 is a memory/streaming feature, not a speed play — its win (bounded
+/// working set, batches freed as they stream out) doesn't show up in a
+/// wall-clock parse bench. This group's job is the *guard*: confirm that
+/// emitting fixed-size chunks plus invoking a per-batch callback is not
+/// pathologically slower than building one batch per table. We drop each batch
+/// immediately in the callback (the streaming consumer's pattern) and
+/// `black_box` its row count so the work isn't optimized away.
+fn bench_parse_medium_batched(c: &mut Criterion) {
+    use std::hint::black_box;
+
+    let xml = generate_realistic_xml(10_000, 5);
+    let config = get_config();
+    let size_bytes = xml.len();
+    // 8192 is the conventional Arrow batch size: small enough to stay warm in
+    // cache while filling, large enough that per-batch overhead is negligible.
+    const BATCH_ROWS: usize = 8192;
+
+    let mut group = c.benchmark_group("parse_medium_batched");
+    group.sample_size(50);
+    group.measurement_time(Duration::from_secs(15));
+    group.warm_up_time(Duration::from_secs(5));
+    group.throughput(Throughput::Bytes(size_bytes as u64));
+
+    group.bench_with_input(
+        BenchmarkId::new(
+            "buffered_10K_measurements_5_sensors",
+            format!("{}MB", size_bytes / (1024 * 1024)),
+        ),
+        &xml,
+        |b, xml| {
+            b.iter(|| {
+                parse_xml_batched(xml.as_bytes(), &config, BATCH_ROWS, |_name, batch| {
+                    black_box(batch.num_rows());
+                    Ok(())
+                })
+                .unwrap()
+            });
+        },
+    );
+
+    group.bench_with_input(
+        BenchmarkId::new(
+            "zero_copy_10K_measurements_5_sensors",
+            format!("{}MB", size_bytes / (1024 * 1024)),
+        ),
+        &xml,
+        |b, xml| {
+            b.iter(|| {
+                parse_xml_slice_batched(xml.as_bytes(), &config, BATCH_ROWS, |_name, batch| {
+                    black_box(batch.num_rows());
+                    Ok(())
+                })
+                .unwrap()
+            });
+        },
+    );
+
+    group.finish();
+}
+
 fn bench_parse_large(c: &mut Criterion) {
     let xml = generate_realistic_xml(100_000, 10);
     let config = get_config();
@@ -588,6 +652,7 @@ criterion_group!(
     bench_parse_tiny,
     bench_parse_small,
     bench_parse_medium,
+    bench_parse_medium_batched,
     bench_parse_large,
     bench_parse_xlarge,
     bench_parse_wide_fanout

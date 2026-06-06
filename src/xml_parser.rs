@@ -402,6 +402,16 @@ struct TableBuilder {
     /// is also read by any ACTIVE CHILD TABLES on the stack to populate their
     /// parent index columns (the foreign keys defined in `levels`).
     row_index: usize,
+    /// Rows accumulated in the *current* Arrow builders since the last `finish()`.
+    ///
+    /// Used only by chunked output to decide when a builder has filled a batch.
+    /// Deliberately separate from `row_index`: `row_index` is the foreign-key
+    /// counter and is reset by `start_table` (so a child's `<level>` ordinal
+    /// restarts per parent), whereas `pending_rows` tracks how much is buffered
+    /// in the Arrow builders right now and is reset only when those builders are
+    /// drained by `finish()`. Keeping them apart is what makes chunk sizing
+    /// correct regardless of nesting resets.
+    pending_rows: usize,
 }
 
 impl TableBuilder {
@@ -417,6 +427,7 @@ impl TableBuilder {
             index_builders,
             field_builders,
             row_index: 0,
+            pending_rows: 0,
         }
     }
 
@@ -452,12 +463,24 @@ impl TableBuilder {
             field_builder.append_current_value()?;
         }
 
-        // 3. Advance this table's primary key.
+        // 3. Advance this table's primary key, and the chunk-fill counter.
+        // `row_index` is the FK counter (may be reset by `start_table`);
+        // `pending_rows` only counts what is buffered in the current builders.
         self.row_index += 1;
+        self.pending_rows += 1;
         Ok(())
     }
 
+    /// Drains the current Arrow builders into a `RecordBatch`.
+    ///
+    /// Each Arrow builder's `.finish()` empties and resets it, so this doubles
+    /// as the chunk-flush primitive: calling it repeatedly yields successive
+    /// batches that concatenate back to a single one. We therefore reset
+    /// `pending_rows` here, but deliberately leave `row_index` untouched — the
+    /// foreign keys other tables have already emitted must keep indexing the
+    /// document-global row positions, not chunk-local ones.
     fn finish(&mut self) -> Result<RecordBatch> {
+        self.pending_rows = 0;
         let num_arrays = self.field_builders.len() + self.index_builders.len();
         let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(num_arrays);
         let mut fields: Vec<Field> = Vec::with_capacity(num_arrays);
@@ -489,6 +512,30 @@ struct TableStackEntry {
     node_id: PathNodeId,
 }
 
+/// Where finalized batches go.
+///
+/// The default `Whole` mode accumulates every table into a single
+/// `RecordBatch` returned at the end (the historical behavior). `Chunked` mode
+/// instead flushes each table whenever its current builders reach `rows`,
+/// handing the batch to `on_batch` so the caller can consume/free it
+/// immediately — bounding the working set and enabling streaming output.
+///
+/// The callback is a `&mut dyn FnMut` trait object rather than a generic `F`
+/// deliberately: the converter flows through the `handle_event` /
+/// `process_xml_events*` hot loop, which is already monomorphized over
+/// `const PARSE_ATTRIBUTES`. Threading a second generic through all of that
+/// would double the codegen for no benefit, since the sink is only consulted
+/// at row boundaries (not per event), where a dynamic call costs nothing.
+enum OutputSink<'f> {
+    /// One `RecordBatch` per table, materialized at `finish`.
+    Whole,
+    /// Emit a batch each time a table fills `rows`, plus a final flush at EOF.
+    Chunked {
+        rows: usize,
+        on_batch: &'f mut dyn FnMut(&str, RecordBatch) -> Result<()>,
+    },
+}
+
 /// Converts parsed XML events into Arrow `RecordBatch`es.
 ///
 /// This struct maintains a stack of table builders to handle nested XML structures.
@@ -501,7 +548,7 @@ struct TableStackEntry {
 /// validated config and compiled `PathRegistry` — lives in [`Parser`], which
 /// this borrows from. Splitting the two is what lets a single `Parser` parse
 /// many documents without rebuilding the path trie each time (see [`Parser`]).
-struct XmlToArrowConverter<'a> {
+struct XmlToArrowConverter<'a, 'f> {
     /// Table builders for each table defined in the configuration, indexed by position.
     table_builders: Vec<TableBuilder>,
     /// Stack of active tables representing the current nesting level.
@@ -515,16 +562,19 @@ struct XmlToArrowConverter<'a> {
     /// (and its backing allocation). Cached here so `parse_attributes` reads
     /// a plain `bool` rather than re-deriving it from the config each call.
     validate_attributes: bool,
+    /// Destination for finalized batches: a single materialized result
+    /// (`Whole`) or streamed fixed-size chunks (`Chunked`).
+    output_sink: OutputSink<'f>,
 }
 
-impl<'a> XmlToArrowConverter<'a> {
+impl<'a, 'f> XmlToArrowConverter<'a, 'f> {
     /// Builds the fresh per-parse state from an already-compiled [`Parser`].
     ///
     /// This is the only work that *must* happen on every document: allocating
     /// the Arrow builders that will hold the parsed values. The expensive setup
     /// (config validation, path-trie construction) was already done once in
     /// [`Parser::new`], so this stays cheap even for tiny documents.
-    fn new(parser: &'a Parser) -> Self {
+    fn new(parser: &'a Parser, output_sink: OutputSink<'f>) -> Self {
         let config = &parser.config;
         let mut table_builders = Vec::with_capacity(config.tables.len());
         for table_config in &config.tables {
@@ -537,6 +587,7 @@ impl<'a> XmlToArrowConverter<'a> {
             registry: &parser.registry,
             parent_indices_buffer: Vec::new(),
             validate_attributes: config.parser_options.validate_attributes,
+            output_sink,
         }
     }
 
@@ -575,8 +626,33 @@ impl<'a> XmlToArrowConverter<'a> {
             self.parent_indices_buffer
                 .push(self.table_builders[entry.table_idx].row_index as u32);
         }
-        if let Some(entry) = self.builder_stack.last() {
-            self.table_builders[entry.table_idx].end_row(&self.parent_indices_buffer)?;
+        if let Some(&TableStackEntry { table_idx, .. }) = self.builder_stack.last() {
+            self.table_builders[table_idx].end_row(&self.parent_indices_buffer)?;
+            // Only the table that just saved a row can have crossed its chunk
+            // threshold, so a single check here suffices (no-op in `Whole` mode).
+            self.maybe_flush_chunk(table_idx)?;
+        }
+        Ok(())
+    }
+
+    /// In `Chunked` mode, emit `table_idx`'s current batch once it has filled
+    /// `rows`. A no-op in `Whole` mode and while the table is still filling.
+    ///
+    /// Flushing drains the Arrow builders (via `TableBuilder::finish`) and
+    /// resets `pending_rows`, but never touches `row_index` — so foreign keys
+    /// already written by child tables keep indexing document-global parent
+    /// rows, and concatenating a table's chunks reproduces the whole batch.
+    fn maybe_flush_chunk(&mut self, table_idx: usize) -> Result<()> {
+        if let OutputSink::Chunked { rows, on_batch } = &mut self.output_sink {
+            let table = &mut self.table_builders[table_idx];
+            // Skip pure-hierarchy tables (no fields). They exist only to supply
+            // foreign keys to descendants and are never emitted by whole-mode
+            // `finish` either, so flushing them would invent an output table the
+            // non-batched path never produces (and break concat-parity).
+            if !table.field_builders.is_empty() && table.pending_rows >= *rows {
+                let batch = table.finish()?;
+                on_batch(&table.meta.name, batch)?;
+            }
         }
         Ok(())
     }
@@ -607,6 +683,26 @@ impl<'a> XmlToArrowConverter<'a> {
             }
         }
         Ok(record_batches)
+    }
+
+    /// Streaming counterpart to [`finish`](Self::finish): emit any remaining
+    /// rows as a final batch per table.
+    ///
+    /// Every non-field-empty table is flushed exactly once here, even if it has
+    /// zero pending rows. That trailing (possibly empty) batch is what makes the
+    /// concat-parity contract hold: a table configured but absent from this
+    /// document still produces one correctly-typed batch, so concatenating a
+    /// table's emitted chunks always reproduces what `Whole` mode would return.
+    fn finish_chunked(&mut self) -> Result<()> {
+        if let OutputSink::Chunked { on_batch, .. } = &mut self.output_sink {
+            for table_builder in &mut self.table_builders {
+                if !table_builder.field_builders.is_empty() {
+                    let batch = table_builder.finish()?;
+                    on_batch(&table_builder.meta.name, batch)?;
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -727,6 +823,72 @@ impl Parser {
         })
     }
 
+    /// Parses XML from a streaming reader, emitting **fixed-size chunks**
+    /// instead of one batch per table.
+    ///
+    /// Each table is flushed to `on_batch` as soon as it accumulates
+    /// `batch_rows` rows, plus a final (possibly empty) batch per table at EOF.
+    /// This bounds the working set — each table's Arrow builders never hold more
+    /// than `batch_rows` rows — and lets the caller consume/free each batch as
+    /// it arrives rather than materializing the whole result.
+    ///
+    /// `on_batch` receives the table's configured name and the batch; returning
+    /// `Err` aborts the parse and propagates the error. Concatenating the
+    /// batches a table emits, in order, reproduces exactly the single
+    /// `RecordBatch` that [`parse`](Self::parse) would return — same rows, same
+    /// order, same schema. The nested-table foreign keys (`<level>` columns)
+    /// remain document-global, so they stay valid across chunk boundaries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `batch_rows == 0`, if XML parsing encounters invalid
+    /// data, if value conversion fails, if Arrow batch creation fails, or if
+    /// `on_batch` returns an error.
+    pub fn parse_batched<F>(
+        &self,
+        reader: impl BufRead,
+        batch_rows: usize,
+        on_batch: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&str, RecordBatch) -> Result<()>,
+    {
+        let mut reader = Reader::from_reader(reader);
+        self.configure_reader(&mut reader);
+        let needs_attrs = self.needs_attrs;
+        self.run_parse_batched(&mut reader, batch_rows, on_batch, |r, t, c, s| {
+            if needs_attrs {
+                process_xml_events::<_, true>(r, t, c, s)
+            } else {
+                process_xml_events::<_, false>(r, t, c, s)
+            }
+        })
+    }
+
+    /// Zero-copy counterpart to [`parse_batched`](Self::parse_batched) for an
+    /// in-memory byte slice. See that method for the chunking contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `batch_rows == 0`, if XML parsing encounters invalid
+    /// data, if value conversion fails, if Arrow batch creation fails, or if
+    /// `on_batch` returns an error.
+    pub fn parse_slice_batched<F>(&self, xml: &[u8], batch_rows: usize, on_batch: F) -> Result<()>
+    where
+        F: FnMut(&str, RecordBatch) -> Result<()>,
+    {
+        let mut reader = Reader::from_reader(xml);
+        self.configure_reader(&mut reader);
+        let needs_attrs = self.needs_attrs;
+        self.run_parse_batched(&mut reader, batch_rows, on_batch, |r, t, c, s| {
+            if needs_attrs {
+                process_xml_events_slice::<true>(r, t, c, s)
+            } else {
+                process_xml_events_slice::<false>(r, t, c, s)
+            }
+        })
+    }
+
     /// Applies `ParserOptions` to the shared `quick_xml::Reader` config.
     ///
     /// Both entry points configure the reader identically; isolating that
@@ -760,11 +922,68 @@ impl Parser {
         F: FnOnce(
             &mut R,
             &mut PathTracker,
-            &mut XmlToArrowConverter<'_>,
+            &mut XmlToArrowConverter<'_, '_>,
             &[PathNodeId],
         ) -> Result<()>,
     {
-        let mut xml_to_arrow_converter = XmlToArrowConverter::new(self);
+        let mut converter = XmlToArrowConverter::new(self, OutputSink::Whole);
+        self.drive(reader, &mut converter, run_events)?;
+        converter.finish()
+    }
+
+    /// Streaming counterpart to [`run_parse`](Self::run_parse): instead of
+    /// materializing one batch per table, install a `Chunked` sink that hands
+    /// each filled batch to `on_batch`. Used by the `*_batched` entry points.
+    fn run_parse_batched<R, F, G>(
+        &self,
+        reader: &mut R,
+        batch_rows: usize,
+        mut on_batch: G,
+        run_events: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(
+            &mut R,
+            &mut PathTracker,
+            &mut XmlToArrowConverter<'_, '_>,
+            &[PathNodeId],
+        ) -> Result<()>,
+        G: FnMut(&str, RecordBatch) -> Result<()>,
+    {
+        if batch_rows == 0 {
+            return Err(Error::Arrow(
+                arrow::error::ArrowError::InvalidArgumentError(
+                    "batch_rows must be greater than 0".to_string(),
+                ),
+            ));
+        }
+        let sink = OutputSink::Chunked {
+            rows: batch_rows,
+            on_batch: &mut on_batch,
+        };
+        let mut converter = XmlToArrowConverter::new(self, sink);
+        self.drive(reader, &mut converter, run_events)?;
+        converter.finish_chunked()
+    }
+
+    /// Shared driver: prime the root table and run the event loop against a
+    /// converter the caller has already configured with the desired
+    /// [`OutputSink`]. Finalization (`finish` vs `finish_chunked`) is left to
+    /// the caller, since the two output modes differ only there.
+    fn drive<R, F>(
+        &self,
+        reader: &mut R,
+        converter: &mut XmlToArrowConverter<'_, '_>,
+        run_events: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(
+            &mut R,
+            &mut PathTracker,
+            &mut XmlToArrowConverter<'_, '_>,
+            &[PathNodeId],
+        ) -> Result<()>,
+    {
         let mut path_tracker = PathTracker::new(&self.registry);
 
         // Start the root-level table (xml_path: /) if it exists AND has fields
@@ -773,21 +992,14 @@ impl Parser {
         // breaking their level indexing. Tables with xml_path: / and no fields
         // are just used for hierarchy purposes and don't need to be on the stack.
         if let Some(table_idx) = self.registry.get_table_index(PathNodeId::ROOT)
-            && !xml_to_arrow_converter.table_builders[table_idx]
+            && !converter.table_builders[table_idx]
                 .field_builders
                 .is_empty()
         {
-            xml_to_arrow_converter.start_table(table_idx, PathNodeId::ROOT);
+            converter.start_table(table_idx, PathNodeId::ROOT);
         }
 
-        run_events(
-            reader,
-            &mut path_tracker,
-            &mut xml_to_arrow_converter,
-            &self.stop_node_ids,
-        )?;
-
-        xml_to_arrow_converter.finish()
+        run_events(reader, &mut path_tracker, converter, &self.stop_node_ids)
     }
 }
 
@@ -877,6 +1089,53 @@ pub fn parse_xml_slice(xml: &[u8], config: &Config) -> Result<IndexMap<String, R
     Parser::new(config)?.parse_slice(xml)
 }
 
+/// Parses XML from a reader into **fixed-size batches**, streaming each to a callback.
+///
+/// Convenience wrapper over [`Parser::parse_batched`] that compiles a throwaway
+/// [`Parser`] per call. See [`Parser::parse_batched`] for the chunking contract
+/// (bounded working set, document-global foreign keys, concat-parity with
+/// [`parse_xml`]). When parsing many documents with the same `Config`, build a
+/// [`Parser`] once and call its method directly to amortize path compilation.
+///
+/// # Errors
+///
+/// Returns an error if configuration validation fails, if `batch_rows == 0`, if
+/// XML parsing encounters invalid data, if value conversion fails, if Arrow
+/// batch creation fails, or if `on_batch` returns an error.
+pub fn parse_xml_batched<F>(
+    reader: impl BufRead,
+    config: &Config,
+    batch_rows: usize,
+    on_batch: F,
+) -> Result<()>
+where
+    F: FnMut(&str, RecordBatch) -> Result<()>,
+{
+    Parser::new(config)?.parse_batched(reader, batch_rows, on_batch)
+}
+
+/// Zero-copy counterpart to [`parse_xml_batched`] for an in-memory byte slice.
+///
+/// Convenience wrapper over [`Parser::parse_slice_batched`] that compiles a
+/// throwaway [`Parser`] per call.
+///
+/// # Errors
+///
+/// Returns an error if configuration validation fails, if `batch_rows == 0`, if
+/// XML parsing encounters invalid data, if value conversion fails, if Arrow
+/// batch creation fails, or if `on_batch` returns an error.
+pub fn parse_xml_slice_batched<F>(
+    xml: &[u8],
+    config: &Config,
+    batch_rows: usize,
+    on_batch: F,
+) -> Result<()>
+where
+    F: FnMut(&str, RecordBatch) -> Result<()>,
+{
+    Parser::new(config)?.parse_slice_batched(xml, batch_rows, on_batch)
+}
+
 // --- Event loop implementations ---
 //
 // Two loop variants exist to match how events are read from quick-xml:
@@ -918,7 +1177,7 @@ fn close_element(
     node_id: Option<PathNodeId>,
     is_table: bool,
     path_tracker: &mut PathTracker,
-    xml_to_arrow_converter: &mut XmlToArrowConverter<'_>,
+    xml_to_arrow_converter: &mut XmlToArrowConverter<'_, '_>,
     stop_node_ids: &[PathNodeId],
 ) -> Result<LoopAction> {
     if is_table {
@@ -960,7 +1219,7 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
     event: Event<'_>,
     decoder: Decoder,
     path_tracker: &mut PathTracker,
-    xml_to_arrow_converter: &mut XmlToArrowConverter<'_>,
+    xml_to_arrow_converter: &mut XmlToArrowConverter<'_, '_>,
     stop_node_ids: &[PathNodeId],
     attr_name_buffer: &mut Vec<u8>,
 ) -> Result<LoopAction> {
@@ -1091,7 +1350,7 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
 fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
     reader: &mut Reader<B>,
     path_tracker: &mut PathTracker,
-    xml_to_arrow_converter: &mut XmlToArrowConverter<'_>,
+    xml_to_arrow_converter: &mut XmlToArrowConverter<'_, '_>,
     stop_node_ids: &[PathNodeId],
 ) -> Result<()> {
     let mut buf = Vec::with_capacity(4096);
@@ -1127,7 +1386,7 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
 fn process_xml_events_slice<const PARSE_ATTRIBUTES: bool>(
     reader: &mut Reader<&[u8]>,
     path_tracker: &mut PathTracker,
-    xml_to_arrow_converter: &mut XmlToArrowConverter<'_>,
+    xml_to_arrow_converter: &mut XmlToArrowConverter<'_, '_>,
     stop_node_ids: &[PathNodeId],
 ) -> Result<()> {
     let mut attr_name_buffer = Vec::with_capacity(64);
@@ -1157,7 +1416,7 @@ fn parse_attributes(
     decoder: Decoder,
     mut attributes: Attributes,
     path_tracker: &mut PathTracker,
-    xml_to_arrow_converter: &mut XmlToArrowConverter<'_>,
+    xml_to_arrow_converter: &mut XmlToArrowConverter<'_, '_>,
     attr_name_buffer: &mut Vec<u8>,
 ) -> Result<()> {
     // For trusted inputs, skip quick-xml's duplicate-attribute detection.
@@ -4972,5 +5231,285 @@ mod tests {
         let batch = record_batches.get("test").unwrap();
         assert_eq!(batch.num_rows(), 1);
         assert_array_values!(batch, "id", vec![42i32], Int32Array);
+    }
+
+    // === Chunked / streaming output (N4) ===
+    //
+    // The contract: concatenating the chunks a table emits, in emission order,
+    // reproduces exactly the single RecordBatch `parse_xml_slice` returns. That
+    // property test is the primary oracle — it covers row counts, column values,
+    // schema, AND the document-global foreign keys all at once, across the same
+    // nesting shapes the whole-batch tests already exercise.
+    mod chunked {
+        use super::*;
+        use arrow::compute::concat_batches;
+
+        /// A flat single table.
+        const FLAT: (&str, &str) = (
+            r#"<data>
+                <item><v>1</v></item>
+                <item><v>2</v></item>
+                <item><v>3</v></item>
+                <item><v>4</v></item>
+                <item><v>5</v></item>
+            </data>"#,
+            r#"
+            tables:
+                - name: items
+                  xml_path: /data
+                  levels: [item]
+                  fields:
+                    - name: v
+                      xml_path: /data/item/v
+                      data_type: Int32
+            "#,
+        );
+
+        /// Three-level nesting — the foreign-key oracle. The child `<group>`
+        /// column is document-global (0,0,1,1,1,2) while `<item>` restarts per
+        /// group (0,1,0,1,2,0); chunking must preserve both.
+        const THREE_LEVEL: (&str, &str) = (
+            r#"<root>
+                <group>
+                    <item><value>1</value></item>
+                    <item><value>2</value></item>
+                </group>
+                <group>
+                    <item><value>3</value></item>
+                    <item><value>4</value></item>
+                    <item><value>5</value></item>
+                </group>
+                <group>
+                    <item><value>6</value></item>
+                </group>
+            </root>"#,
+            r#"
+            tables:
+                - name: groups
+                  xml_path: /root
+                  levels: [group]
+                  fields: []
+                - name: items
+                  xml_path: /root/group
+                  levels: [group, item]
+                  fields:
+                    - name: value
+                      xml_path: /root/group/item/value
+                      data_type: Int32
+            "#,
+        );
+
+        /// Three-deep hierarchy with sibling repeating groups (two empty-field
+        /// ancestor tables plus a leaf table carrying three FK level columns).
+        /// Exercises how the per-`start_table` row_index resets at each level
+        /// interact with chunk boundaries, and that empty-field hierarchy tables
+        /// are never emitted as chunks.
+        const GENERIC_NESTED: (&str, &str) = (
+            r#"<level1>
+                <level2>
+                    <level3><row><value>1</value></row><row><value>2</value></row></level3>
+                    <level3><row><value>3</value></row></level3>
+                </level2>
+                <level2>
+                    <level3><row><value>4</value></row><row><value>5</value></row></level3>
+                </level2>
+            </level1>"#,
+            r#"
+            tables:
+                - name: level2s
+                  xml_path: /level1
+                  levels: [level2]
+                  fields: []
+                - name: level3s
+                  xml_path: /level1/level2
+                  levels: [level2, level3]
+                  fields: []
+                - name: rows
+                  xml_path: /level1/level2/level3
+                  levels: [level2, level3, row]
+                  fields:
+                    - name: value
+                      xml_path: /level1/level2/level3/row/value
+                      data_type: Int32
+            "#,
+        );
+
+        /// Runs both modes and asserts the chunked output concatenates back to
+        /// the whole-batch output, plus that non-final chunks are exactly
+        /// `batch_rows` long (the flush fires precisely at the boundary).
+        fn assert_chunked_matches_whole(xml: &str, yaml: &str, batch_rows: usize) {
+            let config = config_from_yaml!(yaml);
+            let whole = parse_xml_slice(xml.as_bytes(), &config).unwrap();
+
+            let mut chunks: IndexMap<String, Vec<RecordBatch>> = IndexMap::new();
+            parse_xml_slice_batched(xml.as_bytes(), &config, batch_rows, |name, batch| {
+                chunks.entry(name.to_string()).or_default().push(batch);
+                Ok(())
+            })
+            .unwrap();
+
+            assert_eq!(
+                whole.len(),
+                chunks.len(),
+                "table set differs (batch_rows={batch_rows})"
+            );
+
+            for (name, whole_batch) in &whole {
+                let table_chunks = chunks
+                    .get(name)
+                    .unwrap_or_else(|| panic!("table '{name}' not emitted in chunked mode"));
+
+                for (i, chunk) in table_chunks.iter().enumerate() {
+                    let is_last = i + 1 == table_chunks.len();
+                    assert!(
+                        chunk.num_rows() <= batch_rows,
+                        "chunk {i} of '{name}' has {} rows, exceeds batch_rows={batch_rows}",
+                        chunk.num_rows()
+                    );
+                    if !is_last {
+                        assert_eq!(
+                            chunk.num_rows(),
+                            batch_rows,
+                            "non-final chunk {i} of '{name}' should be full (batch_rows={batch_rows})"
+                        );
+                    }
+                }
+
+                let schema = whole_batch.schema();
+                let concatenated =
+                    concat_batches(&schema, table_chunks.iter()).expect("concat chunks");
+                assert_eq!(
+                    &concatenated, whole_batch,
+                    "concatenated chunks != whole for table '{name}' (batch_rows={batch_rows})"
+                );
+            }
+        }
+
+        /// The core parity property, swept over every fixture shape and a range
+        /// of chunk sizes: 1 and 2 force mid-row-group flushes, 7 is a prime
+        /// that lands off every natural boundary, and 100_000 is larger than any
+        /// fixture (so a single chunk must equal the whole batch).
+        #[rstest]
+        #[case(1)]
+        #[case(2)]
+        #[case(7)]
+        #[case(100_000)]
+        fn concat_of_chunks_equals_whole(#[case] batch_rows: usize) {
+            for (xml, yaml) in [FLAT, THREE_LEVEL, GENERIC_NESTED] {
+                assert_chunked_matches_whole(xml, yaml, batch_rows);
+            }
+        }
+
+        /// Explicit guard on the documented correctness risk: when a *parent*
+        /// table is itself flushed mid-document (batch_rows=1 flushes `items`
+        /// after every row), the foreign keys keep indexing document-global
+        /// parent rows rather than rebasing to the post-flush chunk.
+        #[test]
+        fn foreign_keys_stay_global_across_child_flushes() {
+            let (xml, yaml) = THREE_LEVEL;
+            let config = config_from_yaml!(yaml);
+
+            let mut items_chunks: Vec<RecordBatch> = Vec::new();
+            parse_xml_slice_batched(xml.as_bytes(), &config, 1, |name, batch| {
+                if name == "items" {
+                    items_chunks.push(batch);
+                }
+                Ok(())
+            })
+            .unwrap();
+
+            // batch_rows=1 ⇒ six single-row chunks plus one trailing empty flush.
+            assert_eq!(items_chunks.len(), 7);
+            let schema = items_chunks[0].schema();
+            let items = concat_batches(&schema, items_chunks.iter()).unwrap();
+
+            assert_eq!(items.num_rows(), 6);
+            assert_array_values!(items, "<group>", vec![0u32, 0, 1, 1, 1, 2], UInt32Array);
+            assert_array_values!(items, "<item>", vec![0u32, 1, 0, 1, 2, 0], UInt32Array);
+            assert_array_values!(items, "value", vec![1i32, 2, 3, 4, 5, 6], Int32Array);
+        }
+
+        /// `batch_rows == 0` is a caller error, surfaced before any parsing.
+        #[test]
+        fn zero_batch_rows_is_rejected() {
+            let (xml, yaml) = FLAT;
+            let config = config_from_yaml!(yaml);
+            let result = parse_xml_slice_batched(xml.as_bytes(), &config, 0, |_, _| Ok(()));
+            assert!(
+                matches!(result, Err(Error::Arrow(_))),
+                "expected an Arrow InvalidArgument error, got {result:?}"
+            );
+        }
+
+        /// A configured table absent from the document still emits exactly one
+        /// (empty, correctly-typed) batch, so callers can always concat to match
+        /// `parse_xml_slice`'s output and never lose a table's schema.
+        #[test]
+        fn absent_table_emits_one_empty_batch() {
+            let xml = r#"<root><a><v>1</v></a></root>"#;
+            let yaml = r#"
+            tables:
+                - name: present
+                  xml_path: /root
+                  levels: [a]
+                  fields:
+                    - name: v
+                      xml_path: /root/a/v
+                      data_type: Int32
+                - name: absent
+                  xml_path: /root/missing
+                  levels: [x]
+                  fields:
+                    - name: w
+                      xml_path: /root/missing/x/w
+                      data_type: Int32
+            "#;
+            let config = config_from_yaml!(yaml);
+
+            let mut chunks: IndexMap<String, Vec<RecordBatch>> = IndexMap::new();
+            parse_xml_slice_batched(xml.as_bytes(), &config, 8, |name, batch| {
+                chunks.entry(name.to_string()).or_default().push(batch);
+                Ok(())
+            })
+            .unwrap();
+
+            let absent = chunks
+                .get("absent")
+                .expect("absent table should emit a batch");
+            assert_eq!(
+                absent.len(),
+                1,
+                "absent table should emit exactly one batch"
+            );
+            assert_eq!(absent[0].num_rows(), 0);
+            // Schema is still fully described (FK level column + field column).
+            assert!(absent[0].schema().column_with_name("<x>").is_some());
+            assert!(absent[0].schema().column_with_name("w").is_some());
+        }
+
+        /// An error returned from `on_batch` aborts the parse and propagates
+        /// unchanged, so a failing sink stops work rather than being swallowed.
+        #[test]
+        fn callback_error_aborts_and_propagates() {
+            let (xml, yaml) = FLAT;
+            let config = config_from_yaml!(yaml);
+
+            let mut calls = 0usize;
+            let result = parse_xml_slice_batched(xml.as_bytes(), &config, 1, |_, _| {
+                calls += 1;
+                Err(Error::Arrow(arrow::error::ArrowError::ComputeError(
+                    "sink failed".to_string(),
+                )))
+            });
+
+            match result {
+                Err(Error::Arrow(arrow::error::ArrowError::ComputeError(msg))) => {
+                    assert_eq!(msg, "sink failed");
+                }
+                other => panic!("expected the sink error to propagate, got {other:?}"),
+            }
+            // Aborted on the very first emitted chunk, not after draining all rows.
+            assert_eq!(calls, 1);
+        }
     }
 }
