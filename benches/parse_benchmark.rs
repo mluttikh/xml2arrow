@@ -103,6 +103,7 @@ fn get_config() -> Config {
 parser_options:
   trim_text: false
   validate_closing_tags: false
+  validate_attributes: false
 tables:
   - name: root
     xml_path: /
