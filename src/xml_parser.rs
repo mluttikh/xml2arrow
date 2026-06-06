@@ -751,7 +751,11 @@ impl Parser {
     /// finalization — is identical. Accepting the event loop as a closure lets
     /// each caller stay specialized (buffered vs zero-copy, attrs on vs off)
     /// without duplicating the surrounding orchestration.
-    fn run_parse<R, F>(&self, reader: &mut R, run_events: F) -> Result<IndexMap<String, RecordBatch>>
+    fn run_parse<R, F>(
+        &self,
+        reader: &mut R,
+        run_events: F,
+    ) -> Result<IndexMap<String, RecordBatch>>
     where
         F: FnOnce(
             &mut R,
