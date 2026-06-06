@@ -493,15 +493,21 @@ struct TableStackEntry {
 ///
 /// This struct maintains a stack of table builders to handle nested XML structures.
 /// It uses integer-based path indexing via `PathRegistry` for efficient lookups.
-struct XmlToArrowConverter {
+/// The mutable, per-parse half of the conversion.
+///
+/// Everything here holds parse-specific state (the Arrow builders that
+/// accumulate values, the active table stack, scratch buffers) and so must be
+/// reconstructed for every document. The immutable, *reusable* half — the
+/// validated config and compiled `PathRegistry` — lives in [`Parser`], which
+/// this borrows from. Splitting the two is what lets a single `Parser` parse
+/// many documents without rebuilding the path trie each time (see [`Parser`]).
+struct XmlToArrowConverter<'a> {
     /// Table builders for each table defined in the configuration, indexed by position.
     table_builders: Vec<TableBuilder>,
     /// Stack of active tables representing the current nesting level.
     builder_stack: Vec<TableStackEntry>,
-    /// Path registry for efficient path lookups.
-    registry: PathRegistry,
-    /// Optional path nodes that trigger early termination after their closing tags.
-    stop_node_ids: Vec<PathNodeId>,
+    /// Path registry for efficient path lookups, borrowed from the owning `Parser`.
+    registry: &'a PathRegistry,
     /// Reusable buffer for collecting parent row indices, avoiding per-row allocation.
     parent_indices_buffer: Vec<u32>,
     /// Mirror of `ParserOptions::validate_attributes`. When `false`, the
@@ -511,36 +517,27 @@ struct XmlToArrowConverter {
     validate_attributes: bool,
 }
 
-impl XmlToArrowConverter {
-    fn from_config(config: &Config) -> Result<Self> {
-        // Validate field configurations early to catch unsupported scale/offset
-        config.validate()?;
-
-        // Build path registry for efficient lookups
-        let registry = PathRegistry::from_config(config);
-
-        let stop_node_ids = config
-            .parser_options
-            .stop_at_paths
-            .iter()
-            .filter_map(|path| registry.resolve_path(path))
-            .collect::<Vec<_>>();
-
+impl<'a> XmlToArrowConverter<'a> {
+    /// Builds the fresh per-parse state from an already-compiled [`Parser`].
+    ///
+    /// This is the only work that *must* happen on every document: allocating
+    /// the Arrow builders that will hold the parsed values. The expensive setup
+    /// (config validation, path-trie construction) was already done once in
+    /// [`Parser::new`], so this stays cheap even for tiny documents.
+    fn new(parser: &'a Parser) -> Self {
+        let config = &parser.config;
         let mut table_builders = Vec::with_capacity(config.tables.len());
         for table_config in &config.tables {
             table_builders.push(TableBuilder::new(table_config));
         }
 
-        let builder_stack = Vec::new();
-
-        Ok(Self {
+        Self {
             table_builders,
-            builder_stack,
-            registry,
-            stop_node_ids,
+            builder_stack: Vec::new(),
+            registry: &parser.registry,
             parent_indices_buffer: Vec::new(),
             validate_attributes: config.parser_options.validate_attributes,
-        })
+        }
     }
 
     /// Sets a field value for the current table using path node information.
@@ -613,7 +610,193 @@ impl XmlToArrowConverter {
     }
 }
 
+/// A reusable, pre-compiled parser for a single [`Config`].
+///
+/// Constructing a `Parser` does the *one-time* setup work — validating the
+/// config and compiling every configured XML path into an integer-indexed
+/// `PathRegistry` trie. That work is fixed cost (independent of document size)
+/// and, on a small document, can dominate the total parse time. Holding a
+/// `Parser` lets you pay it **once** and then parse many documents through the
+/// same compiled state — the intended pattern when processing a stream or
+/// directory of files that all share one schema.
+///
+/// The free functions [`parse_xml`] and [`parse_xml_slice`] are thin wrappers
+/// that build a throwaway `Parser` per call; reach for `Parser` directly
+/// whenever you parse more than one document with the same `Config`.
+///
+/// # Example
+///
+/// ```rust
+/// use xml2arrow::{Parser, config::{Config, TableConfig, FieldConfigBuilder, DType}};
+///
+/// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build().unwrap()];
+/// let tables = vec![TableConfig::new("items", "/data", vec![], fields)];
+/// let config = Config { tables, parser_options: Default::default() };
+///
+/// // Compile once...
+/// let parser = Parser::new(&config).unwrap();
+/// // ...parse many.
+/// for xml in [b"<data><item><value>1</value></item></data>".as_slice(),
+///             b"<data><item><value>2</value></item></data>".as_slice()] {
+///     let batches = parser.parse_slice(xml).unwrap();
+///     // ... use batches
+/// }
+/// ```
+pub struct Parser {
+    /// Owned copy of the configuration, retained so each parse can rebuild its
+    /// fresh `TableBuilder`s and re-apply the reader options.
+    config: Config,
+    /// The compiled path trie — the expensive artifact this type exists to reuse.
+    registry: PathRegistry,
+    /// Path nodes that trigger early termination after their closing tags.
+    /// Resolved against `registry` once at construction.
+    stop_node_ids: Vec<PathNodeId>,
+    /// Whether any configured field maps to an attribute. Cached so the hot
+    /// path can pick the attribute-free event loop without re-scanning config.
+    needs_attrs: bool,
+}
+
+impl Parser {
+    /// Compiles `config` into a reusable parser, performing all one-time setup.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if configuration validation fails (e.g. an unsupported
+    /// scale/offset on a non-numeric field).
+    pub fn new(config: &Config) -> Result<Self> {
+        // Validate field configurations early to catch unsupported scale/offset.
+        config.validate()?;
+
+        // Build the path registry for efficient lookups — the work we want to
+        // amortize across every document parsed through this `Parser`.
+        let registry = PathRegistry::from_config(config);
+
+        let stop_node_ids = config
+            .parser_options
+            .stop_at_paths
+            .iter()
+            .filter_map(|path| registry.resolve_path(path))
+            .collect::<Vec<_>>();
+
+        Ok(Self {
+            config: config.clone(),
+            registry,
+            stop_node_ids,
+            needs_attrs: config.requires_attribute_parsing(),
+        })
+    }
+
+    /// Parses XML from a streaming reader (e.g. a `File`) into Arrow batches.
+    ///
+    /// Use [`Parser::parse_slice`] instead when the whole document is already
+    /// in memory — it avoids quick-xml's per-event buffer copy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if XML parsing encounters invalid data, value
+    /// conversion fails, or Arrow `RecordBatch` creation fails.
+    pub fn parse(&self, reader: impl BufRead) -> Result<IndexMap<String, RecordBatch>> {
+        let mut reader = Reader::from_reader(reader);
+        self.configure_reader(&mut reader);
+        let needs_attrs = self.needs_attrs;
+        self.run_parse(&mut reader, |r, t, c, s| {
+            if needs_attrs {
+                process_xml_events::<_, true>(r, t, c, s)
+            } else {
+                process_xml_events::<_, false>(r, t, c, s)
+            }
+        })
+    }
+
+    /// Parses XML from an in-memory byte slice into Arrow batches (zero-copy).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if XML parsing encounters invalid data, value
+    /// conversion fails, or Arrow `RecordBatch` creation fails.
+    pub fn parse_slice(&self, xml: &[u8]) -> Result<IndexMap<String, RecordBatch>> {
+        let mut reader = Reader::from_reader(xml);
+        self.configure_reader(&mut reader);
+        let needs_attrs = self.needs_attrs;
+        self.run_parse(&mut reader, |r, t, c, s| {
+            if needs_attrs {
+                process_xml_events_slice::<true>(r, t, c, s)
+            } else {
+                process_xml_events_slice::<false>(r, t, c, s)
+            }
+        })
+    }
+
+    /// Applies `ParserOptions` to the shared `quick_xml::Reader` config.
+    ///
+    /// Both entry points configure the reader identically; isolating that
+    /// here means each option lives in one place. `validate_closing_tags =
+    /// false` is the per-event optimization described in
+    /// `ParserOptions::validate_closing_tags`.
+    fn configure_reader<R>(&self, reader: &mut Reader<R>) {
+        let rc = reader.config_mut();
+        if self.config.parser_options.trim_text {
+            rc.trim_text(true);
+        }
+        if !self.config.parser_options.validate_closing_tags {
+            rc.check_end_names = false;
+        }
+    }
+
+    /// Shared parser driver used by both `parse` and `parse_slice`.
+    ///
+    /// The two entry points differ only in how they obtain events from their
+    /// reader and whether attribute parsing is required; everything else —
+    /// building the fresh per-parse converter, root-table priming, and
+    /// finalization — is identical. Accepting the event loop as a closure lets
+    /// each caller stay specialized (buffered vs zero-copy, attrs on vs off)
+    /// without duplicating the surrounding orchestration.
+    fn run_parse<R, F>(
+        &self,
+        reader: &mut R,
+        run_events: F,
+    ) -> Result<IndexMap<String, RecordBatch>>
+    where
+        F: FnOnce(
+            &mut R,
+            &mut PathTracker,
+            &mut XmlToArrowConverter<'_>,
+            &[PathNodeId],
+        ) -> Result<()>,
+    {
+        let mut xml_to_arrow_converter = XmlToArrowConverter::new(self);
+        let mut path_tracker = PathTracker::new(&self.registry);
+
+        // Start the root-level table (xml_path: /) if it exists AND has fields
+        // defined. We only start it if it has fields, because adding it to the
+        // builder_stack would affect parent_row_indices for all nested tables,
+        // breaking their level indexing. Tables with xml_path: / and no fields
+        // are just used for hierarchy purposes and don't need to be on the stack.
+        if let Some(table_idx) = self.registry.get_table_index(PathNodeId::ROOT)
+            && !xml_to_arrow_converter.table_builders[table_idx]
+                .field_builders
+                .is_empty()
+        {
+            xml_to_arrow_converter.start_table(table_idx, PathNodeId::ROOT);
+        }
+
+        run_events(
+            reader,
+            &mut path_tracker,
+            &mut xml_to_arrow_converter,
+            &self.stop_node_ids,
+        )?;
+
+        xml_to_arrow_converter.finish()
+    }
+}
+
 /// Parses XML data from a reader into Arrow record batches based on a provided configuration.
+///
+/// This is a convenience wrapper that compiles `config` into a [`Parser`] and
+/// parses a single document. When parsing **many** documents with the same
+/// `Config`, construct a [`Parser`] once and reuse it — that amortizes the
+/// one-time path-compilation cost this wrapper pays on every call.
 ///
 /// This function takes a reader implementing the `BufRead` trait (e.g., a `File`, `&[u8]`, or `String`)
 /// and a `Config` struct that defines the structure of the XML data and how it should be mapped
@@ -652,16 +835,7 @@ impl XmlToArrowConverter {
 /// // ... use record_batches
 /// ```
 pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<String, RecordBatch>> {
-    let mut reader = Reader::from_reader(reader);
-    configure_reader(&mut reader, config);
-    let needs_attrs = config.requires_attribute_parsing();
-    run_parse(&mut reader, config, |r, t, c, s| {
-        if needs_attrs {
-            process_xml_events::<_, true>(r, t, c, s)
-        } else {
-            process_xml_events::<_, false>(r, t, c, s)
-        }
-    })
+    Parser::new(config)?.parse(reader)
 }
 
 /// Parses XML data from an in-memory byte slice into Arrow record batches.
@@ -670,6 +844,9 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
 /// in memory, this function avoids per-event buffer copies by using quick-xml's
 /// slice reader, which returns events that borrow directly from the input.
 /// For streaming sources (files, network), use [`parse_xml`] instead.
+///
+/// Like [`parse_xml`], this compiles a throwaway [`Parser`] per call; reuse a
+/// [`Parser`] when parsing many slices with the same `Config`.
 ///
 /// # Arguments
 ///
@@ -697,77 +874,7 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
 /// let record_batches = parse_xml_slice(xml, &config).unwrap();
 /// ```
 pub fn parse_xml_slice(xml: &[u8], config: &Config) -> Result<IndexMap<String, RecordBatch>> {
-    let mut reader = Reader::from_reader(xml);
-    configure_reader(&mut reader, config);
-    let needs_attrs = config.requires_attribute_parsing();
-    run_parse(&mut reader, config, |r, t, c, s| {
-        if needs_attrs {
-            process_xml_events_slice::<true>(r, t, c, s)
-        } else {
-            process_xml_events_slice::<false>(r, t, c, s)
-        }
-    })
-}
-
-/// Applies `ParserOptions` to the shared `quick_xml::Reader` config.
-///
-/// Both entry points configure the reader identically; isolating that
-/// here means each option lives in one place and the public API stays
-/// readable. `validate_closing_tags = false` is the per-event optimization
-/// described in `ParserOptions::validate_closing_tags`.
-fn configure_reader<R>(reader: &mut Reader<R>, config: &Config) {
-    let rc = reader.config_mut();
-    if config.parser_options.trim_text {
-        rc.trim_text(true);
-    }
-    if !config.parser_options.validate_closing_tags {
-        rc.check_end_names = false;
-    }
-}
-
-/// Shared parser driver used by both `parse_xml` and `parse_xml_slice`.
-///
-/// The two entry points differ only in how they obtain events from their
-/// reader and whether attribute parsing is required; everything else —
-/// converter setup, root-table priming, stop-path capture, and finalization —
-/// is identical. Accepting the event loop as a closure lets each caller stay
-/// specialized (buffered vs zero-copy, attrs on vs off) without duplicating
-/// the surrounding orchestration.
-fn run_parse<R, F>(
-    reader: &mut R,
-    config: &Config,
-    run_events: F,
-) -> Result<IndexMap<String, RecordBatch>>
-where
-    F: FnOnce(&mut R, &mut PathTracker, &mut XmlToArrowConverter, &[PathNodeId]) -> Result<()>,
-{
-    let mut xml_to_arrow_converter = XmlToArrowConverter::from_config(config)?;
-    let mut path_tracker = PathTracker::new(&xml_to_arrow_converter.registry);
-
-    // Start the root-level table (xml_path: /) if it exists AND has fields
-    // defined. We only start it if it has fields, because adding it to the
-    // builder_stack would affect parent_row_indices for all nested tables,
-    // breaking their level indexing. Tables with xml_path: / and no fields are
-    // just used for hierarchy purposes and don't need to be on the stack.
-    if let Some(table_idx) = xml_to_arrow_converter
-        .registry
-        .get_table_index(PathNodeId::ROOT)
-        && !xml_to_arrow_converter.table_builders[table_idx]
-            .field_builders
-            .is_empty()
-    {
-        xml_to_arrow_converter.start_table(table_idx, PathNodeId::ROOT);
-    }
-
-    let stop_node_ids = std::mem::take(&mut xml_to_arrow_converter.stop_node_ids);
-    run_events(
-        reader,
-        &mut path_tracker,
-        &mut xml_to_arrow_converter,
-        &stop_node_ids,
-    )?;
-
-    xml_to_arrow_converter.finish()
+    Parser::new(config)?.parse_slice(xml)
 }
 
 // --- Event loop implementations ---
@@ -811,7 +918,7 @@ fn close_element(
     node_id: Option<PathNodeId>,
     is_table: bool,
     path_tracker: &mut PathTracker,
-    xml_to_arrow_converter: &mut XmlToArrowConverter,
+    xml_to_arrow_converter: &mut XmlToArrowConverter<'_>,
     stop_node_ids: &[PathNodeId],
 ) -> Result<LoopAction> {
     if is_table {
@@ -853,7 +960,7 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
     event: Event<'_>,
     decoder: Decoder,
     path_tracker: &mut PathTracker,
-    xml_to_arrow_converter: &mut XmlToArrowConverter,
+    xml_to_arrow_converter: &mut XmlToArrowConverter<'_>,
     stop_node_ids: &[PathNodeId],
     attr_name_buffer: &mut Vec<u8>,
 ) -> Result<LoopAction> {
@@ -866,7 +973,7 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
             // of the converter by extracting the bits we need into Copy
             // locals.
             let (node_id_opt, table_index, has_attrs) =
-                match path_tracker.enter(name_bytes, &xml_to_arrow_converter.registry) {
+                match path_tracker.enter(name_bytes, xml_to_arrow_converter.registry) {
                     Some((id, info)) => (Some(id), info.table_index, info.has_attribute_children),
                     None => (None, None, false),
                 };
@@ -890,7 +997,7 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
             let name_bytes = e.local_name().into_inner();
 
             let (node_id_opt, table_index, has_attrs, is_table) =
-                match path_tracker.enter(name_bytes, &xml_to_arrow_converter.registry) {
+                match path_tracker.enter(name_bytes, xml_to_arrow_converter.registry) {
                     Some((id, info)) => (
                         Some(id),
                         info.table_index,
@@ -984,7 +1091,7 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
 fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
     reader: &mut Reader<B>,
     path_tracker: &mut PathTracker,
-    xml_to_arrow_converter: &mut XmlToArrowConverter,
+    xml_to_arrow_converter: &mut XmlToArrowConverter<'_>,
     stop_node_ids: &[PathNodeId],
 ) -> Result<()> {
     let mut buf = Vec::with_capacity(4096);
@@ -1020,7 +1127,7 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
 fn process_xml_events_slice<const PARSE_ATTRIBUTES: bool>(
     reader: &mut Reader<&[u8]>,
     path_tracker: &mut PathTracker,
-    xml_to_arrow_converter: &mut XmlToArrowConverter,
+    xml_to_arrow_converter: &mut XmlToArrowConverter<'_>,
     stop_node_ids: &[PathNodeId],
 ) -> Result<()> {
     let mut attr_name_buffer = Vec::with_capacity(64);
@@ -1050,7 +1157,7 @@ fn parse_attributes(
     decoder: Decoder,
     mut attributes: Attributes,
     path_tracker: &mut PathTracker,
-    xml_to_arrow_converter: &mut XmlToArrowConverter,
+    xml_to_arrow_converter: &mut XmlToArrowConverter<'_>,
     attr_name_buffer: &mut Vec<u8>,
 ) -> Result<()> {
     // For trusted inputs, skip quick-xml's duplicate-attribute detection.
@@ -1073,7 +1180,7 @@ fn parse_attributes(
         // returned by enter() is dropped immediately so the converter can
         // be mutated below.
         let attr_node_id = path_tracker
-            .enter(attr_name_buffer, &xml_to_arrow_converter.registry)
+            .enter(attr_name_buffer, xml_to_arrow_converter.registry)
             .map(|(id, _)| id);
         if let Some(id) = attr_node_id {
             let value = attribute.decode_and_unescape_value(decoder)?;

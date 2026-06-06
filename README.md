@@ -164,6 +164,33 @@ let record_batches = parse_xml_slice(&xml, &config)?;
 Use `parse_xml` for streaming sources (files, network) and `parse_xml_slice` when
 the full XML is already loaded into memory.
 
+#### Reusing a parser across many documents
+
+`parse_xml` and `parse_xml_slice` are convenience wrappers that validate the
+config and compile its path trie on every call. When you parse many documents
+with the same config, build a `Parser` once and reuse it — the validation and
+trie construction (the fixed per-document setup cost) are then paid a single
+time instead of on every parse:
+
+```rust
+use xml2arrow::{Config, Parser};
+
+let config = Config::from_yaml_file("config.yaml")?;
+let parser = Parser::new(&config)?;
+
+for path in xml_files {
+    let xml = std::fs::read(path)?;
+    let record_batches = parser.parse_slice(&xml)?;
+    // ... use record_batches
+}
+```
+
+`Parser` exposes the same two parsing modes: `parser.parse(reader)` for streaming
+readers and `parser.parse_slice(&xml)` for in-memory byte slices. Each call
+allocates fresh Arrow builders, so batches from one document never leak into the
+next. The amortization matters most for small documents, where setup would
+otherwise dominate; for a single large file the win is negligible.
+
 ---
 
 ## Example
@@ -365,6 +392,10 @@ Two parsing functions are available: `parse_xml` (buffered, for streaming reader
 and `parse_xml_slice` (zero-copy, for in-memory byte slices). The zero-copy path
 avoids per-event buffer copies, yielding ~7-9% higher throughput when the XML is
 already in memory.
+
+For workloads that parse many small documents with the same config, reuse a
+single `Parser` (see [Reusing a parser across many documents](#reusing-a-parser-across-many-documents))
+to amortize config validation and path-trie construction across calls.
 
 Benchmarks were measured on an Apple M1 Pro using [Criterion.rs](https://github.com/bheisler/criterion.rs):
 
