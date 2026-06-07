@@ -1152,7 +1152,7 @@ fn process_xml_events_slice<const PARSE_ATTRIBUTES: bool>(
     Ok(())
 }
 
-#[inline]
+#[inline(never)]
 fn parse_attributes(
     decoder: Decoder,
     mut attributes: Attributes,
@@ -1183,8 +1183,22 @@ fn parse_attributes(
             .enter(attr_name_buffer, xml_to_arrow_converter.registry)
             .map(|(id, _)| id);
         if let Some(id) = attr_node_id {
-            let value = attribute.decode_and_unescape_value(decoder)?;
-            xml_to_arrow_converter.set_field_value_for_node(id, value.as_bytes());
+            // Mirror the text path (`Event::Text`), which appends the raw event
+            // bytes directly. Attribute values are almost always plain UTF-8
+            // with no entity references; in that case `decode_and_unescape_value`
+            // is wasted work — it runs a per-attribute decode + unescape, and
+            // `Utf8` fields are validated exactly once at row finalization
+            // (`append_current_value`) anyway while numeric fields parse straight
+            // from bytes. Only when an entity (`&`) is present — entities and
+            // character references both begin with `&` — do we pay for full
+            // unescaping. `value` holds the raw, still-escaped bytes.
+            let raw = attribute.value.as_ref();
+            if raw.contains(&b'&') {
+                let value = attribute.decode_and_unescape_value(decoder)?;
+                xml_to_arrow_converter.set_field_value_for_node(id, value.as_bytes());
+            } else {
+                xml_to_arrow_converter.set_field_value_for_node(id, raw);
+            }
         }
         path_tracker.leave();
     }
