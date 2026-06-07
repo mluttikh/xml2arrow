@@ -46,6 +46,24 @@ pub struct ParserOptions {
     /// when the input is trusted to be well-formed.
     #[serde(default = "default_true")]
     pub validate_attributes: bool,
+    /// Whether to strip XML namespace prefixes from element and attribute
+    /// names before matching them against configured paths. Defaults to
+    /// `true` — `<ns:sensor>` matches a config path of `sensor`.
+    ///
+    /// Internally `true` resolves each name with quick-xml's `local_name()`,
+    /// which scans the name for a `:` separator on **every** element and
+    /// attribute. For documents that use no namespace prefixes (the common
+    /// case for the data XML this crate targets) that scan finds nothing and
+    /// is pure overhead — a measurable ~4–7% of total parse time. Setting
+    /// `false` uses the raw qualified name (`name()`) and skips the scan.
+    ///
+    /// The trade-off: with `false`, configured paths must spell out any
+    /// prefix exactly as it appears in the document (`ns:sensor`, not
+    /// `sensor`). For namespace-free input the two modes produce identical
+    /// results, so disabling is free; only disable when your input either
+    /// uses no prefixes or your config already encodes them.
+    #[serde(default = "default_true")]
+    pub strip_namespaces: bool,
 }
 
 impl Default for ParserOptions {
@@ -55,6 +73,7 @@ impl Default for ParserOptions {
             stop_at_paths: Vec::new(),
             validate_closing_tags: true,
             validate_attributes: true,
+            strip_namespaces: true,
         }
     }
 }
@@ -603,6 +622,35 @@ mod tests {
         assert!(
             !config.parser_options.trim_text,
             "trim_text should default to false"
+        );
+    }
+
+    #[test]
+    fn test_parser_options_strip_namespaces_defaults_to_true() {
+        let yaml_string = r#"
+            parser_options: {}
+            tables: []
+            "#;
+
+        let config: Config = yaml_serde::from_str(yaml_string).unwrap();
+        assert!(
+            config.parser_options.strip_namespaces,
+            "strip_namespaces should default to true"
+        );
+    }
+
+    #[test]
+    fn test_parser_options_strip_namespaces_set_explicitly() {
+        let yaml_string = r#"
+            parser_options:
+              strip_namespaces: false
+            tables: []
+            "#;
+
+        let config: Config = yaml_serde::from_str(yaml_string).unwrap();
+        assert!(
+            !config.parser_options.strip_namespaces,
+            "strip_namespaces should be false when explicitly set"
         );
     }
 

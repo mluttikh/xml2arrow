@@ -51,6 +51,10 @@ parser_options:
   trim_text: <true|false>      # Trim whitespace from text nodes (default: false)
   stop_at_paths: [<xml_path>]  # Stop parsing after these closing tags (optional,
                                # useful for reading only a file header)
+  strip_namespaces: <bool>     # Strip ns: prefixes before matching (default: true).
+                               # Set false to match raw qualified names and skip
+                               # the per-name prefix scan (~4-7% faster); paths must
+                               # then spell out any prefix. Free for prefix-free XML.
 tables:
   - name: <table_name>         # Name of the resulting Arrow RecordBatch
     xml_path: <xml_path>       # Path to the element whose children are rows.
