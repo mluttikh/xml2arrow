@@ -21,6 +21,7 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, Schema};
 use indexmap::IndexMap;
 use quick_xml::Reader;
+use quick_xml::XmlVersion;
 use quick_xml::encoding::Decoder;
 use quick_xml::escape;
 use quick_xml::events::Event;
@@ -1212,18 +1213,30 @@ fn parse_attributes(
             .enter(attr_name_buffer, xml_to_arrow_converter.registry)
             .map(|(id, _)| id);
         if let Some(id) = attr_node_id {
-            // Mirror the text path (`Event::Text`), which appends the raw event
-            // bytes directly. Attribute values are almost always plain UTF-8
-            // with no entity references; in that case `decode_and_unescape_value`
-            // is wasted work — it runs a per-attribute decode + unescape, and
+            // Attribute values are almost always plain UTF-8 needing no
+            // processing; in that case `decoded_and_normalized_value` is
+            // wasted work — it runs a per-attribute decode + unescape, and
             // `Utf8` fields are validated exactly once at row finalization
-            // (`append_current_value`) anyway while numeric fields parse straight
-            // from bytes. Only when an entity (`&`) is present — entities and
-            // character references both begin with `&` — do we pay for full
-            // unescaping. `value` holds the raw, still-escaped bytes.
+            // (`append_current_value`) anyway while numeric fields parse
+            // straight from bytes. The slow path triggers on exactly the
+            // bytes a conforming parser must process: `&` starts an entity
+            // or character reference, and literal `\t`, `\r`, `\n` become
+            // spaces under XML 1.0 attribute-value normalization
+            // (https://www.w3.org/TR/xml/#AVNormalize). Values containing
+            // none of the four are byte-identical either way.
+            //
+            // Element text (`Event::Text`) intentionally stays raw: the XML
+            // spec applies this normalization to attribute values only.
             let raw = attribute.value.as_ref();
-            if raw.contains(&b'&') {
-                let value = attribute.decode_and_unescape_value(decoder)?;
+            if raw
+                .iter()
+                .any(|b| matches!(b, b'&' | b'\t' | b'\r' | b'\n'))
+            {
+                // `Implicit1_0` selects plain XML 1.0 normalization (no
+                // XML 1.1 extras), the same default the deprecated
+                // `decode_and_unescape_value` hardcoded.
+                let value =
+                    attribute.decoded_and_normalized_value(XmlVersion::Implicit1_0, decoder)?;
                 xml_to_arrow_converter.set_field_value_for_node(id, value.as_bytes());
             } else {
                 xml_to_arrow_converter.set_field_value_for_node(id, raw);
@@ -3694,6 +3707,66 @@ mod tests {
 
         assert_array_values!(batch, "symbol", vec!["ABC"], StringArray); // decimal refs
         assert_array_values!(batch, "euro", vec!["€"], StringArray); // hex ref
+    }
+
+    #[test]
+    fn test_attribute_whitespace_normalized_per_xml_spec() {
+        // XML 1.0 §3.3.3: literal tab/CR/LF in attribute values become
+        // spaces, but *character references* to those characters survive —
+        // that is the spec's escape hatch for intentional whitespace. Both
+        // dispatch arms of the attribute fast path must agree on this:
+        // `literal` takes the slow path only because of its whitespace,
+        // `mixed` because of the entity, and both must normalize alike.
+        let xml_content = "<items><item literal=\"a\tb\nc\" referenced=\"a&#x9;b&#xA;c\" mixed=\"x&amp;\ty\"/></items>";
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: items
+                  xml_path: /items
+                  levels: [item]
+                  fields:
+                    - name: literal
+                      xml_path: /items/item/@literal
+                      data_type: Utf8
+                    - name: referenced
+                      xml_path: /items/item/@referenced
+                      data_type: Utf8
+                    - name: mixed
+                      xml_path: /items/item/@mixed
+                      data_type: Utf8
+            "#,
+        );
+        let batch = record_batches.get("items").unwrap();
+
+        assert_array_values!(batch, "literal", vec!["a b c"], StringArray);
+        assert_array_values!(batch, "referenced", vec!["a\tb\nc"], StringArray);
+        assert_array_values!(batch, "mixed", vec!["x& y"], StringArray);
+    }
+
+    #[test]
+    fn test_element_text_whitespace_not_normalized() {
+        // Attribute-value normalization applies to attributes only; tabs and
+        // newlines inside element text are data and must pass through raw.
+        let xml_content = "<items><item><value>a\tb\nc</value></item></items>";
+
+        let record_batches = parse(
+            xml_content,
+            r#"
+            tables:
+                - name: items
+                  xml_path: /items
+                  levels: [item]
+                  fields:
+                    - name: value
+                      xml_path: /items/item/value
+                      data_type: Utf8
+            "#,
+        );
+        let batch = record_batches.get("items").unwrap();
+
+        assert_array_values!(batch, "value", vec!["a\tb\nc"], StringArray);
     }
 
     #[test]

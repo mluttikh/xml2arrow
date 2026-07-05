@@ -10,10 +10,10 @@ categories = ["data-structures", "encoding"]
 readme = "README.md"
 
 [dependencies]
-arrow = "58.1.0"
+arrow = "59.0.0"
 derive_more = { version = "2.1.1", features = ["from"] }
 indexmap = "2.14.0"
-quick-xml = "0.39.2"
+quick-xml = "0.41"
 serde = { version = "1.0.228", features = ["derive"] }
 yaml_serde = "0.10"
 fxhash = "0.2.1"
