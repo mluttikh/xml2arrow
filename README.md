@@ -27,7 +27,7 @@ Add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-xml2arrow = "0.17.0"
+xml2arrow = "0.18.0"
 ```
 
 ## Features
