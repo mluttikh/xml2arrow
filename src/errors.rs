@@ -24,6 +24,8 @@ use derive_more::From;
 #[cfg(feature = "python")]
 use pyo3::PyErr;
 #[cfg(feature = "python")]
+use pyo3::Python;
+#[cfg(feature = "python")]
 use pyo3::create_exception;
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -298,6 +300,27 @@ create_exception!(
     "Raised when the configuration is invalid (e.g., duplicate names, invalid paths)."
 );
 
+/// Recovers the original Python exception from an I/O error raised inside a
+/// Python file-like's `read()`.
+///
+/// PyO3's `From<PyErr> for io::Error` stores the exception as the inner
+/// error, and quick-xml preserves it (`quick_xml::Error::Io(Arc<io::Error>)`),
+/// so the causal exception travels the whole chain in-band. Without this
+/// recovery it would be flattened into an `XmlParsingError` message string —
+/// callers could no longer `except` the real error type. The binding's
+/// error-fidelity tests (`xml2arrow-python`) pin this behavior.
+///
+/// `Python::attach` is only reached when a `PyErr` is actually present,
+/// which implies a live interpreter produced it.
+#[cfg(feature = "python")]
+fn recover_py_err(err: &quick_xml::Error) -> Option<PyErr> {
+    let quick_xml::Error::Io(io_err) = err else {
+        return None;
+    };
+    let py_err = io_err.get_ref()?.downcast_ref::<PyErr>()?;
+    Some(Python::attach(|py| py_err.clone_ref(py)))
+}
+
 #[cfg(feature = "python")]
 impl From<Error> for PyErr {
     fn from(value: Error) -> Self {
@@ -305,7 +328,10 @@ impl From<Error> for PyErr {
             Error::Io(e) => e.into(),
             Error::Utf8Error(e) => e.into(),
             Error::Arrow(e) => PyArrowException::new_err(e.to_string()),
-            Error::XmlParsing(e) => XmlParsingError::new_err(e.to_string()),
+            Error::XmlParsing(e) => match recover_py_err(&e) {
+                Some(py_err) => py_err,
+                None => XmlParsingError::new_err(e.to_string()),
+            },
             Error::XmlParseAttr(e) => XmlParsingError::new_err(e.to_string()),
             Error::XmlParseEncoding(e) => XmlParsingError::new_err(e.to_string()),
             Error::Yaml(e) => YamlParsingError::new_err(e.to_string()),
@@ -495,6 +521,53 @@ mod tests {
                 let _py_err: PyErr = err.into();
                 assert!(!display.is_empty());
             }
+        }
+
+        #[test]
+        fn io_wrapped_pyerr_is_recovered_not_stringified() {
+            // The full chain a failing Python file-like `read()` travels:
+            // PyErr → io::Error (PyO3 stores the exception as the inner
+            // error) → quick_xml::Error::Io → Error::XmlParsing → PyErr.
+            // `recover_py_err` must return the original exception, not an
+            // XmlParsingError holding its stringified message.
+            //
+            // Unlike the lazy mapping test above, this touches the
+            // interpreter (`is_instance_of`, `clone_ref`), so it needs
+            // explicit initialization.
+            Python::initialize();
+
+            let original = pyo3::exceptions::PyValueError::new_err("I/O operation on closed file");
+            let io_err: std::io::Error = original.into();
+            let err = Error::XmlParsing(quick_xml::Error::Io(Arc::new(io_err)));
+
+            let recovered: PyErr = err.into();
+            Python::attach(|py| {
+                assert!(
+                    recovered.is_instance_of::<pyo3::exceptions::PyValueError>(py),
+                    "expected the original ValueError back, got: {recovered}"
+                );
+                assert_eq!(
+                    recovered.value(py).to_string(),
+                    "I/O operation on closed file"
+                );
+            });
+        }
+
+        #[test]
+        fn plain_io_error_still_maps_to_xml_parsing_error() {
+            // A genuine I/O failure (no Python exception inside) must keep
+            // its established mapping; recovery only fires for wrapped
+            // PyErrs.
+            let io_err = std::io::Error::other("disk on fire");
+            let err = Error::XmlParsing(quick_xml::Error::Io(Arc::new(io_err)));
+            let py_err: PyErr = err.into();
+            // `new_err` is lazy, so inspecting the type doesn't need an
+            // initialized interpreter beyond what the sibling test did.
+            Python::initialize();
+            Python::attach(|py| {
+                assert!(py_err.is_instance_of::<XmlParsingError>(py));
+                assert!(py_err.value(py).to_string().contains("disk on fire"));
+            });
         }
     }
 }
