@@ -515,6 +515,11 @@ struct XmlToArrowConverter<'a> {
     /// (and its backing allocation). Cached here so `parse_attributes` reads
     /// a plain `bool` rather than re-deriving it from the config each call.
     validate_attributes: bool,
+    /// Mirror of `ParserOptions::strip_namespaces`. When `true`, element and
+    /// attribute names are resolved via `local_name()` (stripping any `ns:`
+    /// prefix); when `false`, the raw qualified `name()` is used, skipping the
+    /// per-name `:` scan. Cached here so the hot path reads a plain `bool`.
+    strip_namespaces: bool,
 }
 
 impl<'a> XmlToArrowConverter<'a> {
@@ -537,6 +542,7 @@ impl<'a> XmlToArrowConverter<'a> {
             registry: &parser.registry,
             parent_indices_buffer: Vec::new(),
             validate_attributes: config.parser_options.validate_attributes,
+            strip_namespaces: config.parser_options.strip_namespaces,
         }
     }
 
@@ -966,7 +972,15 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
 ) -> Result<LoopAction> {
     match event {
         Event::Start(e) => {
-            let name_bytes = e.local_name().into_inner();
+            // `strip_namespaces` (default) resolves the local name, dropping any
+            // `ns:` prefix; disabling it uses the raw qualified name and skips
+            // quick-xml's per-name `:` scan — identical output for prefix-free
+            // documents (see `ParserOptions::strip_namespaces`).
+            let name_bytes = if xml_to_arrow_converter.strip_namespaces {
+                e.local_name().into_inner()
+            } else {
+                e.name().into_inner()
+            };
 
             // Fused lookup: child resolution + node-info read in one pass.
             // The `&PathNodeInfo` borrow is dropped before any mutable use
@@ -994,7 +1008,15 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
             }
         }
         Event::Empty(e) => {
-            let name_bytes = e.local_name().into_inner();
+            // `strip_namespaces` (default) resolves the local name, dropping any
+            // `ns:` prefix; disabling it uses the raw qualified name and skips
+            // quick-xml's per-name `:` scan — identical output for prefix-free
+            // documents (see `ParserOptions::strip_namespaces`).
+            let name_bytes = if xml_to_arrow_converter.strip_namespaces {
+                e.local_name().into_inner()
+            } else {
+                e.name().into_inner()
+            };
 
             let (node_id_opt, table_index, has_attrs, is_table) =
                 match path_tracker.enter(name_bytes, xml_to_arrow_converter.registry) {
@@ -1167,9 +1189,16 @@ fn parse_attributes(
     if !xml_to_arrow_converter.validate_attributes {
         attributes.with_checks(false);
     }
+    // Hoisted out of the loop: same `:`-scan trade-off as element names, applied
+    // to each attribute key (see `ParserOptions::strip_namespaces`).
+    let strip_namespaces = xml_to_arrow_converter.strip_namespaces;
     for attribute in attributes {
         let attribute = attribute?;
-        let key = attribute.key.local_name().into_inner();
+        let key = if strip_namespaces {
+            attribute.key.local_name().into_inner()
+        } else {
+            attribute.key.into_inner()
+        };
 
         // Reuse buffer to avoid allocation: build "@key" as bytes
         attr_name_buffer.clear();
@@ -4986,5 +5015,103 @@ mod tests {
         let batch = record_batches.get("test").unwrap();
         assert_eq!(batch.num_rows(), 1);
         assert_array_values!(batch, "id", vec![42i32], Int32Array);
+    }
+
+    #[test]
+    fn test_strip_namespaces_false_prefix_free_matches_local_names() {
+        // For prefix-free input, disabling strip_namespaces is free: the raw
+        // name() and local_name() are byte-identical, so existing configs work
+        // unchanged. This is the common-case fast path.
+        let xml_content = r#"<data><item id="7"><value>42</value></item></data>"#;
+        let record_batches = parse(
+            xml_content,
+            r#"
+            parser_options:
+              strip_namespaces: false
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [item]
+                  fields:
+                    - name: id
+                      xml_path: /data/item/@id
+                      data_type: Int32
+                    - name: value
+                      xml_path: /data/item/value
+                      data_type: Int32
+            "#,
+        );
+        let batch = record_batches.get("test").unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert_array_values!(batch, "id", vec![7i32], Int32Array);
+        assert_array_values!(batch, "value", vec![42i32], Int32Array);
+    }
+
+    #[test]
+    fn test_strip_namespaces_false_matches_qualified_names() {
+        // With strip_namespaces=false, configured paths must spell out the
+        // prefix exactly as it appears in the document — for both elements
+        // (levels + field paths) and attributes.
+        let xml_content = r#"<data xmlns:ns="http://example.com"><ns:item ns:id="7"><ns:value>42</ns:value></ns:item></data>"#;
+        let record_batches = parse(
+            xml_content,
+            r#"
+            parser_options:
+              strip_namespaces: false
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: ["ns:item"]
+                  fields:
+                    - name: id
+                      xml_path: /data/ns:item/@ns:id
+                      data_type: Int32
+                    - name: value
+                      xml_path: /data/ns:item/ns:value
+                      data_type: Int32
+            "#,
+        );
+        let batch = record_batches.get("test").unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert_array_values!(batch, "id", vec![7i32], Int32Array);
+        assert_array_values!(batch, "value", vec![42i32], Int32Array);
+    }
+
+    #[test]
+    fn test_strip_namespaces_false_does_not_strip_prefix() {
+        // The trade-off of the fast path: a prefixed element is matched by its
+        // raw qualified name, so an unqualified config path no longer matches
+        // the prefixed element (contrast with
+        // test_prefixed_namespace_attribute_stripped, where the default strips
+        // the prefix). The `<ns:value>` text never reaches the `value` field, so
+        // it stays null.
+        let xml_content = r#"<data xmlns:ns="http://example.com"><ns:item><ns:value>42</ns:value></ns:item></data>"#;
+        let record_batches = parse(
+            xml_content,
+            r#"
+            parser_options:
+              strip_namespaces: false
+            tables:
+                - name: test
+                  xml_path: /data
+                  levels: [item]
+                  fields:
+                    - name: value
+                      xml_path: /data/item/value
+                      data_type: Int32
+                      nullable: true
+            "#,
+        );
+        let batch = record_batches.get("test").unwrap();
+        let array = batch
+            .column_by_name("value")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert!(
+            array.iter().all(|v| v.is_none()),
+            "unqualified path must not match the prefixed element"
+        );
     }
 }

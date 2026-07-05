@@ -104,6 +104,7 @@ parser_options:
   trim_text: false
   validate_closing_tags: false
   validate_attributes: false
+  strip_namespaces: false
 tables:
   - name: root
     xml_path: /
@@ -526,7 +527,7 @@ fn generate_wide_xml(num_records: usize, num_fields: usize) -> String {
 
 fn get_wide_config(num_fields: usize) -> Config {
     let mut yaml = String::from(
-        "parser_options:\n  trim_text: false\n  validate_closing_tags: false\ntables:\n  - name: records\n    xml_path: /root/records\n    levels:\n      - record\n    fields:\n",
+        "parser_options:\n  trim_text: false\n  validate_closing_tags: false\n  strip_namespaces: false\ntables:\n  - name: records\n    xml_path: /root/records\n    levels:\n      - record\n    fields:\n",
     );
     for field_idx in 0..num_fields {
         yaml.push_str(&format!(
