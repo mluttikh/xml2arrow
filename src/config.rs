@@ -82,6 +82,43 @@ fn default_true() -> bool {
     true
 }
 
+/// Splits an XML path into its segments using the same rules as the path
+/// registry: the leading `/` is ignored and empty segments (double or
+/// trailing slashes) are skipped. Validation and runtime matching must agree
+/// on what a "path" is, so this mirrors `PathRegistry::get_or_create_path`.
+fn path_segments(path: &str) -> impl Iterator<Item = &str> {
+    path.trim_start_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+}
+
+/// Returns true when `descendant` is equal to or nested under `ancestor`,
+/// compared segment-wise. A plain string prefix test is not enough:
+/// `/root/items_other` starts with `/root/item` as a string but is not under
+/// it as a path. The root path `/` has no segments, so everything is under it.
+fn path_is_under(descendant: &str, ancestor: &str) -> bool {
+    // Fast path for canonical spellings: a character-level prefix whose cut
+    // lands on a segment boundary is exactly the segment-wise relation.
+    // Validation runs once per `Parser::new`, but that fixed cost dominates
+    // tiny-document parses, so the common case stays a single memcmp.
+    if let Some(rest) = descendant.strip_prefix(ancestor)
+        && (rest.is_empty() || rest.starts_with('/') || ancestor.ends_with('/'))
+    {
+        return true;
+    }
+    // Slow path normalizes non-canonical spellings (duplicate/trailing
+    // slashes, missing leading slash).
+    let mut descendant_segments = path_segments(descendant);
+    path_segments(ancestor).all(|segment| descendant_segments.next() == Some(segment))
+}
+
+/// Returns true when two paths resolve to the same registry node, i.e. their
+/// normalized segment sequences are identical regardless of spelling
+/// ("/data", "data" and "/data/" are all the same path).
+fn paths_equal(a: &str, b: &str) -> bool {
+    path_segments(a).eq(path_segments(b))
+}
+
 /// Top-level configuration for XML to Arrow conversion.
 ///
 /// This struct holds a collection of `TableConfig` structs, each defining how a specific
@@ -100,11 +137,13 @@ impl Config {
     ///
     /// Checks performed:
     /// - Table names must be non-empty and unique across the configuration.
-    /// - Table `xml_path` values must be non-empty.
+    /// - Table `xml_path` values must be non-empty and unique (segment-wise):
+    ///   the path registry stores one table per path node, so a duplicate
+    ///   would silently starve the earlier table of rows.
     /// - Field names must be non-empty and unique within each table.
     /// - Field `xml_path` values must be non-empty.
-    /// - Field `xml_path` must be a descendant of (or equal to) the parent table's `xml_path`,
-    ///   unless the table's `xml_path` is `/` (root table, which allows any field path).
+    /// - Field `xml_path` must be a descendant of (or equal to) the parent table's
+    ///   `xml_path`, compared per path segment. The root table `/` allows any field path.
     /// - Scale/offset may only be used with Float32 and Float64 fields.
     ///
     /// # Errors
@@ -113,7 +152,7 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         // --- Table-level checks ---
         let mut table_names = HashSet::with_capacity(self.tables.len());
-        for table in &self.tables {
+        for (table_idx, table) in self.tables.iter().enumerate() {
             if table.name.is_empty() {
                 return Err(Error::InvalidConfig {
                     reason: ConfigIssue::EmptyTableName,
@@ -132,6 +171,22 @@ impl Config {
                         table: table.name.clone(),
                     },
                 });
+            }
+            // Duplicate-path detection compares normalized segments so that
+            // "/data", "data" and "/data/" — which all resolve to the same
+            // registry node — count as duplicates. A pairwise scan (rather
+            // than a hash set of built keys) keeps `Parser::new` free of
+            // per-table allocations; table counts are small.
+            for earlier_table in &self.tables[..table_idx] {
+                if paths_equal(&earlier_table.xml_path, &table.xml_path) {
+                    return Err(Error::InvalidConfig {
+                        reason: ConfigIssue::DuplicateTableXmlPath {
+                            table_a: earlier_table.name.clone(),
+                            table_b: table.name.clone(),
+                            xml_path: table.xml_path.clone(),
+                        },
+                    });
+                }
             }
 
             // --- Field-level checks within this table ---
@@ -161,8 +216,10 @@ impl Config {
                     });
                 }
 
-                // Field path must be under the table path (skip for root table "/").
-                if table.xml_path != "/" && !field.xml_path.starts_with(&table.xml_path) {
+                // Field path must be under the table path, compared per
+                // segment (the root table "/" has no segments and thus
+                // accepts any field path).
+                if !path_is_under(&field.xml_path, &table.xml_path) {
                     return Err(Error::InvalidConfig {
                         reason: ConfigIssue::FieldPathNotUnderTable {
                             table: table.name.clone(),
@@ -991,6 +1048,80 @@ mod tests {
         let err = config.validate().unwrap_err();
         assert!(matches!(err, Error::InvalidConfig { .. }));
         assert!(err.to_string().contains("not under table"));
+    }
+
+    #[test]
+    fn test_field_path_sharing_string_prefix_but_not_segments_rejected() {
+        // "/root/items_other" starts with "/root/item" as a *string* but is
+        // not under it as a *path* — the check must be segment-aware.
+        let config = Config {
+            parser_options: Default::default(),
+            tables: vec![TableConfig::new(
+                "items",
+                "/root/item",
+                vec![],
+                vec![
+                    FieldConfigBuilder::new("value", "/root/items_other/value", DType::Utf8)
+                        .build()
+                        .unwrap(),
+                ],
+            )],
+        };
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, Error::InvalidConfig { .. }));
+        assert!(err.to_string().contains("not under table"));
+    }
+
+    #[test]
+    fn test_field_path_equal_to_table_path_accepted() {
+        // A field can capture the table element's own text content.
+        let config = Config {
+            parser_options: Default::default(),
+            tables: vec![TableConfig::new(
+                "items",
+                "/root/items",
+                vec![],
+                vec![
+                    FieldConfigBuilder::new("content", "/root/items", DType::Utf8)
+                        .build()
+                        .unwrap(),
+                ],
+            )],
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_duplicate_table_xml_path_rejected() {
+        // The path registry stores one table per node; a duplicate path
+        // would silently starve the earlier table of rows.
+        let config = Config {
+            parser_options: Default::default(),
+            tables: vec![
+                TableConfig::new("a", "/data", vec![], vec![]),
+                TableConfig::new("b", "/data", vec![], vec![]),
+            ],
+        };
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, Error::InvalidConfig { .. }));
+        assert!(err.to_string().contains("share the same xml_path"));
+        assert!(err.to_string().contains("'a'"));
+        assert!(err.to_string().contains("'b'"));
+    }
+
+    #[test]
+    fn test_duplicate_table_xml_path_detected_across_spellings() {
+        // "/data", "data" and "/data/" all resolve to the same registry
+        // node, so they must count as duplicates regardless of spelling.
+        let config = Config {
+            parser_options: Default::default(),
+            tables: vec![
+                TableConfig::new("a", "/data", vec![], vec![]),
+                TableConfig::new("b", "data/", vec![], vec![]),
+            ],
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("share the same xml_path"));
     }
 
     #[test]

@@ -99,6 +99,18 @@ pub enum ParseKind {
     },
     /// A boolean token didn't match any recognized form.
     InvalidBoolean,
+    /// An entity reference in element text could not be resolved (not a
+    /// predefined entity, not a character reference). Silently dropping it
+    /// would corrupt the extracted value, so it is surfaced as an error.
+    /// The unresolved reference (without `&`/`;`) travels in
+    /// `ParseError::value`.
+    UnresolvedEntity,
+    /// A field's element reappeared within a single row after a value was
+    /// already captured. Scalar columns can hold one value per row; silently
+    /// concatenating the raw bytes (the historical behavior) fabricated
+    /// values that never appeared in the document. The already-captured
+    /// value travels in `ParseError::value`.
+    DuplicateValue,
 }
 
 /// Which transform was attempted on a type that doesn't support it.
@@ -119,6 +131,14 @@ pub enum ConfigIssue {
     EmptyTableName,
     DuplicateTableName {
         name: String,
+    },
+    /// Two tables resolve to the same `xml_path`. The path registry stores a
+    /// single table per path node, so the earlier table would silently
+    /// receive zero rows — rejected instead.
+    DuplicateTableXmlPath {
+        table_a: String,
+        table_b: String,
+        xml_path: String,
     },
     EmptyTableXmlPath {
         table: String,
@@ -172,6 +192,14 @@ impl fmt::Display for Error {
                     f,
                     "Failed to parse value '{value}' as boolean for field '{field}' at path {path}: expected one of 'true', 'false', '1', '0', 'yes', 'no', 'on', 'off', 't', 'f', 'y', or 'n'"
                 ),
+                ParseKind::UnresolvedEntity => write!(
+                    f,
+                    "Unresolved entity reference '&{value};' for field '{field}' at path {path}: only predefined entities (amp, lt, gt, quot, apos) and character references are supported"
+                ),
+                ParseKind::DuplicateValue => write!(
+                    f,
+                    "Duplicate value for field '{field}' at path {path}: element appeared more than once in a single row (value already captured: '{value}')"
+                ),
             },
             Error::MissingRequiredField { field, path } => write!(
                 f,
@@ -200,6 +228,14 @@ impl fmt::Display for ConfigIssue {
         match self {
             ConfigIssue::EmptyTableName => f.write_str("Table name must not be empty"),
             ConfigIssue::DuplicateTableName { name } => write!(f, "Duplicate table name '{name}'"),
+            ConfigIssue::DuplicateTableXmlPath {
+                table_a,
+                table_b,
+                xml_path,
+            } => write!(
+                f,
+                "Tables '{table_a}' and '{table_b}' share the same xml_path '{xml_path}'; each table must have a distinct xml_path"
+            ),
             ConfigIssue::EmptyTableXmlPath { table } => {
                 write!(f, "Table '{table}' has an empty xml_path")
             }
@@ -423,6 +459,18 @@ mod tests {
                 path: Arc::from("/p"),
                 value: "maybe".into(),
                 kind: ParseKind::InvalidBoolean,
+            },
+            Error::ParseError {
+                field: Arc::from("f"),
+                path: Arc::from("/p"),
+                value: "nbsp".into(),
+                kind: ParseKind::UnresolvedEntity,
+            },
+            Error::ParseError {
+                field: Arc::from("f"),
+                path: Arc::from("/p"),
+                value: "2".into(),
+                kind: ParseKind::DuplicateValue,
             },
             Error::MissingRequiredField {
                 field: Arc::from("f"),

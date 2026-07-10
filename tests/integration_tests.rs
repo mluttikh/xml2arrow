@@ -369,6 +369,59 @@ fn test_whitespace_only_file_returns_empty_batch() {
 }
 
 // ---------------------------------------------------------------------------
+// Bug reproductions (fixed defects, pinned end-to-end)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_character_references_in_text_survive_file_roundtrip() {
+    // Regression: "&#66;" / "&#x41;" in element text used to resolve to an
+    // empty string, silently corrupting extracted values.
+    let batches = parse_xml_file(
+        r#"<data><item><name>A&#66;C &#x2013; done</name></item></data>"#,
+        r#"
+        tables:
+          - name: items
+            xml_path: /data
+            levels: []
+            fields:
+              - name: name
+                xml_path: /data/item/name
+                data_type: Utf8
+        "#,
+    );
+    let batch = batches.get("items").unwrap();
+    assert_array_values!(batch, "name", &["ABC – done"], StringArray);
+}
+
+#[test]
+fn test_unconfigured_elements_do_not_fabricate_rows() {
+    // Regression: an element the config doesn't map, directly under a table
+    // path, used to finalize a spurious all-null row — so documents gaining
+    // new sibling elements broke row counts (and errored on non-nullable
+    // fields).
+    let batches = parse_xml_file(
+        r#"<data>
+            <item><id>1</id></item>
+            <schema_v2_extension><stuff>x</stuff></schema_v2_extension>
+            <item><id>2</id></item>
+        </data>"#,
+        r#"
+        tables:
+          - name: items
+            xml_path: /data
+            levels: [item]
+            fields:
+              - name: id
+                xml_path: /data/item/id
+                data_type: Int32
+        "#,
+    );
+    let batch = batches.get("items").unwrap();
+    assert_eq!(batch.num_rows(), 2);
+    assert_array_values!(batch, "id", &[1, 2], Int32Array);
+}
+
+// ---------------------------------------------------------------------------
 // Realistic end-to-end scenario
 // ---------------------------------------------------------------------------
 
