@@ -10,7 +10,19 @@ use arrow::datatypes::DataType;
 use serde::{Deserialize, Serialize};
 
 /// Configuration for the XML parser.
+///
+/// Marked `#[non_exhaustive]` so new options can be added without breaking
+/// downstream struct literals. Construct via [`ParserOptions::default()`] and
+/// mutate the fields you need:
+///
+/// ```rust
+/// use xml2arrow::ParserOptions;
+///
+/// let mut options = ParserOptions::default();
+/// options.trim_text = true;
+/// ```
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[non_exhaustive]
 pub struct ParserOptions {
     /// Whether to trim whitespace from text nodes. Defaults to false.
     #[serde(default)]
@@ -64,6 +76,33 @@ pub struct ParserOptions {
     /// uses no prefixes or your config already encodes them.
     #[serde(default = "default_true")]
     pub strip_namespaces: bool,
+    /// Whether to fail the parse when a configured field never captured a
+    /// value from the document. Defaults to `false`.
+    ///
+    /// A misspelled `xml_path` (or a document whose schema drifted) produces
+    /// columns that are silently all-null/empty — often discovered far
+    /// downstream. With this enabled, [`Error::UnmatchedFields`](crate::errors::Error)
+    /// lists every field that matched nothing, immediately after parsing.
+    /// Leave it off when fields are legitimately absent from some documents
+    /// (e.g. optional sections parsed with a shared config).
+    #[serde(default)]
+    pub error_on_unmatched_fields: bool,
+    /// Maximum XML element nesting depth, `Some(1000)` by default.
+    ///
+    /// The path tracker grows one stack frame per open element, so a crafted
+    /// `<a><a><a>…` document consumes memory linearly with depth — a denial
+    /// of service vector when parsing untrusted input. Real data documents
+    /// sit far below the default ceiling; parsing aborts with
+    /// [`Error::MaxDepthExceeded`](crate::errors::Error) when an element
+    /// opens beyond it. Set to `None` (YAML: `max_depth: null`) to disable
+    /// the guard for trusted, legitimately deep documents.
+    ///
+    /// The ceiling is enforced on elements *outside* the configured paths —
+    /// the attacker-controlled part of a document. Elements on configured
+    /// paths are inherently bounded by the configuration's own path depth
+    /// and always parse (this keeps the guard off the hot path).
+    #[serde(default = "default_max_depth")]
+    pub max_depth: Option<usize>,
 }
 
 impl Default for ParserOptions {
@@ -74,12 +113,19 @@ impl Default for ParserOptions {
             validate_closing_tags: true,
             validate_attributes: true,
             strip_namespaces: true,
+            error_on_unmatched_fields: false,
+            max_depth: default_max_depth(),
         }
     }
 }
 
 fn default_true() -> bool {
     true
+}
+
+/// Default element-nesting ceiling; see `ParserOptions::max_depth`.
+fn default_max_depth() -> Option<usize> {
+    Some(1000)
 }
 
 /// Splits an XML path into its segments using the same rules as the path
@@ -144,6 +190,9 @@ impl Config {
     /// - Field `xml_path` values must be non-empty.
     /// - Field `xml_path` must be a descendant of (or equal to) the parent table's
     ///   `xml_path`, compared per path segment. The root table `/` allows any field path.
+    /// - Table `levels` must not declare more entries than the table has
+    ///   enclosing table scopes (non-root ancestor tables plus itself), since
+    ///   each level labels one parent-link index column.
     /// - Scale/offset may only be used with Float32 and Float64 fields.
     ///
     /// # Errors
@@ -187,6 +236,37 @@ impl Config {
                         },
                     });
                 }
+            }
+
+            // At row-finalization time the runtime supplies one parent-link
+            // index per enclosing table scope: every non-root ancestor table
+            // on the stack, plus this table itself (the root table "/" never
+            // contributes — its stack entry is skipped when indices are
+            // collected). `levels` labels those indices positionally, so
+            // declaring more levels than scopes leaves index columns that
+            // never receive a value and fails RecordBatch assembly with an
+            // opaque length mismatch. Fewer levels than scopes is legitimate
+            // (it drops the innermost indices — the metadata-table pattern),
+            // so only the excess case is rejected.
+            let own_segments = path_segments(&table.xml_path).count();
+            let mut available_scopes = usize::from(own_segments > 0);
+            for other_table in &self.tables {
+                let other_segments = path_segments(&other_table.xml_path).count();
+                if other_segments > 0
+                    && other_segments < own_segments
+                    && path_is_under(&table.xml_path, &other_table.xml_path)
+                {
+                    available_scopes += 1;
+                }
+            }
+            if table.levels.len() > available_scopes {
+                return Err(Error::InvalidConfig {
+                    reason: ConfigIssue::ExcessLevels {
+                        table: table.name.clone(),
+                        declared: table.levels.len(),
+                        available: available_scopes,
+                    },
+                });
             }
 
             // --- Field-level checks within this table ---
@@ -507,7 +587,12 @@ impl FieldConfigBuilder {
 }
 
 /// Represents the data type of a field.
+///
+/// Marked `#[non_exhaustive]` so new data types (e.g. temporal or decimal
+/// types) can be added without breaking downstream exhaustive matches;
+/// external `match` expressions must include a wildcard arm.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[non_exhaustive]
 pub enum DType {
     Boolean,
     Float32,
@@ -709,6 +794,20 @@ mod tests {
             !config.parser_options.strip_namespaces,
             "strip_namespaces should be false when explicitly set"
         );
+    }
+
+    #[test]
+    fn test_parser_options_max_depth_defaults_to_1000() {
+        assert_eq!(ParserOptions::default().max_depth, Some(1000));
+
+        // Omitted in YAML → the hardening default, not "unlimited".
+        let config: Config = yaml_serde::from_str("parser_options: {}\ntables: []").unwrap();
+        assert_eq!(config.parser_options.max_depth, Some(1000));
+
+        // Explicit values are honored.
+        let config: Config =
+            yaml_serde::from_str("parser_options:\n  max_depth: 5\ntables: []").unwrap();
+        assert_eq!(config.parser_options.max_depth, Some(5));
     }
 
     #[test]
@@ -1156,6 +1255,91 @@ mod tests {
                         .unwrap(),
                 ],
             )],
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_excess_levels_on_top_level_table_rejected() {
+        // A top-level table has exactly one enclosing scope (itself), so a
+        // second level would label an index column that never gets values.
+        let config = Config {
+            parser_options: Default::default(),
+            tables: vec![TableConfig::new(
+                "items",
+                "/data/items",
+                vec!["item".to_string(), "phantom".to_string()],
+                vec![],
+            )],
+        };
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, Error::InvalidConfig { .. }));
+        assert!(err.to_string().contains("declares 2 levels"));
+        assert!(err.to_string().contains("only 1 enclosing table scope"));
+    }
+
+    #[test]
+    fn test_any_levels_on_root_table_rejected() {
+        // The root table's stack entry is skipped when parent indices are
+        // collected, so it can never fill an index column.
+        let config = Config {
+            parser_options: Default::default(),
+            tables: vec![TableConfig::new(
+                "root",
+                "/",
+                vec!["doc".to_string()],
+                vec![],
+            )],
+        };
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, Error::InvalidConfig { .. }));
+        assert!(err.to_string().contains("only 0 enclosing table scopes"));
+    }
+
+    #[test]
+    fn test_matching_levels_on_nested_tables_accepted() {
+        // Inner table has two scopes: the outer table plus itself.
+        let config = Config {
+            parser_options: Default::default(),
+            tables: vec![
+                TableConfig::new("groups", "/data/group", vec!["group".to_string()], vec![]),
+                TableConfig::new(
+                    "items",
+                    "/data/group/items",
+                    vec!["group".to_string(), "item".to_string()],
+                    vec![],
+                ),
+            ],
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_fewer_levels_than_scopes_accepted() {
+        // Declaring fewer levels than scopes drops the innermost index
+        // columns — the documented single-row metadata-table pattern.
+        let config = Config {
+            parser_options: Default::default(),
+            tables: vec![TableConfig::new("header", "/doc/header", vec![], vec![])],
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_excess_levels_counts_scopes_across_path_spellings() {
+        // "data/group/" and "/data/group/items" nest segment-wise even
+        // though the ancestor is spelled without a leading slash.
+        let config = Config {
+            parser_options: Default::default(),
+            tables: vec![
+                TableConfig::new("groups", "data/group/", vec!["group".to_string()], vec![]),
+                TableConfig::new(
+                    "items",
+                    "/data/group/items",
+                    vec!["group".to_string(), "item".to_string()],
+                    vec![],
+                ),
+            ],
         };
         assert!(config.validate().is_ok());
     }

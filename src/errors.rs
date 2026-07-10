@@ -63,17 +63,51 @@ pub enum Error {
     /// `field` and `path` use `Arc<str>` so repeated errors for the same
     /// field (common when a whole column is malformed) share the name and
     /// path allocations across clones.
+    ///
+    /// `location` carries the document coordinates of the failure (row
+    /// index and byte offset), boxed so the coordinates don't bloat the
+    /// `Result` payload every hot-path function returns — `Error` stays
+    /// pointer-thin per variant while the (cold) error path pays one
+    /// allocation.
     ParseError {
         field: Arc<str>,
         path: Arc<str>,
         value: String,
         kind: ParseKind,
+        location: Box<ErrorLocation>,
     },
     /// A non-nullable field had no text (or whitespace-only text) in a row.
     /// Promoted out of `ParseError` because the handling differs — there is
     /// no raw value to show, and the fix is a configuration change
     /// (`nullable: true`) rather than cleaning input data.
-    MissingRequiredField { field: Arc<str>, path: Arc<str> },
+    ///
+    /// `location` carries the same document coordinates as
+    /// [`Error::ParseError`].
+    MissingRequiredField {
+        field: Arc<str>,
+        path: Arc<str>,
+        location: Box<ErrorLocation>,
+    },
+    /// With `ParserOptions::error_on_unmatched_fields` enabled, one or more
+    /// configured fields never captured a value anywhere in the document.
+    ///
+    /// The usual cause is a misspelled `xml_path` (or a document whose
+    /// schema drifted away from the config); without this check the result
+    /// is a silently all-null/empty column. Every unmatched field is
+    /// reported at once so a broken config is fixed in one round trip.
+    UnmatchedFields { fields: Vec<UnmatchedField> },
+    /// XML element nesting exceeded `ParserOptions::max_depth`.
+    ///
+    /// The parser's path stack grows one frame per open element, so
+    /// unbounded nesting is a memory denial-of-service vector; the guard
+    /// aborts the parse instead. Enforced on elements outside the configured
+    /// paths (the unbounded, attacker-controlled part of a document — see
+    /// `ParserOptions::max_depth`). `max_depth` echoes the configured
+    /// ceiling and `position` the byte offset where it was crossed.
+    MaxDepthExceeded {
+        max_depth: usize,
+        position: Option<u64>,
+    },
     /// A scale or offset was configured on a data type that doesn't support it.
     UnsupportedConversion {
         conversion: ConversionKind,
@@ -81,6 +115,54 @@ pub enum Error {
     },
     /// The configuration failed `Config::validate()`.
     InvalidConfig { reason: ConfigIssue },
+}
+
+/// Document coordinates locating a value-level parse failure.
+///
+/// `row` is the 0-based index the failing row would have occupied in its
+/// table's batch; `position` is the byte offset just past the XML event
+/// that raised the error. Either is `None` when the error was constructed
+/// outside a parse (e.g. in tests) or before that coordinate was known.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ErrorLocation {
+    pub row: Option<usize>,
+    pub position: Option<u64>,
+}
+
+impl Error {
+    /// Fills in the byte offset on variants that carry document coordinates,
+    /// leaving other variants (and an already-set offset) untouched. Called
+    /// by the event loops on their error exit path so the deep construction
+    /// sites — which cannot see the reader — never need position plumbing.
+    #[cold]
+    #[must_use]
+    pub(crate) fn with_position(mut self, pos: u64) -> Self {
+        match &mut self {
+            Error::ParseError { location, .. } | Error::MissingRequiredField { location, .. } => {
+                location.position.get_or_insert(pos);
+            }
+            Error::MaxDepthExceeded { position, .. } => {
+                position.get_or_insert(pos);
+            }
+            _ => {}
+        }
+        self
+    }
+
+    /// Fills in the 0-based row index on variants that carry document
+    /// coordinates, mirroring [`Error::with_position`]. Called where the
+    /// failing table's row counter is in scope (row finalization).
+    #[cold]
+    #[must_use]
+    pub(crate) fn with_row(mut self, row_index: usize) -> Self {
+        match &mut self {
+            Error::ParseError { location, .. } | Error::MissingRequiredField { location, .. } => {
+                location.row.get_or_insert(row_index);
+            }
+            _ => {}
+        }
+        self
+    }
 }
 
 /// Which primitive parser failed and why.
@@ -111,6 +193,19 @@ pub enum ParseKind {
     /// values that never appeared in the document. The already-captured
     /// value travels in `ParseError::value`.
     DuplicateValue,
+}
+
+/// Identifies one configured field that captured no value during a parse.
+/// Carried by [`Error::UnmatchedFields`]; structured (rather than a
+/// pre-formatted string) so tooling can route on table/field names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnmatchedField {
+    /// Name of the table the field belongs to.
+    pub table: String,
+    /// The field's configured name.
+    pub field: String,
+    /// The field's configured `xml_path` — the spelling to double-check.
+    pub xml_path: String,
 }
 
 /// Which transform was attempted on a type that doesn't support it.
@@ -160,6 +255,19 @@ pub enum ConfigIssue {
         field: String,
         field_path: String,
     },
+    /// A table declares more `levels` than it has enclosing table scopes
+    /// (its non-root ancestor tables plus itself). Each level labels one
+    /// parent-link index column, and the runtime can only supply one index
+    /// per enclosing scope — the surplus columns would never receive a
+    /// value, failing `RecordBatch` assembly later with an opaque
+    /// column-length mismatch. Rejected at load instead. (Declaring *fewer*
+    /// levels than scopes is allowed: it drops the innermost index columns,
+    /// the documented pattern for single-row metadata tables.)
+    ExcessLevels {
+        table: String,
+        declared: usize,
+        available: usize,
+    },
 }
 
 // --- Display -----------------------------------------------------------------
@@ -167,6 +275,22 @@ pub enum ConfigIssue {
 // Display output is the user-visible surface. We keep it textually stable
 // across the structured-variant refactor so log lines / test expectations
 // that matched on substrings continue to work.
+
+/// Appends the optional document coordinates to a value-level error message.
+/// Written as a suffix so the established message prefixes stay textually
+/// stable — coordinates only appear when the parser supplied them.
+fn write_location(
+    f: &mut fmt::Formatter<'_>,
+    row: Option<usize>,
+    position: Option<u64>,
+) -> fmt::Result {
+    match (row, position) {
+        (Some(row), Some(pos)) => write!(f, " (row index {row}, near byte offset {pos})"),
+        (Some(row), None) => write!(f, " (row index {row})"),
+        (None, Some(pos)) => write!(f, " (near byte offset {pos})"),
+        (None, None) => Ok(()),
+    }
+}
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -183,28 +307,67 @@ impl fmt::Display for Error {
                 path,
                 value,
                 kind,
-            } => match kind {
-                ParseKind::InvalidNumber { type_name, reason } => write!(
+                location,
+            } => {
+                match kind {
+                    ParseKind::InvalidNumber { type_name, reason } => write!(
+                        f,
+                        "Failed to parse value '{value}' as {type_name} for field '{field}' at path {path}: {reason}"
+                    ),
+                    ParseKind::InvalidBoolean => write!(
+                        f,
+                        "Failed to parse value '{value}' as boolean for field '{field}' at path {path}: expected one of 'true', 'false', '1', '0', 'yes', 'no', 'on', 'off', 't', 'f', 'y', or 'n'"
+                    ),
+                    ParseKind::UnresolvedEntity => write!(
+                        f,
+                        "Unresolved entity reference '&{value};' for field '{field}' at path {path}: only predefined entities (amp, lt, gt, quot, apos) and character references are supported"
+                    ),
+                    ParseKind::DuplicateValue => write!(
+                        f,
+                        "Duplicate value for field '{field}' at path {path}: element appeared more than once in a single row (value already captured: '{value}')"
+                    ),
+                }?;
+                write_location(f, location.row, location.position)
+            }
+            Error::MissingRequiredField {
+                field,
+                path,
+                location,
+            } => {
+                write!(
                     f,
-                    "Failed to parse value '{value}' as {type_name} for field '{field}' at path {path}: {reason}"
-                ),
-                ParseKind::InvalidBoolean => write!(
+                    "Missing value for non-nullable field '{field}' at path {path}"
+                )?;
+                write_location(f, location.row, location.position)
+            }
+            Error::UnmatchedFields { fields } => {
+                write!(
                     f,
-                    "Failed to parse value '{value}' as boolean for field '{field}' at path {path}: expected one of 'true', 'false', '1', '0', 'yes', 'no', 'on', 'off', 't', 'f', 'y', or 'n'"
-                ),
-                ParseKind::UnresolvedEntity => write!(
+                    "{} configured field(s) never matched any element or attribute in the document (check the xml_path spellings):",
+                    fields.len()
+                )?;
+                for (i, unmatched) in fields.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(",")?;
+                    }
+                    write!(
+                        f,
+                        " field '{}' of table '{}' (xml_path '{}')",
+                        unmatched.field, unmatched.table, unmatched.xml_path
+                    )?;
+                }
+                Ok(())
+            }
+            Error::MaxDepthExceeded {
+                max_depth,
+                position,
+            } => {
+                write!(
                     f,
-                    "Unresolved entity reference '&{value};' for field '{field}' at path {path}: only predefined entities (amp, lt, gt, quot, apos) and character references are supported"
-                ),
-                ParseKind::DuplicateValue => write!(
-                    f,
-                    "Duplicate value for field '{field}' at path {path}: element appeared more than once in a single row (value already captured: '{value}')"
-                ),
-            },
-            Error::MissingRequiredField { field, path } => write!(
-                f,
-                "Missing value for non-nullable field '{field}' at path {path}"
-            ),
+                    "XML element nesting exceeded the configured maximum depth of {max_depth}; raise ParserOptions::max_depth (or set it to null) if the document is legitimately this deep"
+                )?;
+                write_location(f, None, *position)
+            }
             Error::UnsupportedConversion {
                 conversion,
                 data_type,
@@ -259,6 +422,14 @@ impl fmt::Display for ConfigIssue {
             } => write!(
                 f,
                 "Field '{field}' has xml_path '{field_path}' which is not under table '{table}' xml_path '{table_path}'"
+            ),
+            ConfigIssue::ExcessLevels {
+                table,
+                declared,
+                available,
+            } => write!(
+                f,
+                "Table '{table}' declares {declared} levels but only {available} enclosing table scopes exist (its ancestor tables plus itself); each level labels one index column, so the extra columns would never receive values"
             ),
         }
     }
@@ -373,6 +544,12 @@ impl From<Error> for PyErr {
             Error::Yaml(e) => YamlParsingError::new_err(e.to_string()),
             e @ Error::ParseError { .. } => ParseError::new_err(e.to_string()),
             e @ Error::MissingRequiredField { .. } => ParseError::new_err(e.to_string()),
+            // Like MissingRequiredField, this is "the document didn't satisfy
+            // the config" — grouped with the value-level parse errors.
+            e @ Error::UnmatchedFields { .. } => ParseError::new_err(e.to_string()),
+            // Depth is a property of the document's structure, like any other
+            // malformed-XML condition — grouped with the parsing errors.
+            e @ Error::MaxDepthExceeded { .. } => XmlParsingError::new_err(e.to_string()),
             e @ Error::UnsupportedConversion { .. } => {
                 UnsupportedConversionError::new_err(e.to_string())
             }
@@ -422,6 +599,8 @@ mod tests {
             | Error::Utf8Error(_)
             | Error::ParseError { .. }
             | Error::MissingRequiredField { .. }
+            | Error::UnmatchedFields { .. }
+            | Error::MaxDepthExceeded { .. }
             | Error::UnsupportedConversion { .. }
             | Error::InvalidConfig { .. } => {}
         }
@@ -453,28 +632,57 @@ mod tests {
                     type_name: "i32",
                     reason: "bad digit".into(),
                 },
+                location: Box::default(),
             },
             Error::ParseError {
                 field: Arc::from("f"),
                 path: Arc::from("/p"),
                 value: "maybe".into(),
                 kind: ParseKind::InvalidBoolean,
+                location: Box::new(ErrorLocation {
+                    row: Some(7),
+                    position: Some(1234),
+                }),
             },
             Error::ParseError {
                 field: Arc::from("f"),
                 path: Arc::from("/p"),
                 value: "nbsp".into(),
                 kind: ParseKind::UnresolvedEntity,
+                location: Box::default(),
             },
             Error::ParseError {
                 field: Arc::from("f"),
                 path: Arc::from("/p"),
                 value: "2".into(),
                 kind: ParseKind::DuplicateValue,
+                location: Box::default(),
             },
             Error::MissingRequiredField {
                 field: Arc::from("f"),
                 path: Arc::from("/p"),
+                location: Box::new(ErrorLocation {
+                    row: Some(3),
+                    position: None,
+                }),
+            },
+            Error::UnmatchedFields {
+                fields: vec![
+                    UnmatchedField {
+                        table: "t".into(),
+                        field: "a".into(),
+                        xml_path: "/t/a".into(),
+                    },
+                    UnmatchedField {
+                        table: "t".into(),
+                        field: "b".into(),
+                        xml_path: "/t/b".into(),
+                    },
+                ],
+            },
+            Error::MaxDepthExceeded {
+                max_depth: 1000,
+                position: Some(512),
             },
             Error::UnsupportedConversion {
                 conversion: ConversionKind::Scaling,
@@ -529,6 +737,41 @@ mod tests {
                 "source() mismatch for {err:?}: expected Some={expected}, got Some={actual}"
             );
         }
+    }
+
+    #[test]
+    fn location_suffix_appears_only_when_coordinates_are_set() {
+        // The suffix is additive: without coordinates the historical message
+        // is byte-identical (textual stability promise), with them the row
+        // index and byte offset are appended in a fixed format.
+        let bare = Error::MissingRequiredField {
+            field: Arc::from("f"),
+            path: Arc::from("/p"),
+            location: Box::default(),
+        };
+        assert_eq!(
+            bare.to_string(),
+            "Missing value for non-nullable field 'f' at path /p"
+        );
+
+        let located = bare.with_row(42).with_position(9001);
+        assert_eq!(
+            located.to_string(),
+            "Missing value for non-nullable field 'f' at path /p (row index 42, near byte offset 9001)"
+        );
+
+        // Filling is first-write-wins: annotating again must not overwrite.
+        let located = located.with_row(1).with_position(2);
+        assert!(located.to_string().contains("row index 42"));
+        assert!(located.to_string().contains("byte offset 9001"));
+
+        // Variants without coordinates pass through unchanged.
+        let untouched = Error::InvalidConfig {
+            reason: ConfigIssue::EmptyTableName,
+        }
+        .with_row(1)
+        .with_position(2);
+        assert_eq!(untouched.to_string(), "Table name must not be empty");
     }
 
     #[test]
