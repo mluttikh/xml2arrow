@@ -494,9 +494,9 @@ impl PathTracker {
         self.node_stack.last().is_some_and(|e| e.is_known)
     }
 
-    /// Returns the depth of the current path (number of segments from root).
+    /// Returns the depth of the current path (number of open elements —
+    /// known or placeholder — above the implicit root frame).
     #[inline]
-    #[allow(dead_code)]
     pub fn depth(&self) -> usize {
         self.node_stack.len().saturating_sub(1)
     }

@@ -30,8 +30,10 @@ use quick_xml::events::{BytesRef, Event};
 use crate::Config;
 use crate::config::{DType, FieldConfig, TableConfig};
 use crate::errors::Error;
+use crate::errors::ErrorLocation;
 use crate::errors::ParseKind;
 use crate::errors::Result;
+use crate::errors::UnmatchedField;
 use crate::path_registry::{PathNodeId, PathNodeInfo, PathRegistry, PathTracker};
 
 // === Field-level accumulation ===
@@ -137,6 +139,13 @@ struct FieldBuilder {
     /// across multiple events *within* one element (text + CDATA, entity
     /// references) never trips this: no re-entry happens in between.
     has_value: bool,
+    /// Whether this field captured a value anywhere in the document. Unlike
+    /// `has_value` it is never reset between rows; it exists solely to feed
+    /// `ParserOptions::error_on_unmatched_fields`, turning the
+    /// silently-empty column a misspelled `xml_path` produces into a
+    /// structured error at finish time. Written alongside `has_value` on an
+    /// already-dirty cache line, so the hot path pays one extra store.
+    ever_matched: bool,
     /// Pre-computed `meta.scale.is_some() || meta.offset.is_some()`. The
     /// per-row float append path is hot enough that gating the `Option` loads
     /// behind a single `bool` measurably outperforms unconditionally probing
@@ -205,6 +214,10 @@ macro_rules! append_int {
                                     type_name: $type_name,
                                     reason: e.to_string(),
                                 },
+                                // Document coordinates are filled in by the
+                                // layers that know them: `save_row` adds the
+                                // row index, the event loop the byte offset.
+                                location: Box::default(),
                             });
                         }
                     }
@@ -216,6 +229,7 @@ macro_rules! append_int {
             return Err(Error::MissingRequiredField {
                 field: Arc::from($field_config.name.as_str()),
                 path: Arc::from($field_config.xml_path.as_str()),
+                location: Box::default(),
             });
         }
     };
@@ -254,6 +268,9 @@ macro_rules! append_float {
                             type_name: $type_name,
                             reason: e.to_string(),
                         },
+                        // Coordinates are filled in by `save_row` (row) and
+                        // the event loop (byte offset); see `append_int!`.
+                        location: Box::default(),
                     });
                 }
             }
@@ -263,6 +280,7 @@ macro_rules! append_float {
             return Err(Error::MissingRequiredField {
                 field: Arc::from($field_config.name.as_str()),
                 path: Arc::from($field_config.xml_path.as_str()),
+                location: Box::default(),
             });
         }
     };
@@ -282,6 +300,7 @@ impl FieldBuilder {
             field,
             array_builder,
             has_value: false,
+            ever_matched: false,
             has_transform,
             current_value: Vec::with_capacity(128),
         }
@@ -291,6 +310,7 @@ impl FieldBuilder {
     fn set_current_value(&mut self, value: &[u8]) {
         self.current_value.extend_from_slice(value);
         self.has_value = true;
+        self.ever_matched = true;
     }
 
     /// Appends the currently accumulated value to the Arrow array builder,
@@ -338,6 +358,7 @@ impl FieldBuilder {
                             return Err(Error::MissingRequiredField {
                                 field: Arc::from(fc.name.as_str()),
                                 path: Arc::from(fc.xml_path.as_str()),
+                                location: Box::default(),
                             });
                         }
                         Err(()) => {
@@ -346,6 +367,7 @@ impl FieldBuilder {
                                 path: Arc::from(fc.xml_path.as_str()),
                                 value: String::from_utf8_lossy(value).into_owned(),
                                 kind: ParseKind::InvalidBoolean,
+                                location: Box::default(),
                             });
                         }
                     }
@@ -355,6 +377,7 @@ impl FieldBuilder {
                     return Err(Error::MissingRequiredField {
                         field: Arc::from(fc.name.as_str()),
                         path: Arc::from(fc.xml_path.as_str()),
+                        location: Box::default(),
                     });
                 }
             }
@@ -457,8 +480,13 @@ impl TableBuilder {
         }
 
         // 2. Write the actual field values for this table.
+        // Append errors gain the row coordinate here — the deepest layer
+        // that knows which row was being finalized. The closure only runs on
+        // the error path; the happy path stays a plain Ok check.
         for field_builder in &mut self.field_builders {
-            field_builder.append_current_value()?;
+            field_builder
+                .append_current_value()
+                .map_err(|e| e.with_row(self.row_index))?;
         }
 
         // 3. Advance this table's primary key.
@@ -529,6 +557,13 @@ struct XmlToArrowConverter<'a> {
     /// prefix); when `false`, the raw qualified `name()` is used, skipping the
     /// per-name `:` scan. Cached here so the hot path reads a plain `bool`.
     strip_namespaces: bool,
+    /// Mirror of `ParserOptions::max_depth`, with `None` collapsed to
+    /// `usize::MAX` so the per-element guard is a single unconditional
+    /// integer compare rather than an `Option` unwrap.
+    max_depth: usize,
+    /// Mirror of `ParserOptions::error_on_unmatched_fields`; read once at
+    /// finish time.
+    error_on_unmatched_fields: bool,
 }
 
 impl<'a> XmlToArrowConverter<'a> {
@@ -552,6 +587,8 @@ impl<'a> XmlToArrowConverter<'a> {
             parent_indices_buffer: Vec::new(),
             validate_attributes: config.parser_options.validate_attributes,
             strip_namespaces: config.parser_options.strip_namespaces,
+            max_depth: config.parser_options.max_depth.unwrap_or(usize::MAX),
+            error_on_unmatched_fields: config.parser_options.error_on_unmatched_fields,
         }
     }
 
@@ -614,28 +651,39 @@ impl<'a> XmlToArrowConverter<'a> {
     #[cold]
     #[inline(never)]
     fn duplicate_value_error(&self, table_idx: usize, field_idx: usize) -> Error {
-        let field_builder = &self.table_builders[table_idx].field_builders[field_idx];
+        let table_builder = &self.table_builders[table_idx];
+        let field_builder = &table_builder.field_builders[field_idx];
         Error::ParseError {
             field: Arc::from(field_builder.meta.name.as_str()),
             path: Arc::from(field_builder.meta.xml_path.as_str()),
             value: String::from_utf8_lossy(&field_builder.current_value).into_owned(),
             kind: ParseKind::DuplicateValue,
+            // The in-progress row would occupy the table's current counter.
+            location: Box::new(ErrorLocation {
+                row: Some(table_builder.row_index),
+                position: None,
+            }),
         }
     }
 
     /// Returns the metadata of the first field of the *current* table mapped
-    /// to `node_id`, or `None` when a value at this node would not be
-    /// captured. Used by the entity-reference handler to decide whether an
-    /// unresolvable reference is an error (it would corrupt a field value)
-    /// or ignorable (nothing is listening at this node).
-    fn active_field_meta(&self, node_id: PathNodeId) -> Option<&FieldMeta> {
+    /// to `node_id` plus that table's in-progress row index, or `None` when
+    /// a value at this node would not be captured. Used by the
+    /// entity-reference handler to decide whether an unresolvable reference
+    /// is an error (it would corrupt a field value) or ignorable (nothing is
+    /// listening at this node), and to locate the error when it is one.
+    fn active_field_meta(&self, node_id: PathNodeId) -> Option<(&FieldMeta, usize)> {
         let info = self.registry.get_node_info(node_id);
         let current_table_idx = self.builder_stack.last()?.table_idx;
         info.field_indices
             .iter()
             .find(|(table_idx, _)| *table_idx == current_table_idx)
             .map(|&(table_idx, field_idx)| {
-                &self.table_builders[table_idx].field_builders[field_idx].meta
+                let table_builder = &self.table_builders[table_idx];
+                (
+                    &table_builder.field_builders[field_idx].meta,
+                    table_builder.row_index,
+                )
             })
     }
 
@@ -677,6 +725,30 @@ impl<'a> XmlToArrowConverter<'a> {
     }
 
     fn finish(mut self) -> Result<IndexMap<String, arrow::record_batch::RecordBatch>> {
+        // Strict-mode sweep first: reporting a broken config beats handing
+        // back batches with silently empty columns. All offenders are
+        // collected in one pass so the config is fixed in one round trip.
+        if self.error_on_unmatched_fields {
+            let unmatched: Vec<UnmatchedField> = self
+                .table_builders
+                .iter()
+                .flat_map(|table_builder| {
+                    table_builder
+                        .field_builders
+                        .iter()
+                        .filter(|field_builder| !field_builder.ever_matched)
+                        .map(|field_builder| UnmatchedField {
+                            table: table_builder.meta.name.clone(),
+                            field: field_builder.meta.name.clone(),
+                            xml_path: field_builder.meta.xml_path.clone(),
+                        })
+                })
+                .collect();
+            if !unmatched.is_empty() {
+                return Err(Error::UnmatchedFields { fields: unmatched });
+            }
+        }
+
         let mut record_batches = IndexMap::new();
         for table_builder in &mut self.table_builders {
             if !table_builder.field_builders.is_empty() {
@@ -778,11 +850,16 @@ impl Parser {
         self.configure_reader(&mut reader);
         let needs_attrs = self.needs_attrs;
         self.run_parse(&mut reader, |r, t, c, s| {
-            if needs_attrs {
+            let result = if needs_attrs {
                 process_xml_events::<_, true>(r, t, c, s)
             } else {
                 process_xml_events::<_, false>(r, t, c, s)
-            }
+            };
+            // The event loop aborts on the first error with the reader still
+            // parked at the failing event, so annotating the byte offset
+            // *here* — once per parse, not per event — loses no precision
+            // and keeps position work entirely out of the loop.
+            result.map_err(|e| e.with_position(r.buffer_position()))
         })
     }
 
@@ -797,11 +874,13 @@ impl Parser {
         self.configure_reader(&mut reader);
         let needs_attrs = self.needs_attrs;
         self.run_parse(&mut reader, |r, t, c, s| {
-            if needs_attrs {
+            let result = if needs_attrs {
                 process_xml_events_slice::<true>(r, t, c, s)
             } else {
                 process_xml_events_slice::<false>(r, t, c, s)
-            }
+            };
+            // Once-per-parse byte-offset annotation; see `parse`.
+            result.map_err(|e| e.with_position(r.buffer_position()))
         })
     }
 
@@ -1023,6 +1102,19 @@ fn close_element(
     Ok(LoopAction::Continue)
 }
 
+/// Builds the `MaxDepthExceeded` error for the depth guard in `handle_event`.
+/// Outlined and cold so the guard itself stays a single integer compare in
+/// the per-element hot path; the byte offset is annotated by the event loop
+/// on its error exit.
+#[cold]
+#[inline(never)]
+fn max_depth_error(max_depth: usize) -> Error {
+    Error::MaxDepthExceeded {
+        max_depth,
+        position: None,
+    }
+}
+
 /// Resolves a general reference in element text (`&#66;`, `&amp;`,
 /// `&custom;`) and appends the resolved bytes to the fields listening at
 /// `node_id`.
@@ -1063,12 +1155,16 @@ fn handle_general_ref(
             xml_to_arrow_converter.set_field_value_for_node(node_id, entity_text.as_bytes());
         }
         None => {
-            if let Some(meta) = xml_to_arrow_converter.active_field_meta(node_id) {
+            if let Some((meta, row_index)) = xml_to_arrow_converter.active_field_meta(node_id) {
                 return Err(Error::ParseError {
                     field: Arc::from(meta.name.as_str()),
                     path: Arc::from(meta.xml_path.as_str()),
                     value: String::from_utf8_lossy(&text).into_owned(),
                     kind: ParseKind::UnresolvedEntity,
+                    location: Box::new(ErrorLocation {
+                        row: Some(row_index),
+                        position: None,
+                    }),
                 });
             }
         }
@@ -1129,7 +1225,19 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
                         }
                         (Some(id), info.table_index, info.has_attribute_children)
                     }
-                    None => (None, None, false),
+                    None => {
+                        // Depth guard, on placeholder frames only: elements on
+                        // configured paths are bounded by the compiled trie's
+                        // own depth, so *unknown* subtrees — whose nesting is
+                        // attacker-controlled — are the only unbounded stack
+                        // growth (a memory DoS vector). Checking here keeps
+                        // the known-element hot path free of the compare; the
+                        // error construction is outlined and cold.
+                        if path_tracker.depth() > xml_to_arrow_converter.max_depth {
+                            return Err(max_depth_error(xml_to_arrow_converter.max_depth));
+                        }
+                        (None, None, false)
+                    }
                 };
 
             if let Some(table_idx) = table_index {
@@ -1172,7 +1280,15 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
                             info.is_table(),
                         )
                     }
-                    None => (None, None, false, false),
+                    None => {
+                        // Same unknown-frame depth guard as Event::Start: an
+                        // empty element at the ceiling is rejected like its
+                        // expanded `<a></a>` form would be.
+                        if path_tracker.depth() > xml_to_arrow_converter.max_depth {
+                            return Err(max_depth_error(xml_to_arrow_converter.max_depth));
+                        }
+                        (None, None, false, false)
+                    }
                 };
 
             if let Some(table_idx) = table_index {
@@ -5644,6 +5760,320 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // --- Error document coordinates (row index + byte offset) ---
+
+    /// Config shared by the coordinate tests: one Int32 column, one row per
+    /// `<row>` element.
+    const COORDS_YAML: &str = r#"
+        tables:
+            - name: t
+              xml_path: /data
+              levels: [row]
+              fields:
+                - name: value
+                  xml_path: /data/row/value
+                  data_type: Int32
+        "#;
+
+    #[test]
+    fn test_parse_error_reports_row_index_and_byte_offset() {
+        // The failure is in the third row (index 2). The row index tells the
+        // user where the batch would have broken; the byte offset locates the
+        // offending event in the document (it points just past the event
+        // that raised the error, so it must land at or beyond the bad text).
+        let xml = "<data><row><value>1</value></row><row><value>2</value></row><row><value>oops</value></row></data>";
+        let config = config_from_yaml!(COORDS_YAML);
+        let err = parse_xml(xml.as_bytes(), &config).unwrap_err();
+        match &err {
+            Error::ParseError { location, .. } => {
+                assert_eq!(location.row, Some(2));
+                let bad_text_offset = xml.find("oops").unwrap() as u64;
+                assert!(
+                    location.position.is_some_and(|p| p >= bad_text_offset),
+                    "position {:?} should be at/past the bad value at {bad_text_offset}",
+                    location.position
+                );
+            }
+            e => panic!("Expected ParseError, got {e:?}"),
+        }
+        let msg = err.to_string();
+        assert!(msg.contains("row index 2"), "got: {msg}");
+        assert!(msg.contains("near byte offset"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_parse_error_coordinates_present_in_zero_copy_path() {
+        // Both event loops annotate on their error exit; pin the slice loop
+        // too so a refactor of one loop cannot silently drop the coordinates
+        // from the other.
+        let xml = b"<data><row><value>1</value></row><row><value>oops</value></row></data>";
+        let config = config_from_yaml!(COORDS_YAML);
+        let err = parse_xml_slice(xml, &config).unwrap_err();
+        match &err {
+            Error::ParseError { location, .. } => {
+                assert_eq!(location.row, Some(1));
+                assert!(location.position.is_some());
+            }
+            e => panic!("Expected ParseError, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_missing_required_field_reports_row_index() {
+        // Second row lacks the non-nullable value; the error must say which
+        // row was being finalized when the gap surfaced.
+        let xml = b"<data><row><value>1</value></row><row><other>x</other></row></data>";
+        let config = config_from_yaml!(COORDS_YAML);
+        let err = parse_xml_slice(xml, &config).unwrap_err();
+        match &err {
+            Error::MissingRequiredField { location, .. } => {
+                assert_eq!(location.row, Some(1));
+                assert!(location.position.is_some());
+            }
+            e => panic!("Expected MissingRequiredField, got {e:?}"),
+        }
+        assert!(err.to_string().contains("row index 1"));
+    }
+
+    // --- Unmatched-field diagnostics (error_on_unmatched_fields) ---
+
+    #[test]
+    fn test_unmatched_fields_error_lists_every_typo() {
+        // Two misspelled paths (an element and an attribute), one correct
+        // one: strict mode must name exactly the two offenders.
+        let config = config_from_yaml!(
+            r#"
+            parser_options:
+              error_on_unmatched_fields: true
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: good
+                      xml_path: /data/row/value
+                      data_type: Int32
+                    - name: typo_element
+                      xml_path: /data/row/vlaue
+                      data_type: Int32
+                      nullable: true
+                    - name: typo_attribute
+                      xml_path: /data/row/@di
+                      data_type: Utf8
+                      nullable: true
+            "#
+        );
+        let err = parse_xml_slice(
+            br#"<data><row id="a"><value>1</value></row></data>"#,
+            &config,
+        )
+        .unwrap_err();
+        match &err {
+            Error::UnmatchedFields { fields } => {
+                let names: Vec<&str> = fields.iter().map(|u| u.field.as_str()).collect();
+                assert_eq!(names, vec!["typo_element", "typo_attribute"]);
+                assert_eq!(fields[0].table, "t");
+                assert_eq!(fields[0].xml_path, "/data/row/vlaue");
+            }
+            e => panic!("Expected UnmatchedFields, got {e:?}"),
+        }
+        let msg = err.to_string();
+        assert!(msg.contains("2 configured field(s)"), "got: {msg}");
+        assert!(msg.contains("typo_element"), "got: {msg}");
+        assert!(msg.contains("/data/row/@di"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_unmatched_fields_silent_without_option() {
+        // Default behavior is unchanged: the typo'd column comes back
+        // all-null and no error is raised.
+        let record_batches = parse(
+            r#"<data><row><value>1</value></row></data>"#,
+            r#"
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: typo
+                      xml_path: /data/row/vlaue
+                      data_type: Int32
+                      nullable: true
+            "#,
+        );
+        let batch = record_batches.get("t").unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert!(
+            batch
+                .column_by_name("typo")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap()
+                .is_null(0)
+        );
+    }
+
+    #[test]
+    fn test_field_matching_in_some_rows_is_not_unmatched() {
+        // "Unmatched" means matched *nowhere*: a nullable field present in
+        // only one of three rows must not trip strict mode.
+        let config = config_from_yaml!(
+            r#"
+            parser_options:
+              error_on_unmatched_fields: true
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: v
+                      xml_path: /data/row/v
+                      data_type: Int32
+                      nullable: true
+            "#
+        );
+        let batches =
+            parse_xml_slice(b"<data><row/><row><v>2</v></row><row/></data>", &config).unwrap();
+        assert_eq!(batches.get("t").unwrap().num_rows(), 3);
+    }
+
+    // --- max_depth guard ---
+
+    #[test]
+    fn test_nesting_beyond_max_depth_rejected() {
+        // Depth 4 (`<a>`) crosses the ceiling of 3. The offenders are
+        // *unconfigured* elements: placeholder frames count toward depth,
+        // otherwise a bomb of unknown elements would bypass the guard.
+        let config = config_from_yaml!(
+            r#"
+            parser_options:
+              max_depth: 3
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: v
+                      xml_path: /data/row/v
+                      data_type: Utf8
+            "#
+        );
+        let err = parse_xml_slice(b"<data><row><v><a><b>x</b></a></v></row></data>", &config)
+            .unwrap_err();
+        match &err {
+            Error::MaxDepthExceeded {
+                max_depth,
+                position,
+            } => {
+                assert_eq!(*max_depth, 3);
+                assert!(position.is_some());
+            }
+            e => panic!("Expected MaxDepthExceeded, got {e:?}"),
+        }
+        assert!(err.to_string().contains("maximum depth of 3"));
+    }
+
+    #[test]
+    fn test_nesting_at_exactly_max_depth_accepted() {
+        let config = config_from_yaml!(
+            r#"
+            parser_options:
+              max_depth: 3
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: v
+                      xml_path: /data/row/v
+                      data_type: Utf8
+            "#
+        );
+        let batches = parse_xml_slice(b"<data><row><v>ok</v></row></data>", &config).unwrap();
+        assert_eq!(batches.get("t").unwrap().num_rows(), 1);
+    }
+
+    #[test]
+    fn test_empty_element_beyond_max_depth_rejected() {
+        // `<a/>` at depth 4 must be rejected exactly like `<a></a>` would be.
+        let config = config_from_yaml!(
+            r#"
+            parser_options:
+              max_depth: 3
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: v
+                      xml_path: /data/row/v
+                      data_type: Utf8
+                      nullable: true
+            "#
+        );
+        let err = parse_xml_slice(b"<data><row><v><a/></v></row></data>", &config).unwrap_err();
+        assert!(matches!(err, Error::MaxDepthExceeded { max_depth: 3, .. }));
+    }
+
+    /// Builds `<a><a>…x…</a></a>` nested `depth` levels deep.
+    fn deeply_nested_xml(depth: usize) -> Vec<u8> {
+        let mut xml = Vec::with_capacity(depth * 8);
+        for _ in 0..depth {
+            xml.extend_from_slice(b"<a>");
+        }
+        xml.push(b'x');
+        for _ in 0..depth {
+            xml.extend_from_slice(b"</a>");
+        }
+        xml
+    }
+
+    #[test]
+    fn test_default_max_depth_is_enforced_and_null_disables_it() {
+        let yaml_guarded = r#"
+            tables:
+                - name: t
+                  xml_path: /a
+                  levels: []
+                  fields:
+                    - name: v
+                      xml_path: /a/v
+                      data_type: Utf8
+                      nullable: true
+            "#;
+        let xml = deeply_nested_xml(1100);
+
+        // Default options: the 1000-frame ceiling fires.
+        let config = config_from_yaml!(yaml_guarded);
+        let err = parse_xml_slice(&xml, &config).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::MaxDepthExceeded {
+                max_depth: 1000,
+                ..
+            }
+        ));
+
+        // `max_depth: null` lifts the ceiling for trusted deep documents.
+        let config = config_from_yaml!(
+            r#"
+            parser_options:
+              max_depth: null
+            tables:
+                - name: t
+                  xml_path: /a
+                  levels: []
+                  fields:
+                    - name: v
+                      xml_path: /a/v
+                      data_type: Utf8
+                      nullable: true
+            "#
+        );
+        assert!(parse_xml_slice(&xml, &config).is_ok());
     }
 
     #[test]
