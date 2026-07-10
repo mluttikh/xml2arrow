@@ -24,15 +24,15 @@ use quick_xml::Reader;
 use quick_xml::XmlVersion;
 use quick_xml::encoding::Decoder;
 use quick_xml::escape;
-use quick_xml::events::Event;
 use quick_xml::events::attributes::Attributes;
+use quick_xml::events::{BytesRef, Event};
 
 use crate::Config;
 use crate::config::{DType, FieldConfig, TableConfig};
 use crate::errors::Error;
 use crate::errors::ParseKind;
 use crate::errors::Result;
-use crate::path_registry::{PathNodeId, PathRegistry, PathTracker};
+use crate::path_registry::{PathNodeId, PathNodeInfo, PathRegistry, PathTracker};
 
 // === Field-level accumulation ===
 
@@ -128,6 +128,14 @@ struct FieldBuilder {
     /// The Arrow array builder used to construct the array (enum dispatch, no vtable).
     array_builder: TypedArrayBuilder,
     /// Indicates whether the builder has received any values for the current row.
+    ///
+    /// Doubles as the repeated-element guard: when a field's element is
+    /// *entered* while `has_value` is already set for the current row, the
+    /// element appeared twice — historically the raw bytes were silently
+    /// concatenated ("1" + "2" → 12 for an Int32), fabricating values; now it
+    /// is a `ParseError` (see `check_element_not_repeated`). Text split
+    /// across multiple events *within* one element (text + CDATA, entity
+    /// references) never trips this: no re-entry happens in between.
     has_value: bool,
     /// Pre-computed `meta.scale.is_some() || meta.offset.is_some()`. The
     /// per-row float append path is hot enough that gating the `Option` loads
@@ -568,6 +576,69 @@ impl<'a> XmlToArrowConverter<'a> {
         }
     }
 
+    /// Rejects a repeated occurrence of a field's element within one row.
+    ///
+    /// Called from the `Start`/`Empty` arms when the *entered* node carries
+    /// field mappings (`info` is the `PathNodeInfo` those arms already hold,
+    /// so this adds no registry lookup). If a matching field of the current
+    /// table already accumulated a value in this row, the element is
+    /// appearing a second time — historically the raw bytes were silently
+    /// concatenated ("1" + "2" → 12 for an Int32), fabricating values that
+    /// never appeared in the document; now it is a `ParseError`.
+    ///
+    /// Value-less occurrences (`<v/><v>2</v>`) pass: nothing was captured, so
+    /// the rule is "at most one value-bearing occurrence per row". Duplicate
+    /// *attributes* (reachable with `validate_attributes: false`) are
+    /// intentionally exempt — attribute pseudo-nodes are entered inside
+    /// `parse_attributes`, which does not run this check, preserving the
+    /// documented concatenation behavior for trusted input.
+    #[inline]
+    fn check_element_not_repeated(&self, info: &PathNodeInfo) -> Result<()> {
+        if let Some(current_entry) = self.builder_stack.last() {
+            let current_table_idx = current_entry.table_idx;
+            for &(table_idx, field_idx) in &info.field_indices {
+                if table_idx == current_table_idx
+                    && self.table_builders[table_idx].field_builders[field_idx].has_value
+                {
+                    return Err(self.duplicate_value_error(table_idx, field_idx));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Builds the `DuplicateValue` error for `check_element_not_repeated`.
+    /// Out of line and cold so the check above stays a bare `has_value`
+    /// branch in the per-element hot path; the allocations here only run
+    /// when the parse is already failing.
+    #[cold]
+    #[inline(never)]
+    fn duplicate_value_error(&self, table_idx: usize, field_idx: usize) -> Error {
+        let field_builder = &self.table_builders[table_idx].field_builders[field_idx];
+        Error::ParseError {
+            field: Arc::from(field_builder.meta.name.as_str()),
+            path: Arc::from(field_builder.meta.xml_path.as_str()),
+            value: String::from_utf8_lossy(&field_builder.current_value).into_owned(),
+            kind: ParseKind::DuplicateValue,
+        }
+    }
+
+    /// Returns the metadata of the first field of the *current* table mapped
+    /// to `node_id`, or `None` when a value at this node would not be
+    /// captured. Used by the entity-reference handler to decide whether an
+    /// unresolvable reference is an error (it would corrupt a field value)
+    /// or ignorable (nothing is listening at this node).
+    fn active_field_meta(&self, node_id: PathNodeId) -> Option<&FieldMeta> {
+        let info = self.registry.get_node_info(node_id);
+        let current_table_idx = self.builder_stack.last()?.table_idx;
+        info.field_indices
+            .iter()
+            .find(|(table_idx, _)| *table_idx == current_table_idx)
+            .map(|&(table_idx, field_idx)| {
+                &self.table_builders[table_idx].field_builders[field_idx].meta
+            })
+    }
+
     fn end_current_row(&mut self) -> Result<()> {
         // Collect parent indices into reusable buffer to avoid per-row allocation.
         self.parent_indices_buffer.clear();
@@ -933,7 +1004,12 @@ fn close_element(
     }
     path_tracker.leave();
 
-    if path_tracker.top_is_table() {
+    // Only *configured* elements delimit rows (node_id is Some). Letting an
+    // unknown element finalize a row would fabricate null/empty rows whenever
+    // the document grows siblings the config doesn't know about. Configured
+    // children keep the established behavior: each known direct child of a
+    // table element closing ends a row.
+    if node_id.is_some() && path_tracker.top_is_table() {
         xml_to_arrow_converter.end_current_row()?;
     }
 
@@ -945,6 +1021,59 @@ fn close_element(
         return Ok(LoopAction::Break);
     }
     Ok(LoopAction::Continue)
+}
+
+/// Resolves a general reference in element text (`&#66;`, `&amp;`,
+/// `&custom;`) and appends the resolved bytes to the fields listening at
+/// `node_id`.
+///
+/// Two resolution steps cover the complete vocabulary a non-DTD-aware parser
+/// can handle: character references (`&#66;`, `&#x41;`) and the five
+/// predefined entities. A 4-byte stack buffer keeps the char-ref path
+/// allocation-free. An undeclared/custom entity cannot be resolved without
+/// DTD support; silently dropping it — the historical behavior — corrupted
+/// the extracted value, so it errors instead, but only when a configured
+/// field is actually capturing at this node.
+///
+/// Kept out of line (like `parse_attributes`): references are rare relative
+/// to Start/Text/End events, and inlining this — with its error construction
+/// — would grow `handle_event` for no hot-path benefit.
+#[inline(never)]
+fn handle_general_ref(
+    e: BytesRef<'_>,
+    node_id: PathNodeId,
+    xml_to_arrow_converter: &mut XmlToArrowConverter<'_>,
+) -> Result<()> {
+    if let Some(ch) = e.resolve_char_ref()? {
+        let mut utf8_buf = [0u8; 4];
+        let encoded = ch.encode_utf8(&mut utf8_buf);
+        xml_to_arrow_converter.set_field_value_for_node(node_id, encoded.as_bytes());
+        return Ok(());
+    }
+
+    // The predefined-entity lookup requires a `&str`, but the vocabulary
+    // (`amp`, `lt`, `gt`, `quot`, `apos`) is ASCII, so invalid UTF-8 simply
+    // fails to resolve.
+    let text = e.into_inner();
+    let resolved = std::str::from_utf8(&text)
+        .ok()
+        .and_then(escape::resolve_predefined_entity);
+    match resolved {
+        Some(entity_text) => {
+            xml_to_arrow_converter.set_field_value_for_node(node_id, entity_text.as_bytes());
+        }
+        None => {
+            if let Some(meta) = xml_to_arrow_converter.active_field_meta(node_id) {
+                return Err(Error::ParseError {
+                    field: Arc::from(meta.name.as_str()),
+                    path: Arc::from(meta.xml_path.as_str()),
+                    value: String::from_utf8_lossy(&text).into_owned(),
+                    kind: ParseKind::UnresolvedEntity,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Processes a single XML event, updating path tracking, table builders, and field values.
@@ -984,12 +1113,22 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
             };
 
             // Fused lookup: child resolution + node-info read in one pass.
-            // The `&PathNodeInfo` borrow is dropped before any mutable use
-            // of the converter by extracting the bits we need into Copy
+            // The `&PathNodeInfo` borrow is tied to the registry (not the
+            // converter), so the repeated-element check can run on it before
+            // the bits the rest of the arm needs are extracted into Copy
             // locals.
             let (node_id_opt, table_index, has_attrs) =
                 match path_tracker.enter(name_bytes, xml_to_arrow_converter.registry) {
-                    Some((id, info)) => (Some(id), info.table_index, info.has_attribute_children),
+                    Some((id, info)) => {
+                        // Re-entering a field element whose row value is
+                        // already set means the element appeared twice —
+                        // rejected while `info` is in hand (no extra
+                        // registry read; see check_element_not_repeated).
+                        if !info.field_indices.is_empty() {
+                            xml_to_arrow_converter.check_element_not_repeated(info)?;
+                        }
+                        (Some(id), info.table_index, info.has_attribute_children)
+                    }
                     None => (None, None, false),
                 };
 
@@ -1021,12 +1160,18 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
 
             let (node_id_opt, table_index, has_attrs, is_table) =
                 match path_tracker.enter(name_bytes, xml_to_arrow_converter.registry) {
-                    Some((id, info)) => (
-                        Some(id),
-                        info.table_index,
-                        info.has_attribute_children,
-                        info.is_table(),
-                    ),
+                    Some((id, info)) => {
+                        // Same repeated-element guard as Event::Start.
+                        if !info.field_indices.is_empty() {
+                            xml_to_arrow_converter.check_element_not_repeated(info)?;
+                        }
+                        (
+                            Some(id),
+                            info.table_index,
+                            info.has_attribute_children,
+                            info.is_table(),
+                        )
+                    }
                     None => (None, None, false, false),
                 };
 
@@ -1058,17 +1203,7 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
         }
         Event::GeneralRef(e) => {
             if let Some(node_id) = path_tracker.current() {
-                let text = e.into_inner();
-                // The predefined-entity lookup requires a `&str`, but the
-                // vocabulary (`amp`, `lt`, `gt`, `quot`, `apos`) is ASCII, so
-                // invalid UTF-8 here just yields no resolution — consistent
-                // with the previous unwrap_or_default behavior for unknown
-                // entities.
-                let resolved = std::str::from_utf8(&text)
-                    .ok()
-                    .and_then(escape::resolve_predefined_entity)
-                    .unwrap_or_default();
-                xml_to_arrow_converter.set_field_value_for_node(node_id, resolved.as_bytes());
+                handle_general_ref(e, node_id, xml_to_arrow_converter)?;
             }
         }
         Event::Text(e) => {
@@ -5186,5 +5321,349 @@ mod tests {
             array.iter().all(|v| v.is_none()),
             "unqualified path must not match the prefixed element"
         );
+    }
+
+    // =========================================================================
+    // Character / entity references in element text
+    // =========================================================================
+
+    #[test]
+    fn test_decimal_char_ref_in_text_resolved() {
+        // Regression: character references used to resolve to an empty
+        // string, silently dropping data ("A&#66;C" became "AC").
+        let record_batches = parse(
+            r#"<data><row><v>A&#66;C</v></row></data>"#,
+            r#"
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: v
+                      xml_path: /data/row/v
+                      data_type: Utf8
+            "#,
+        );
+        let batch = record_batches.get("t").unwrap();
+        assert_array_values!(batch, "v", vec!["ABC"], StringArray);
+    }
+
+    #[test]
+    fn test_hex_char_ref_in_text_resolved() {
+        let record_batches = parse(
+            r#"<data><row><v>X&#x41;Y</v></row></data>"#,
+            r#"
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: v
+                      xml_path: /data/row/v
+                      data_type: Utf8
+            "#,
+        );
+        let batch = record_batches.get("t").unwrap();
+        assert_array_values!(batch, "v", vec!["XAY"], StringArray);
+    }
+
+    #[test]
+    fn test_multibyte_char_ref_in_text_resolved() {
+        // A code point above ASCII exercises the full 4-byte UTF-8 encode
+        // path (U+1F30D 🌍).
+        let record_batches = parse(
+            r#"<data><row><v>&#127757;</v></row></data>"#,
+            r#"
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: v
+                      xml_path: /data/row/v
+                      data_type: Utf8
+            "#,
+        );
+        let batch = record_batches.get("t").unwrap();
+        assert_array_values!(batch, "v", vec!["🌍"], StringArray);
+    }
+
+    #[test]
+    fn test_char_ref_in_numeric_field_parsed() {
+        // A char ref can form part of a numeric value; the resolved bytes
+        // must flow into the numeric parser like ordinary text.
+        let record_batches = parse(
+            r#"<data><row><v>4&#50;</v></row></data>"#,
+            r#"
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: v
+                      xml_path: /data/row/v
+                      data_type: Int32
+            "#,
+        );
+        let batch = record_batches.get("t").unwrap();
+        assert_array_values!(batch, "v", vec![42i32], Int32Array);
+    }
+
+    #[test]
+    fn test_unknown_entity_in_captured_field_returns_error() {
+        // An undeclared entity cannot be resolved without DTD support.
+        // Dropping it silently (the old behavior) corrupted the value, so it
+        // must surface as a ParseError naming the entity.
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: v
+                      xml_path: /data/row/v
+                      data_type: Utf8
+            "#
+        );
+        let result = parse_xml(
+            r#"<data><row><v>a&nbsp;b</v></row></data>"#.as_bytes(),
+            &config,
+        );
+        match result.unwrap_err() {
+            e @ Error::ParseError {
+                kind: ParseKind::UnresolvedEntity,
+                ..
+            } => assert!(e.to_string().contains("nbsp")),
+            e => panic!("Expected UnresolvedEntity ParseError, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_unknown_entity_outside_captured_fields_ignored() {
+        // The same unresolvable entity in a part of the document no field
+        // captures must not fail the parse — nothing is listening there.
+        let record_batches = parse(
+            r#"<data><notes>a&nbsp;b</notes><row><v>1</v></row></data>"#,
+            r#"
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: v
+                      xml_path: /data/row/v
+                      data_type: Int32
+            "#,
+        );
+        let batch = record_batches.get("t").unwrap();
+        assert_array_values!(batch, "v", vec![1i32], Int32Array);
+    }
+
+    #[test]
+    fn test_malformed_char_ref_returns_error() {
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: v
+                      xml_path: /data/row/v
+                      data_type: Utf8
+            "#
+        );
+        let result = parse_xml(
+            r#"<data><row><v>&#xZZ;</v></row></data>"#.as_bytes(),
+            &config,
+        );
+        assert!(result.is_err(), "invalid char ref digits must error");
+    }
+
+    // =========================================================================
+    // Row finalization: only configured elements delimit rows
+    // =========================================================================
+
+    #[test]
+    fn test_unknown_sibling_under_table_does_not_create_row() {
+        // Regression: an element the config doesn't know about, sitting
+        // directly under a table path, used to finalize a spurious all-null
+        // row. Unknown elements must be invisible to row accounting.
+        let record_batches = parse(
+            r#"
+            <data>
+                <item><v>1</v></item>
+                <unrelated>junk</unrelated>
+                <item><v>2</v></item>
+            </data>
+            "#,
+            r#"
+            tables:
+                - name: items
+                  xml_path: /data
+                  levels: [item]
+                  fields:
+                    - name: v
+                      xml_path: /data/item/v
+                      data_type: Int32
+                      nullable: true
+            "#,
+        );
+        let batch = record_batches.get("items").unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        assert_array_values!(batch, "v", vec![1i32, 2], Int32Array);
+        assert_array_values!(batch, "<item>", vec![0u32, 1], UInt32Array);
+    }
+
+    #[test]
+    fn test_unknown_self_closing_sibling_under_table_does_not_create_row() {
+        // Same rule for the Event::Empty path.
+        let record_batches = parse(
+            r#"<data><item><v>1</v></item><unrelated/></data>"#,
+            r#"
+            tables:
+                - name: items
+                  xml_path: /data
+                  levels: [item]
+                  fields:
+                    - name: v
+                      xml_path: /data/item/v
+                      data_type: Int32
+            "#,
+        );
+        let batch = record_batches.get("items").unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert_array_values!(batch, "v", vec![1i32], Int32Array);
+    }
+
+    #[test]
+    fn test_unknown_sibling_with_non_nullable_fields_does_not_error() {
+        // Before the fix the spurious row also *failed* the whole parse when
+        // any field was non-nullable (the null row violated nullability).
+        // Robustness against schema evolution of the input demands this
+        // parses cleanly.
+        let record_batches = parse(
+            r#"<data><item><v>1</v></item><added_in_v2>x</added_in_v2></data>"#,
+            r#"
+            tables:
+                - name: items
+                  xml_path: /data
+                  levels: [item]
+                  fields:
+                    - name: v
+                      xml_path: /data/item/v
+                      data_type: Int32
+            "#,
+        );
+        let batch = record_batches.get("items").unwrap();
+        assert_eq!(batch.num_rows(), 1);
+    }
+
+    // =========================================================================
+    // Repeated field elements within one row
+    // =========================================================================
+
+    #[test]
+    fn test_repeated_element_value_returns_error() {
+        // Regression: two occurrences of a field's element in one row used to
+        // concatenate raw bytes — "1" + "2" parsed as 12 for Int32,
+        // fabricating a value that never appeared in the document.
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: v
+                      xml_path: /data/row/v
+                      data_type: Int32
+            "#
+        );
+        let result = parse_xml(
+            r#"<data><row><v>1</v><v>2</v></row></data>"#.as_bytes(),
+            &config,
+        );
+        match result.unwrap_err() {
+            e @ Error::ParseError {
+                kind: ParseKind::DuplicateValue,
+                ..
+            } => assert!(e.to_string().contains("more than once")),
+            e => panic!("Expected DuplicateValue ParseError, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_valueless_occurrence_then_value_accepted() {
+        // The guard fires when an element is *re-entered with a value
+        // already captured*: an empty first occurrence contributed nothing,
+        // so a later value is not a conflict.
+        let record_batches = parse(
+            r#"<data><row><v/><v>2</v></row></data>"#,
+            r#"
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: v
+                      xml_path: /data/row/v
+                      data_type: Int32
+            "#,
+        );
+        let batch = record_batches.get("t").unwrap();
+        assert_array_values!(batch, "v", vec![2i32], Int32Array);
+    }
+
+    #[test]
+    fn test_value_then_repeated_element_returns_error() {
+        // Once a value is captured, any re-occurrence of the element in the
+        // same row — even a self-closing one — is rejected: the document is
+        // presenting multiple candidates for a scalar column.
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: v
+                      xml_path: /data/row/v
+                      data_type: Int32
+            "#
+        );
+        let result = parse_xml(
+            r#"<data><row><v>1</v><v/></row></data>"#.as_bytes(),
+            &config,
+        );
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::ParseError {
+                kind: ParseKind::DuplicateValue,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_same_field_element_across_rows_unaffected_by_sealing() {
+        // Sealing is per row: the same element reappearing in the *next* row
+        // is the normal case and must keep working.
+        let record_batches = parse(
+            r#"<data><row><v>1</v></row><row><v>2</v></row></data>"#,
+            r#"
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: v
+                      xml_path: /data/row/v
+                      data_type: Int32
+            "#,
+        );
+        let batch = record_batches.get("t").unwrap();
+        assert_array_values!(batch, "v", vec![1i32, 2], Int32Array);
     }
 }
