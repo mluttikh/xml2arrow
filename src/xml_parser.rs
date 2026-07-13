@@ -34,6 +34,12 @@ use crate::errors::ParseKind;
 use crate::errors::Result;
 use crate::path_registry::{PathNodeId, PathNodeInfo, PathRegistry, PathTracker};
 
+/// Callback invoked with each flushed `(table_name, batch)` in batched mode
+/// (see [`Parser::parse_batched`]). Aliased to keep the several signatures
+/// that thread it readable. The lifetime bounds the data the callback may
+/// borrow to the duration of the parse call.
+type OnBatchFn<'a> = Box<dyn FnMut(&str, RecordBatch) -> Result<()> + 'a>;
+
 // === Field-level accumulation ===
 
 /// Enum-based array builder that avoids dynamic dispatch (`Box<dyn ArrayBuilder>`)
@@ -529,6 +535,17 @@ struct XmlToArrowConverter<'a> {
     /// prefix); when `false`, the raw qualified `name()` is used, skipping the
     /// per-name `:` scan. Cached here so the hot path reads a plain `bool`.
     strip_namespaces: bool,
+    /// When set, `end_current_row` flushes a table's builders to `on_batch`
+    /// every `batch_size` rows instead of letting them grow for the whole
+    /// document. `row_index` (the source of every parent-pointer value) is
+    /// never touched by a flush — only the Arrow buffers are drained — so
+    /// pointers already emitted by ancestor tables stay valid across batches.
+    batch_size: Option<usize>,
+    /// Receives `(table_name, RecordBatch)` at each flush point (interim, via
+    /// `maybe_flush`, and final, via `finish`). Boxed so batching doesn't
+    /// need a second generic parameter threaded through every event-loop
+    /// function.
+    on_batch: Option<OnBatchFn<'a>>,
 }
 
 impl<'a> XmlToArrowConverter<'a> {
@@ -538,7 +555,7 @@ impl<'a> XmlToArrowConverter<'a> {
     /// the Arrow builders that will hold the parsed values. The expensive setup
     /// (config validation, path-trie construction) was already done once in
     /// [`Parser::new`], so this stays cheap even for tiny documents.
-    fn new(parser: &'a Parser) -> Self {
+    fn new(parser: &'a Parser, batch_size: Option<usize>, on_batch: Option<OnBatchFn<'a>>) -> Self {
         let config = &parser.config;
         let mut table_builders = Vec::with_capacity(config.tables.len());
         for table_config in &config.tables {
@@ -552,7 +569,38 @@ impl<'a> XmlToArrowConverter<'a> {
             parent_indices_buffer: Vec::new(),
             validate_attributes: config.parser_options.validate_attributes,
             strip_namespaces: config.parser_options.strip_namespaces,
+            batch_size,
+            on_batch,
         }
+    }
+
+    /// Flushes `table_idx`'s builders to `on_batch` if a batch boundary was
+    /// just crossed. No-op when batching isn't enabled, when the table is a
+    /// pure hierarchy boundary (no fields, nothing to ship), or when
+    /// `row_index` isn't a multiple of `batch_size` yet.
+    ///
+    /// Deliberately keys the check on `row_index` rather than a separate
+    /// "rows since last flush" counter: `row_index` is never reset by a
+    /// flush (only the field/index builders are drained), so it stays a
+    /// monotonically increasing count for the table's whole lifetime and
+    /// `row_index % batch_size == 0` fires exactly once per boundary.
+    fn maybe_flush(&mut self, table_idx: usize) -> Result<()> {
+        let Some(batch_size) = self.batch_size.filter(|&n| n > 0) else {
+            return Ok(());
+        };
+        let table_builder = &self.table_builders[table_idx];
+        if table_builder.row_index == 0 || !table_builder.row_index.is_multiple_of(batch_size) {
+            return Ok(());
+        }
+        if table_builder.field_builders.is_empty() {
+            return Ok(());
+        }
+        let Some(on_batch) = self.on_batch.as_mut() else {
+            return Ok(());
+        };
+        let table_builder = &mut self.table_builders[table_idx];
+        let batch = table_builder.finish()?;
+        on_batch(&table_builder.meta.name, batch)
     }
 
     /// Sets a field value for the current table using path node information.
@@ -653,8 +701,9 @@ impl<'a> XmlToArrowConverter<'a> {
             self.parent_indices_buffer
                 .push(self.table_builders[entry.table_idx].row_index as u32);
         }
-        if let Some(entry) = self.builder_stack.last() {
-            self.table_builders[entry.table_idx].end_row(&self.parent_indices_buffer)?;
+        if let Some(table_idx) = self.builder_stack.last().map(|entry| entry.table_idx) {
+            self.table_builders[table_idx].end_row(&self.parent_indices_buffer)?;
+            self.maybe_flush(table_idx)?;
         }
         Ok(())
     }
@@ -676,11 +725,26 @@ impl<'a> XmlToArrowConverter<'a> {
         self.builder_stack.pop();
     }
 
+    /// Finalizes every table's remaining (not-yet-flushed) rows.
+    ///
+    /// When `on_batch` is set (batched mode), the leftover — whatever
+    /// accumulated since the last `maybe_flush` boundary — is routed through
+    /// the same callback as every interim batch, and the returned map is
+    /// empty. When `on_batch` is `None` (the existing `parse`/`parse_slice`
+    /// behavior), this is unchanged: the full, single, final map.
     fn finish(mut self) -> Result<IndexMap<String, arrow::record_batch::RecordBatch>> {
         let mut record_batches = IndexMap::new();
+        let mut on_batch = self.on_batch.take();
         for table_builder in &mut self.table_builders {
-            if !table_builder.field_builders.is_empty() {
-                let record_batch = table_builder.finish()?;
+            if table_builder.field_builders.is_empty() {
+                continue;
+            }
+            let record_batch = table_builder.finish()?;
+            if let Some(cb) = on_batch.as_mut() {
+                if record_batch.num_rows() > 0 {
+                    cb(&table_builder.meta.name, record_batch)?;
+                }
+            } else {
                 record_batches.insert(table_builder.meta.name.clone(), record_batch);
             }
         }
@@ -777,13 +841,92 @@ impl Parser {
         let mut reader = Reader::from_reader(reader);
         self.configure_reader(&mut reader);
         let needs_attrs = self.needs_attrs;
-        self.run_parse(&mut reader, |r, t, c, s| {
-            if needs_attrs {
-                process_xml_events::<_, true>(r, t, c, s)
-            } else {
-                process_xml_events::<_, false>(r, t, c, s)
-            }
-        })
+        self.run_parse(
+            &mut reader,
+            |r, t, c, s| {
+                if needs_attrs {
+                    process_xml_events::<_, true>(r, t, c, s)
+                } else {
+                    process_xml_events::<_, false>(r, t, c, s)
+                }
+            },
+            None,
+            None,
+        )
+    }
+
+    /// Parses XML from a streaming reader, flushing each table's builders to
+    /// `on_batch` every `batch_size` rows instead of holding the whole
+    /// document's output in memory at once.
+    ///
+    /// This is the batched counterpart to [`Parser::parse`] — same reader
+    /// type, same event loop, the only difference is where the output goes.
+    /// Whereas `parse` accumulates every row into per-table Arrow builders and
+    /// returns one `RecordBatch` per table at EOF (so peak memory scales with
+    /// the output size), `parse_batched` drains each table's builders every
+    /// `batch_size` rows and hands the resulting `RecordBatch` to `on_batch`.
+    /// Peak memory is then bounded by `batch_size` rather than by the document
+    /// size, which matters for streaming or larger-than-memory inputs.
+    ///
+    /// `on_batch` receives `(table_name, batch)` for every batch — interim
+    /// flushes and the final leftover — in document order. Nothing is returned
+    /// from this call; the callback is the only output channel.
+    ///
+    /// Row indices (the `<level>` parent-pointer columns used for nested
+    /// tables) remain valid across batches: a flush only drains the Arrow
+    /// buffers, never the per-table row counter, so pointers already emitted by
+    /// ancestor tables continue to reference the correct parent rows. Consumers
+    /// that need to rejoin child batches to parent batches after the fact
+    /// should do so on those index columns.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use xml2arrow::{Parser, config::{Config, TableConfig, FieldConfigBuilder, DType}};
+    ///
+    /// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build().unwrap()];
+    /// let tables = vec![TableConfig::new("items", "/data", vec![], fields)];
+    /// let config = Config { tables, parser_options: Default::default() };
+    /// let parser = Parser::new(&config).unwrap();
+    ///
+    /// let xml = b"<data><item><value>1</value></item><item><value>2</value></item></data>";
+    /// let mut total_rows = 0;
+    /// parser
+    ///     .parse_batched(xml.as_slice(), 1, |_table, batch| {
+    ///         total_rows += batch.num_rows();
+    ///         Ok(())
+    ///     })
+    ///     .unwrap();
+    /// assert_eq!(total_rows, 2);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if XML parsing encounters invalid data, value
+    /// conversion fails, Arrow `RecordBatch` creation fails, or `on_batch`
+    /// itself returns an error (propagated, stopping the parse).
+    pub fn parse_batched<'c>(
+        &'c self,
+        reader: impl BufRead,
+        batch_size: usize,
+        on_batch: impl FnMut(&str, RecordBatch) -> Result<()> + 'c,
+    ) -> Result<()> {
+        let mut reader = Reader::from_reader(reader);
+        self.configure_reader(&mut reader);
+        let needs_attrs = self.needs_attrs;
+        self.run_parse(
+            &mut reader,
+            |r, t, c, s| {
+                if needs_attrs {
+                    process_xml_events::<_, true>(r, t, c, s)
+                } else {
+                    process_xml_events::<_, false>(r, t, c, s)
+                }
+            },
+            Some(batch_size),
+            Some(Box::new(on_batch)),
+        )?;
+        Ok(())
     }
 
     /// Parses XML from an in-memory byte slice into Arrow batches (zero-copy).
@@ -796,13 +939,18 @@ impl Parser {
         let mut reader = Reader::from_reader(xml);
         self.configure_reader(&mut reader);
         let needs_attrs = self.needs_attrs;
-        self.run_parse(&mut reader, |r, t, c, s| {
-            if needs_attrs {
-                process_xml_events_slice::<true>(r, t, c, s)
-            } else {
-                process_xml_events_slice::<false>(r, t, c, s)
-            }
-        })
+        self.run_parse(
+            &mut reader,
+            |r, t, c, s| {
+                if needs_attrs {
+                    process_xml_events_slice::<true>(r, t, c, s)
+                } else {
+                    process_xml_events_slice::<false>(r, t, c, s)
+                }
+            },
+            None,
+            None,
+        )
     }
 
     /// Applies `ParserOptions` to the shared `quick_xml::Reader` config.
@@ -829,10 +977,12 @@ impl Parser {
     /// finalization — is identical. Accepting the event loop as a closure lets
     /// each caller stay specialized (buffered vs zero-copy, attrs on vs off)
     /// without duplicating the surrounding orchestration.
-    fn run_parse<R, F>(
-        &self,
+    fn run_parse<'c, R, F>(
+        &'c self,
         reader: &mut R,
         run_events: F,
+        batch_size: Option<usize>,
+        on_batch: Option<OnBatchFn<'c>>,
     ) -> Result<IndexMap<String, RecordBatch>>
     where
         F: FnOnce(
@@ -842,7 +992,7 @@ impl Parser {
             &[PathNodeId],
         ) -> Result<()>,
     {
-        let mut xml_to_arrow_converter = XmlToArrowConverter::new(self);
+        let mut xml_to_arrow_converter = XmlToArrowConverter::new(self, batch_size, on_batch);
         let mut path_tracker = PathTracker::new(&self.registry);
 
         // Start the root-level table (xml_path: /) if it exists AND has fields
@@ -5665,5 +5815,142 @@ mod tests {
         );
         let batch = record_batches.get("t").unwrap();
         assert_array_values!(batch, "v", vec![1i32, 2], Int32Array);
+    }
+
+    /// Runs `parse_batched`, collecting every emitted batch grouped by table
+    /// name in arrival order. The closure borrows the local `out` map, which
+    /// also exercises that `on_batch` need not be `'static`.
+    fn parse_batched_collect(
+        xml: &str,
+        yaml_config: &str,
+        batch_size: usize,
+    ) -> IndexMap<String, Vec<RecordBatch>> {
+        let config = config_from_yaml!(yaml_config);
+        let parser = Parser::new(&config).unwrap();
+        let mut out: IndexMap<String, Vec<RecordBatch>> = IndexMap::new();
+        parser
+            .parse_batched(xml.as_bytes(), batch_size, |name, batch| {
+                out.entry(name.to_string()).or_default().push(batch);
+                Ok(())
+            })
+            .unwrap();
+        out
+    }
+
+    #[test]
+    fn test_batched_flat_matches_unbatched() {
+        let xml = r#"<data>
+            <row><v>1</v></row>
+            <row><v>2</v></row>
+            <row><v>3</v></row>
+            <row><v>4</v></row>
+            <row><v>5</v></row>
+        </data>"#;
+        let yaml = r#"
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: v
+                      xml_path: /data/row/v
+                      data_type: Int32
+            "#;
+
+        // batch_size = 2 does not evenly divide 5 rows: expect [2, 2, 1].
+        let batched = parse_batched_collect(xml, yaml, 2);
+        let batches = batched.get("t").unwrap();
+        let sizes: Vec<usize> = batches.iter().map(|b| b.num_rows()).collect();
+        assert_eq!(sizes, vec![2, 2, 1]);
+
+        // Concatenated values must match the single-shot parse, in order.
+        let values: Vec<i32> = batches
+            .iter()
+            .flat_map(|b| {
+                let a = b
+                    .column_by_name("v")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .unwrap();
+                (0..a.len()).map(|i| a.value(i)).collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(values, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_batched_preserves_nested_parent_indices() {
+        // Two groups; a flush boundary falls inside the item stream so the
+        // second group's items land in a different batch from the first
+        // group's. The `<group>` parent-pointer column must still be globally
+        // correct (0, 0, 1), matching the unbatched result.
+        let xml = r#"<data>
+            <group><item><value>1</value></item><item><value>2</value></item></group>
+            <group><item><value>3</value></item></group>
+        </data>"#;
+        let yaml = r#"
+            tables:
+                - name: groups
+                  xml_path: /data
+                  levels: [group]
+                  fields: []
+                - name: items
+                  xml_path: /data/group
+                  levels: [group, item]
+                  fields:
+                    - name: value
+                      xml_path: /data/group/item/value
+                      data_type: Int32
+            "#;
+
+        let batched = parse_batched_collect(xml, yaml, 2);
+        let batches = batched.get("items").unwrap();
+        assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 3);
+
+        let mut group_ptrs = Vec::new();
+        let mut values = Vec::new();
+        for b in batches {
+            let g = b
+                .column_by_name("<group>")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .unwrap();
+            let v = b
+                .column_by_name("value")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+            for i in 0..b.num_rows() {
+                group_ptrs.push(g.value(i));
+                values.push(v.value(i));
+            }
+        }
+        assert_eq!(group_ptrs, vec![0u32, 0, 1]);
+        assert_eq!(values, vec![1i32, 2, 3]);
+    }
+
+    #[test]
+    fn test_batched_callback_error_propagates() {
+        let xml = r#"<data><row><v>1</v></row><row><v>2</v></row></data>"#;
+        let yaml = r#"
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: v
+                      xml_path: /data/row/v
+                      data_type: Int32
+            "#;
+        let config = config_from_yaml!(yaml);
+        let parser = Parser::new(&config).unwrap();
+
+        let result = parser.parse_batched(xml.as_bytes(), 1, |_name, _batch| {
+            Err(Error::Io(std::io::Error::other("stop")))
+        });
+        assert!(result.is_err());
     }
 }
