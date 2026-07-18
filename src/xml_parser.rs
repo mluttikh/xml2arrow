@@ -392,7 +392,7 @@ impl FieldBuilder {
 // === Table-level batching ===
 // A TableBuilder owns per-field builders plus index builders for nested levels.
 // It finalizes rows into a RecordBatch in a single, ordered pass.
-///
+
 /// The subset of a `TableConfig` that finalization needs.
 ///
 /// `TableBuilder` used to hold a full `TableConfig` clone (including the
@@ -520,11 +520,8 @@ struct TableStackEntry {
     node_id: PathNodeId,
 }
 
-/// Converts parsed XML events into Arrow `RecordBatch`es.
-///
-/// This struct maintains a stack of table builders to handle nested XML structures.
-/// It uses integer-based path indexing via `PathRegistry` for efficient lookups.
-/// The mutable, per-parse half of the conversion.
+/// Converts parsed XML events into Arrow `RecordBatch`es — the mutable,
+/// per-parse half of the conversion.
 ///
 /// Everything here holds parse-specific state (the Arrow builders that
 /// accumulate values, the active table stack, scratch buffers) and so must be
@@ -898,9 +895,9 @@ impl Parser {
 /// `Config`, construct a [`Parser`] once and reuse it — that amortizes the
 /// one-time path-compilation cost this wrapper pays on every call.
 ///
-/// This function takes a reader implementing the `BufRead` trait (e.g., a `File`, `&[u8]`, or `String`)
-/// and a `Config` struct that defines the structure of the XML data and how it should be mapped
-/// to Arrow tables.
+/// This function takes a reader implementing the `BufRead` trait (e.g., a
+/// `BufReader<File>` or a `&[u8]` slice) and a `Config` struct that defines the
+/// structure of the XML data and how it should be mapped to Arrow tables.
 ///
 /// # Arguments
 ///
@@ -911,8 +908,8 @@ impl Parser {
 ///
 /// A `Result` containing:
 ///
-/// *   `Ok(IndexMap<String, RecordBatch>)`: An `IndexMap` where keys are the XML names of the tables (as defined in the config)
-///     and values are the corresponding Arrow `RecordBatch` objects.
+/// *   `Ok(IndexMap<String, RecordBatch>)`: An `IndexMap` where keys are the table names (as defined
+///     in the config) and values are the corresponding Arrow `RecordBatch` objects.
 /// *   `Err(Error)`: An `Error` value if any error occurs during parsing, configuration, or Arrow table creation.
 ///
 /// # Errors
@@ -1242,9 +1239,9 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
         }
         Event::End(_) => {
             // Read this element's own (node_id, is_table) from the top of
-            // the merged stack BEFORE close_element pops it via leave().
-            // peek_top() returns None when the stack is at root, matching
-            // the prior "End with empty element_stack ⇒ no-op" behavior.
+            // the path-tracker stack BEFORE close_element pops it via
+            // leave(). peek_top() returns None at root depth, so a stray
+            // End with no matching open element is a no-op.
             if let Some((node_id_opt, is_table)) = path_tracker.peek_top() {
                 return close_element(
                     node_id_opt,

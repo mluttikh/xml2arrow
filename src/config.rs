@@ -238,7 +238,9 @@ impl Config {
 
     /// Creates a `Config` struct from a YAML configuration file.
     ///
-    /// This function reads a YAML file at the given path and deserializes it into a `Config` struct.
+    /// This function reads a YAML file at the given path, deserializes it into a
+    /// `Config` struct, and runs [`Config::validate`] on the result — a config
+    /// obtained here is always structurally valid.
     ///
     /// # Arguments
     ///
@@ -248,8 +250,9 @@ impl Config {
     ///
     /// A `Result` containing:
     ///
-    /// *   `Ok(Config)`: The deserialized `Config` struct.
-    /// *   `Err(Error)`: An `Error` value if the file cannot be opened, read, or parsed as YAML.
+    /// *   `Ok(Config)`: The deserialized and validated `Config` struct.
+    /// *   `Err(Error)`: An `Error` value if the file cannot be opened, read, or
+    ///     parsed as YAML, or if the configuration fails validation.
     ///
     /// # Errors
     ///
@@ -257,6 +260,10 @@ impl Config {
     ///
     /// *   `Error::Io`: If an I/O error occurs while opening or reading the file.
     /// *   `Error::Yaml`: If there is an error parsing the YAML data.
+    /// *   `Error::InvalidConfig`: If the configuration fails [`Config::validate`]
+    ///     (e.g. duplicate table names, a field path not under its table path).
+    /// *   `Error::UnsupportedConversion`: If a scale/offset is configured on a
+    ///     non-float field.
     pub fn from_yaml_file(path: impl AsRef<Path>) -> Result<Self> {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
@@ -315,9 +322,10 @@ impl Config {
 
 /// Configuration for an XML table to be parsed into an Arrow record batch.
 ///
-/// This struct defines how an XML structure should be interpreted as a table, including
-/// the path to the table elements, the element representing a row, and the configuration
-/// of the fields (columns) within the table.
+/// This struct defines how an XML structure should be interpreted as a table:
+/// the path to the element whose configured direct children delimit rows, the
+/// index columns linking nested tables (`levels`), and the configuration of
+/// the fields (columns) within the table.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct TableConfig {
     /// The name of the table.
@@ -560,9 +568,9 @@ impl DType {
 /// input or files, use [`Config::from_yaml_file`] or `yaml_serde::from_str`
 /// directly and handle the error.
 ///
-/// Despite the name, parsing happens at runtime when the macro is expanded
-/// and evaluated; Rust does not support compile-time YAML deserialization
-/// without a procedural macro.
+/// The macro is purely syntactic convenience: the YAML string is parsed at
+/// runtime, when the expanded expression is evaluated. Rust does not support
+/// compile-time YAML deserialization without a procedural macro.
 #[macro_export]
 macro_rules! config_from_yaml {
     ($yaml:expr) => {{
