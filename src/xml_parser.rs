@@ -6433,7 +6433,9 @@ mod tests {
             grouped
         }
 
-        /// The §5.1 acceptance property: concat(streamed) == parse().
+        /// The acceptance property behind the whole feature: concatenating a
+        /// table's streamed batches, in yield order, must reproduce the
+        /// collect-everything `parse()` output exactly — for any thresholds.
         fn assert_stream_equals_full_parse(xml: &str, yaml: &str, options: BatchOptions) {
             let config = config_from_yaml!(yaml);
             let parser = Parser::new(&config).unwrap();
@@ -6497,10 +6499,12 @@ mod tests {
 
         #[test]
         fn foreign_keys_continue_across_flush_boundaries() {
-            // The §5.2 trap, asserted directly rather than via equivalence:
-            // with one-row batches, the measurement batches' <station> FK
-            // must keep counting (0,0,0,1,1) across five separate flushes —
-            // a flush that reset `row_index` would restart it at 0.
+            // The one value a flush could silently corrupt, asserted directly
+            // rather than via equivalence: with one-row batches, the
+            // measurement batches' <station> FK must keep counting
+            // (0,0,0,1,1) across five separate flushes — a flush that reset
+            // `row_index` would restart it at 0 and mis-link every child row
+            // after the first boundary.
             let config = config_from_yaml!(NESTED_YAML);
             let parser = Parser::new(&config).unwrap();
             let options = BatchOptions::default().with_max_rows_per_batch(1);
