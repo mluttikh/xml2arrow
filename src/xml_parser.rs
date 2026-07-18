@@ -508,12 +508,14 @@ impl TableBuilder {
         }
         self.rows_in_batch = 0;
         self.bytes_in_batch = 0;
-        Ok(RecordBatch::try_new(self.schema.clone(), arrays).map_err(|e| {
-            arrow::error::ArrowError::InvalidArgumentError(format!(
-                "Failed to create RecordBatch for table with name {} and XML path {}: {}",
-                self.meta.name, self.meta.xml_path, e
-            ))
-        })?)
+        Ok(
+            RecordBatch::try_new(self.schema.clone(), arrays).map_err(|e| {
+                arrow::error::ArrowError::InvalidArgumentError(format!(
+                    "Failed to create RecordBatch for table with name {} and XML path {}: {}",
+                    self.meta.name, self.meta.xml_path, e
+                ))
+            })?,
+        )
     }
 }
 
@@ -607,7 +609,9 @@ impl<'a> XmlToArrowConverter<'a> {
         // breaking their level indexing. Tables with xml_path: / and no fields
         // are just used for hierarchy purposes and don't need to be on the stack.
         if let Some(table_idx) = parser.registry.get_table_index(PathNodeId::ROOT)
-            && !converter.table_builders[table_idx].field_builders.is_empty()
+            && !converter.table_builders[table_idx]
+                .field_builders
+                .is_empty()
         {
             converter.start_table(table_idx, PathNodeId::ROOT);
         }
@@ -835,8 +839,7 @@ pub struct Parser {
 /// one non-nullable `UInt32` index column per `levels` entry (named
 /// `<level>`), followed by the configured fields in order.
 fn build_table_schema(table_config: &TableConfig) -> Schema {
-    let mut fields =
-        Vec::with_capacity(table_config.levels.len() + table_config.fields.len());
+    let mut fields = Vec::with_capacity(table_config.levels.len() + table_config.fields.len());
     for level in &table_config.levels {
         fields.push(Field::new(format!("<{level}>"), DataType::UInt32, false));
     }
@@ -6757,7 +6760,10 @@ mod tests {
 
             let batches: Vec<RecordBatch> = reader.map(|b| b.unwrap()).collect();
             assert_eq!(
-                batches.iter().map(RecordBatch::num_rows).collect::<Vec<_>>(),
+                batches
+                    .iter()
+                    .map(RecordBatch::num_rows)
+                    .collect::<Vec<_>>(),
                 vec![2, 1]
             );
             let concatenated = concat_batches(&schema, &batches).unwrap();

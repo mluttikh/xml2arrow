@@ -173,7 +173,9 @@ pub enum ConfigIssue {
     /// exposes the parse as a single-schema `RecordBatchReader` — was invoked
     /// on a config with a different number of them. Structural tables (empty
     /// `fields`) don't count: they never produce output.
-    SingleTableRequired { output_tables: usize },
+    SingleTableRequired {
+        output_tables: usize,
+    },
 }
 
 // --- Display -----------------------------------------------------------------
