@@ -357,11 +357,21 @@ pub struct FieldConfig {
     /// The data type of the field. This determines the Arrow data type of the resulting column.
     pub data_type: DType,
     /// Whether the field is nullable (can contain null values). Defaults to false.
+    ///
+    /// A value is *missing* when the element/attribute is absent, empty, or
+    /// (for numeric and boolean fields) whitespace-only. When `nullable` is
+    /// `false`, a missing value raises `MissingRequiredField` — with one
+    /// long-standing exception: **`Utf8` fields append an empty string
+    /// instead of erroring** (pinned by
+    /// `test_missing_string_defaults_to_empty`; a per-field `missing` policy
+    /// is planned for the v2 config to make this declarable).
     #[serde(default)]
     pub nullable: bool,
-    /// Scale for decimal types.
+    /// Multiplier applied to `Float32`/`Float64` values:
+    /// `value = (value * scale) + offset`. Rejected on any other data type.
     pub scale: Option<f64>,
-    /// Offset for decimal types.
+    /// Constant added to `Float32`/`Float64` values *after* scaling:
+    /// `value = (value * scale) + offset`. Rejected on any other data type.
     pub offset: Option<f64>,
 }
 

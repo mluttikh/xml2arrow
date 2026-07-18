@@ -67,7 +67,8 @@ tables:
                                # (e.g. /library/book/@id)
         data_type: <type>      # Arrow data type — see supported types below
         nullable: <true|false> # Whether the field can be null (default: false)
-                               # If false, missing/empty tags cause a ParseError.
+                               # If false, a missing/empty value is an error —
+                               # except Utf8 fields, which yield "" (see below)
         scale: <number>        # Multiply float values by this factor (optional)
         offset: <number>       # Add this value to float values after scaling (optional)
                                # value = (value * scale) + offset
@@ -78,6 +79,14 @@ tables:
 
 `Boolean` fields accept (case-insensitively): `true`, `false`, `1`, `0`, `yes`,
 `no`, `on`, `off`, `t`, `f`, `y`, `n`.
+
+**Whitespace and missing values:** numeric and boolean values may be surrounded
+by whitespace (`<v> 42 </v>`, `age=" 30 "`) regardless of the `trim_text`
+setting; a whitespace-only or empty value counts as *missing* — null when the
+field is `nullable`, an error otherwise. Trailing garbage after a number
+(`30 units`, `1.5` for an integer field) is a parse error, never a silent
+truncation. One exception to the missing-value rule: a missing non-nullable
+`Utf8` field yields an empty string `""` rather than an error.
 
 ### 2. Nested tables and `levels`
 
