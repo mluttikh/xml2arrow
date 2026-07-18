@@ -38,6 +38,7 @@ xml2arrow = "0.18.0"
 - 🎯 **Type conversion** including automatic scale and offset transforms for float fields
 - 💡 **Attribute and element extraction** using `@`-prefixed path segments for attributes
 - ⏹️ **Early termination** via `stop_at_paths` for efficiently reading only part of a file
+- 🌊 **Bounded-memory streaming** for documents larger than RAM — batched output via `parse_batches`, with a `RecordBatchReader` adapter for single-table configs
 
 ## Usage
 
@@ -194,6 +195,74 @@ readers and `parser.parse_slice(&xml)` for in-memory byte slices. Each call
 allocates fresh Arrow builders, so batches from one document never leak into the
 next. The amortization matters most for small documents, where setup would
 otherwise dominate; for a single large file the win is negligible.
+
+#### Streaming documents too large for memory
+
+`parse_xml` and `parser.parse` read the input incrementally, but they
+accumulate *all* rows into one `RecordBatch` per table — peak memory grows
+with the dataset. For documents that don't fit in memory (multi-GB data
+files, Wikipedia-style dumps), use `parser.parse_batches`: it yields each
+table's rows as a stream of batches, flushing whenever a table crosses a
+row-count or byte-size threshold, so memory stays bounded by the batch
+limits instead of the file size.
+
+```rust
+use xml2arrow::{BatchOptions, Config, Parser, TableBatch};
+
+let config = Config::from_yaml_file("config.yaml")?;
+let parser = Parser::new(&config)?;
+
+let file = std::io::BufReader::new(std::fs::File::open("huge.xml")?);
+for item in parser.parse_batches(file, BatchOptions::default()) {
+    let TableBatch { table, batch } = item?;
+    // e.g. append to a per-table Parquet writer
+    writers[&*table].write(&batch)?;
+}
+```
+
+Guarantees and behavior:
+
+- **Identical values**: concatenating a table's batches in yield order (e.g.
+  with `arrow::compute::concat_batches`) reproduces exactly what
+  `parser.parse` would have returned — including the `<level>` index columns,
+  which keep counting across batch boundaries.
+- Every batch of a table shares one schema, available up front (before
+  parsing anything) via `parser.schema("table_name")`. Yielded batches always
+  have at least one row; a table that matched nothing yields no batches.
+- `BatchOptions::default()` flushes at 8192 rows or 128 MiB of accumulated
+  value bytes per table, whichever comes first (the byte cap keeps huge text
+  columns clear of Arrow's 2 GiB per-`Utf8`-column limit). Tune with
+  `BatchOptions::default().with_max_rows_per_batch(n)` /
+  `.with_max_bytes_per_batch(n)`.
+- A parent table's row finalizes when its element *closes* — after its
+  children — so a child batch can reference a parent row that arrives in a
+  later batch of the parent table. Writing each table to its own sink (the
+  Parquet case) is unaffected.
+- Compressed input composes as a plain `BufRead` adapter (e.g. a
+  `bzip2::bufread::MultiBzDecoder` around the file for Wikipedia dumps) —
+  no crate support needed.
+
+Variants: `parser.parse_batches_slice(&xml, options)` is the zero-copy
+version for in-memory or memory-mapped input, and
+`parser.parse_streaming(reader, options, |table, batch| { ... })` is a
+callback-style wrapper.
+
+When the config defines exactly one table with fields — the common shape for
+huge documents — `parser.parse_single_table(reader, options)` exposes the
+parse as a standard `arrow::array::RecordBatchReader`, pluggable directly
+into `parquet::arrow::ArrowWriter` or DataFusion:
+
+```rust
+use arrow::array::RecordBatchReader;
+
+let reader = parser.parse_single_table(file, BatchOptions::default())?;
+let mut writer = parquet::arrow::ArrowWriter::try_new(
+    std::fs::File::create("out.parquet")?, reader.schema(), None)?;
+for batch in reader {
+    writer.write(&batch?)?;
+}
+writer.close()?;
+```
 
 ---
 
