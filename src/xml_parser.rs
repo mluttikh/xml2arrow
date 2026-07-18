@@ -5765,9 +5765,12 @@ mod tests {
                       data_type: Int32
             "#
         );
-        let err = parse_xml(r#"<data><row><v>   </v></row></data>"#.as_bytes(), &config)
-            .unwrap_err();
-        assert!(matches!(err, Error::MissingRequiredField { .. }), "got: {err}");
+        let err =
+            parse_xml(r#"<data><row><v>   </v></row></data>"#.as_bytes(), &config).unwrap_err();
+        assert!(
+            matches!(err, Error::MissingRequiredField { .. }),
+            "got: {err}"
+        );
     }
 
     #[rstest]
@@ -5816,7 +5819,12 @@ mod tests {
                       data_type: Int32
             "#,
         );
-        assert_array_values!(record_batches.get("t").unwrap(), "v", vec![-42i32], Int32Array);
+        assert_array_values!(
+            record_batches.get("t").unwrap(),
+            "v",
+            vec![-42i32],
+            Int32Array
+        );
 
         let config = config_from_yaml!(
             r#"
@@ -5830,8 +5838,11 @@ mod tests {
                       data_type: Int32
             "#
         );
-        let err = parse_xml(b"<data><row><v>99999999999</v></row></data>".as_slice(), &config)
-            .unwrap_err();
+        let err = parse_xml(
+            b"<data><row><v>99999999999</v></row></data>".as_slice(),
+            &config,
+        )
+        .unwrap_err();
         assert!(matches!(err, Error::ParseError { .. }), "got: {err}");
         assert!(err.to_string().contains("too large"), "got: {err}");
     }
@@ -5852,8 +5863,8 @@ mod tests {
                       data_type: Int32
             "#
         );
-        let err = parse_xml(r#"<data><row><v> 3x </v></row></data>"#.as_bytes(), &config)
-            .unwrap_err();
+        let err =
+            parse_xml(r#"<data><row><v> 3x </v></row></data>"#.as_bytes(), &config).unwrap_err();
         assert!(matches!(err, Error::ParseError { .. }), "got: {err}");
         assert!(err.to_string().contains("' 3x '"), "got: {err}");
     }
