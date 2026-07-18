@@ -362,9 +362,7 @@ pub struct FieldConfig {
     /// (for numeric and boolean fields) whitespace-only. When `nullable` is
     /// `false`, a missing value raises `MissingRequiredField` — with one
     /// long-standing exception: **`Utf8` fields append an empty string
-    /// instead of erroring** (pinned by
-    /// `test_missing_string_defaults_to_empty`; a per-field `missing` policy
-    /// is planned for the v2 config to make this declarable).
+    /// instead of erroring**.
     #[serde(default)]
     pub nullable: bool,
     /// Multiplier applied to `Float32`/`Float64` values:

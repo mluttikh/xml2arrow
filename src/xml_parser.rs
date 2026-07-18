@@ -188,7 +188,7 @@ fn parse_boolean_token(value: &[u8]) -> std::result::Result<Option<bool>, ()> {
 /// message — this path only runs when parsing fails, so the extra UTF-8 check
 /// is free for the hot case.
 ///
-/// Surrounding ASCII whitespace is ignored (S1): data XML routinely
+/// Surrounding ASCII whitespace is ignored: data XML routinely
 /// pretty-prints values, `trim_text` never covers attributes, and the boolean
 /// path already trims — numerics matching it makes whitespace tolerance
 /// uniform. `trim_ascii` is a zero-copy subslice; for already-clean values
@@ -5689,7 +5689,7 @@ mod tests {
         assert_array_values!(batch, "v", vec![1i32, 2], Int32Array);
     }
 
-    // --- S1: numeric whitespace tolerance + C6: digit-prefix truncation ---
+    // --- Numeric parsing: whitespace tolerance & rejection of trailing garbage ---
 
     #[test]
     fn test_numeric_values_tolerate_surrounding_whitespace() {
