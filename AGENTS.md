@@ -12,7 +12,7 @@
   (columnar builders), optional `pyo3` (the Python bindings live in a separate
   repo, `xml2arrow-python`, but share the error mapping in this crate).
 - **Configuration:** a YAML-driven `Config` maps XML paths to Arrow tables and
-  fields. Known follow-up work is tracked in `IMPROVEMENTS.md`.
+  fields.
 
 **Core philosophy:**
 - **Allocation-free hot path:** the event loop must not allocate.
