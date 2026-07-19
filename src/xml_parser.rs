@@ -2425,6 +2425,8 @@ mod tests {
     }
 
     #[test]
+    // 3.14 and 2.718… are arbitrary fixture values, not approximations of π/e.
+    #[allow(clippy::approx_constant)]
     fn test_all_numeric_dtypes_parsed_correctly() {
         let xml_content = r#"
         <data>
@@ -5057,6 +5059,8 @@ mod tests {
     }
 
     #[test]
+    // 3.14 is an arbitrary fixture value, not an approximation of π.
+    #[allow(clippy::approx_constant)]
     fn test_empty_element_float64_nullable_produces_null() {
         let xml_content = r#"
         <data>
