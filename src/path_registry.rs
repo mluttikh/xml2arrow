@@ -8,7 +8,8 @@
 // Design overview (top-down narrative):
 //
 // 1) Build-time: PathRegistry::from_config
-//    - Convert every table path and field path into a trie of interned atoms.
+//    - Convert every table path and field path into a trie whose edges are
+//      path segments stored as raw bytes.
 //    - Store table/field metadata at the terminal node of each path.
 //    - Use integer IDs so lookups are array indexing rather than hash maps.
 //
@@ -18,8 +19,8 @@
 //      If the current path is not in the registry, mark the subtree as unknown
 //      to skip further lookups until we pop back out.
 //
-// This design intentionally favors predictable O(1) operations during parsing
-// over upfront construction work at startup.
+// This design intentionally accepts upfront construction work at startup in
+// exchange for predictable, allocation-free lookups during parsing.
 
 use fxhash::FxHashMap;
 
@@ -84,7 +85,7 @@ impl PathNodeInfo {
 
 /// Registry for efficient path lookups during XML parsing.
 ///
-/// The registry compiles all configured XML paths into a trie of interned strings (`Atom`).
+/// The registry compiles all configured XML paths into a trie keyed by path-segment bytes.
 /// Each node in the trie is assigned a compact integer ID (`PathNodeId`), allowing the parser
 /// to operate entirely on IDs using direct array indexing, avoiding string hashing in the hot loop.
 ///
@@ -350,10 +351,10 @@ struct StackEntry {
 /// root, so the stack is never empty.
 ///
 /// Each frame carries the few bits the parser needs at `Event::End` /
-/// `Event::Empty` time (is_table, is_known). The previous design kept those
-/// in a parallel `element_stack` plus a separate `node_info[]` lookup at
-/// close time; folding them onto this stack saves a Vec push/pop and a
-/// cache-line read per element.
+/// `Event::Empty` time (`is_table`, `is_known`), captured once when `enter()`
+/// resolves the node. Closing an element therefore never re-reads
+/// `node_info[]` — a single stack pop answers both "was this a table?" and
+/// (via the new top) "does the parent finalize a row?".
 ///
 /// If a path is unknown, we keep pushing "unknown" placeholder frames until
 /// we exit that subtree. This avoids repeated registry lookups for

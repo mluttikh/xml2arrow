@@ -187,13 +187,31 @@ fn parse_boolean_token(value: &[u8]) -> std::result::Result<Option<bool>, ()> {
 /// the underlying `IntErrorKind` (overflow, invalid digit, etc.) in the error
 /// message — this path only runs when parsing fails, so the extra UTF-8 check
 /// is free for the hot case.
+///
+/// Surrounding ASCII whitespace is ignored: data XML routinely
+/// pretty-prints values, `trim_text` never covers attributes, and the boolean
+/// path already trims — numerics matching it makes whitespace tolerance
+/// uniform. `trim_ascii` is a zero-copy subslice; for already-clean values
+/// both scans terminate on the first byte, so the hot path pays two
+/// predictable compares. A whitespace-only value counts as *missing* (null
+/// when nullable, `MissingRequiredField` otherwise), exactly like boolean.
+/// The `ParseError` for genuinely bad text keeps the raw untrimmed value so
+/// diagnostics show what the document actually contained.
 macro_rules! append_int {
-    ($builder:expr, $value:expr, $has_value:expr, $field_config:expr, $ty:ty, $type_name:expr) => {
-        if $has_value {
-            match atoi::atoi::<$ty>($value) {
-                Some(val) => $builder.append_value(val),
-                None => {
-                    let as_str = std::str::from_utf8($value).unwrap_or("");
+    ($builder:expr, $value:expr, $has_value:expr, $field_config:expr, $ty:ty, $type_name:expr) => {{
+        let trimmed = $value.trim_ascii();
+        if $has_value && !trimmed.is_empty() {
+            // NOT `atoi::atoi`: that parses the longest digit *prefix* and
+            // silently discards the rest — "3x" became 3 and "1.5" became 1.
+            // The checked radix-10 primitive reports how many bytes it
+            // consumed, so requiring full consumption rejects trailing
+            // garbage while keeping the digits-only fast path branch-free.
+            // Overflow (None with bytes consumed) and every partial match
+            // fall through to `str::parse` purely for its precise error.
+            match <$ty as atoi::FromRadix10SignedChecked>::from_radix_10_signed_checked(trimmed) {
+                (Some(val), used) if used == trimmed.len() => $builder.append_value(val),
+                _ => {
+                    let as_str = std::str::from_utf8(trimmed).unwrap_or("");
                     match as_str.parse::<$ty>() {
                         Ok(val) => $builder.append_value(val),
                         Err(e) => {
@@ -218,7 +236,7 @@ macro_rules! append_int {
                 path: Arc::from($field_config.xml_path.as_str()),
             });
         }
-    };
+    }};
 }
 
 /// Helper macro for parsing and appending float values using `fast_float2`.
@@ -228,10 +246,14 @@ macro_rules! append_int {
 /// it avoids two memory loads + branches per value in the (very common) case
 /// where neither transform is configured. `scale as $ty` is a no-op for `f64`
 /// and a truncating cast for `f32`.
+///
+/// Whitespace handling mirrors `append_int!` (see its doc): surrounding ASCII
+/// whitespace is ignored, whitespace-only counts as missing.
 macro_rules! append_float {
-    ($builder:expr, $value:expr, $has_value:expr, $field_config:expr, $has_transform:expr, $ty:ty, $type_name:expr) => {
-        if $has_value {
-            match fast_float2::parse::<$ty, _>($value) {
+    ($builder:expr, $value:expr, $has_value:expr, $field_config:expr, $has_transform:expr, $ty:ty, $type_name:expr) => {{
+        let trimmed = $value.trim_ascii();
+        if $has_value && !trimmed.is_empty() {
+            match fast_float2::parse::<$ty, _>(trimmed) {
                 Ok(mut val) => {
                     if $has_transform {
                         #[allow(clippy::cast_possible_truncation)]
@@ -265,7 +287,7 @@ macro_rules! append_float {
                 path: Arc::from($field_config.xml_path.as_str()),
             });
         }
-    };
+    }};
 }
 
 impl FieldBuilder {
@@ -370,7 +392,7 @@ impl FieldBuilder {
 // === Table-level batching ===
 // A TableBuilder owns per-field builders plus index builders for nested levels.
 // It finalizes rows into a RecordBatch in a single, ordered pass.
-///
+
 /// The subset of a `TableConfig` that finalization needs.
 ///
 /// `TableBuilder` used to hold a full `TableConfig` clone (including the
@@ -498,11 +520,8 @@ struct TableStackEntry {
     node_id: PathNodeId,
 }
 
-/// Converts parsed XML events into Arrow `RecordBatch`es.
-///
-/// This struct maintains a stack of table builders to handle nested XML structures.
-/// It uses integer-based path indexing via `PathRegistry` for efficient lookups.
-/// The mutable, per-parse half of the conversion.
+/// Converts parsed XML events into Arrow `RecordBatch`es — the mutable,
+/// per-parse half of the conversion.
 ///
 /// Everything here holds parse-specific state (the Arrow builders that
 /// accumulate values, the active table stack, scratch buffers) and so must be
@@ -876,9 +895,9 @@ impl Parser {
 /// `Config`, construct a [`Parser`] once and reuse it — that amortizes the
 /// one-time path-compilation cost this wrapper pays on every call.
 ///
-/// This function takes a reader implementing the `BufRead` trait (e.g., a `File`, `&[u8]`, or `String`)
-/// and a `Config` struct that defines the structure of the XML data and how it should be mapped
-/// to Arrow tables.
+/// This function takes a reader implementing the `BufRead` trait (e.g., a
+/// `BufReader<File>` or a `&[u8]` slice) and a `Config` struct that defines the
+/// structure of the XML data and how it should be mapped to Arrow tables.
 ///
 /// # Arguments
 ///
@@ -889,8 +908,8 @@ impl Parser {
 ///
 /// A `Result` containing:
 ///
-/// *   `Ok(IndexMap<String, RecordBatch>)`: An `IndexMap` where keys are the XML names of the tables (as defined in the config)
-///     and values are the corresponding Arrow `RecordBatch` objects.
+/// *   `Ok(IndexMap<String, RecordBatch>)`: An `IndexMap` where keys are the table names (as defined
+///     in the config) and values are the corresponding Arrow `RecordBatch` objects.
 /// *   `Err(Error)`: An `Error` value if any error occurs during parsing, configuration, or Arrow table creation.
 ///
 /// # Errors
@@ -1220,9 +1239,9 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
         }
         Event::End(_) => {
             // Read this element's own (node_id, is_table) from the top of
-            // the merged stack BEFORE close_element pops it via leave().
-            // peek_top() returns None when the stack is at root, matching
-            // the prior "End with empty element_stack ⇒ no-op" behavior.
+            // the path-tracker stack BEFORE close_element pops it via
+            // leave(). peek_top() returns None at root depth, so a stray
+            // End with no matching open element is a no-op.
             if let Some((node_id_opt, is_table)) = path_tracker.peek_top() {
                 return close_element(
                     node_id_opt,
@@ -5665,5 +5684,185 @@ mod tests {
         );
         let batch = record_batches.get("t").unwrap();
         assert_array_values!(batch, "v", vec![1i32, 2], Int32Array);
+    }
+
+    // --- Numeric parsing: whitespace tolerance & rejection of trailing garbage ---
+
+    #[test]
+    fn test_numeric_values_tolerate_surrounding_whitespace() {
+        // Elements with trim_text at its default (off) AND attributes (which
+        // trim_text never covers) both parse: numeric whitespace handling no
+        // longer depends on the global reader option, matching the boolean
+        // path's long-standing behavior.
+        let record_batches = parse(
+            "<data><row attr=\" 7 \"><i>\t 42 \n</i><f> 3.5 </f></row></data>",
+            r#"
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: attr
+                      xml_path: /data/row/@attr
+                      data_type: Int32
+                    - name: i
+                      xml_path: /data/row/i
+                      data_type: Int64
+                    - name: f
+                      xml_path: /data/row/f
+                      data_type: Float64
+            "#,
+        );
+        let batch = record_batches.get("t").unwrap();
+        assert_array_values!(batch, "attr", vec![7i32], Int32Array);
+        assert_array_values!(batch, "i", vec![42i64], Int64Array);
+        assert_array_values!(batch, "f", vec![3.5f64], Float64Array);
+    }
+
+    #[test]
+    fn test_whitespace_only_numeric_is_null_when_nullable() {
+        // Whitespace-only counts as *missing*, exactly like the boolean path
+        // — not as a parse error.
+        let record_batches = parse(
+            r#"<data><row><v>   </v><f>  </f></row></data>"#,
+            r#"
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: v
+                      xml_path: /data/row/v
+                      data_type: Int32
+                      nullable: true
+                    - name: f
+                      xml_path: /data/row/f
+                      data_type: Float32
+                      nullable: true
+            "#,
+        );
+        let batch = record_batches.get("t").unwrap();
+        assert_array_values_option!(batch, "v", vec![None::<i32>], Int32Array);
+        assert_array_values_option!(batch, "f", vec![None::<f32>], Float32Array);
+    }
+
+    #[test]
+    fn test_whitespace_only_numeric_errors_as_missing_when_non_nullable() {
+        // Non-nullable + whitespace-only must surface as MissingRequiredField
+        // (a config problem: mark it nullable), not as a number-parse error.
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: v
+                      xml_path: /data/row/v
+                      data_type: Int32
+            "#
+        );
+        let err =
+            parse_xml(r#"<data><row><v>   </v></row></data>"#.as_bytes(), &config).unwrap_err();
+        assert!(
+            matches!(err, Error::MissingRequiredField { .. }),
+            "got: {err}"
+        );
+    }
+
+    #[rstest]
+    #[case::trailing_letter("3x")]
+    #[case::trailing_words("30 units")]
+    #[case::decimal_point("1.5")]
+    #[case::internal_space("1 2")]
+    fn test_digit_prefixed_garbage_errors_instead_of_truncating(#[case] value: &str) {
+        // Regression: `atoi::atoi` parses the longest digit *prefix*, so all
+        // of these silently truncated ("3x" → 3, "1.5" → 1) before the
+        // full-consumption check. They must be parse errors.
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: v
+                      xml_path: /data/row/v
+                      data_type: Int32
+            "#
+        );
+        let xml = format!("<data><row><v>{value}</v></row></data>");
+        let err = parse_xml(xml.as_bytes(), &config).unwrap_err();
+        assert!(
+            matches!(err, Error::ParseError { .. }),
+            "value {value:?} must error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_signed_and_overflow_integers_after_checked_parse() {
+        // The checked-radix path must keep accepting signs and keep routing
+        // overflow through the fallback for its precise error message.
+        let record_batches = parse(
+            r#"<data><row><v> -42 </v></row></data>"#,
+            r#"
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: v
+                      xml_path: /data/row/v
+                      data_type: Int32
+            "#,
+        );
+        assert_array_values!(
+            record_batches.get("t").unwrap(),
+            "v",
+            vec![-42i32],
+            Int32Array
+        );
+
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: v
+                      xml_path: /data/row/v
+                      data_type: Int32
+            "#
+        );
+        let err = parse_xml(
+            b"<data><row><v>99999999999</v></row></data>".as_slice(),
+            &config,
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::ParseError { .. }), "got: {err}");
+        assert!(err.to_string().contains("too large"), "got: {err}");
+    }
+
+    #[test]
+    fn test_invalid_numeric_error_preserves_raw_untrimmed_value() {
+        // Parsing consumes the trimmed slice, but diagnostics must show what
+        // the document actually contained, whitespace included.
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: v
+                      xml_path: /data/row/v
+                      data_type: Int32
+            "#
+        );
+        let err =
+            parse_xml(r#"<data><row><v> 3x </v></row></data>"#.as_bytes(), &config).unwrap_err();
+        assert!(matches!(err, Error::ParseError { .. }), "got: {err}");
+        assert!(err.to_string().contains("' 3x '"), "got: {err}");
     }
 }
