@@ -11,14 +11,15 @@
 //! This means we front-load configuration validation and path compilation so the
 //! event loop can focus on direct indexing and appends.
 use std::io::BufRead;
+use std::iter::FusedIterator;
 use std::sync::Arc;
 
 use arrow::array::{
     Array, BooleanBuilder, Float32Builder, Float64Builder, Int8Builder, Int16Builder, Int32Builder,
-    Int64Builder, RecordBatch, StringBuilder, UInt8Builder, UInt16Builder, UInt32Builder,
-    UInt64Builder,
+    Int64Builder, RecordBatch, RecordBatchReader, StringBuilder, UInt8Builder, UInt16Builder,
+    UInt32Builder, UInt64Builder,
 };
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use indexmap::IndexMap;
 use quick_xml::Reader;
 use quick_xml::XmlVersion;
@@ -29,6 +30,7 @@ use quick_xml::events::{BytesRef, Event};
 
 use crate::Config;
 use crate::config::{DType, FieldConfig, TableConfig};
+use crate::errors::ConfigIssue;
 use crate::errors::Error;
 use crate::errors::ParseKind;
 use crate::errors::Result;
@@ -123,8 +125,6 @@ impl FieldMeta {
 struct FieldBuilder {
     /// The runtime-relevant subset of the field's configuration.
     meta: FieldMeta,
-    /// The Arrow field description
-    field: Field,
     /// The Arrow array builder used to construct the array (enum dispatch, no vtable).
     array_builder: TypedArrayBuilder,
     /// Indicates whether the builder has received any values for the current row.
@@ -293,15 +293,9 @@ macro_rules! append_float {
 impl FieldBuilder {
     fn new(field_config: &FieldConfig) -> Self {
         let array_builder = TypedArrayBuilder::from_dtype(field_config.data_type);
-        let field = Field::new(
-            &field_config.name,
-            field_config.data_type.as_arrow_type(),
-            field_config.nullable,
-        );
         let has_transform = field_config.scale.is_some() || field_config.offset.is_some();
         Self {
             meta: FieldMeta::from_config(field_config),
-            field,
             array_builder,
             has_value: false,
             has_transform,
@@ -402,7 +396,6 @@ impl FieldBuilder {
 struct TableMeta {
     name: String,
     xml_path: String,
-    levels: Vec<String>,
 }
 
 impl TableMeta {
@@ -410,7 +403,6 @@ impl TableMeta {
         Self {
             name: tc.name.clone(),
             xml_path: tc.xml_path.clone(),
-            levels: tc.levels.clone(),
         }
     }
 }
@@ -423,6 +415,11 @@ impl TableMeta {
 struct TableBuilder {
     /// The table's runtime-relevant metadata.
     meta: TableMeta,
+    /// The table's output schema (index columns + value columns), precomputed
+    /// once in `Parser::new` and shared by every batch this builder emits —
+    /// streamed batches of one table must be schema-identical, and consumers
+    /// (e.g. `RecordBatchReader::schema`) rely on pointer-shared equality.
+    schema: Arc<Schema>,
     // Builders for the parent row indices, used for representing nested tables.
     index_builders: Vec<UInt32Builder>,
     /// Builders for each field in the table, indexed by field position.
@@ -432,11 +429,31 @@ struct TableBuilder {
     /// This increments every time `save_row` is called. Critically, this value
     /// is also read by any ACTIVE CHILD TABLES on the stack to populate their
     /// parent index columns (the foreign keys defined in `levels`).
+    ///
+    /// NOT reset by `flush()`: it counts rows within the current table
+    /// *scope*, not within the current batch. Resetting it on flush would
+    /// corrupt the foreign keys of child rows finalized after the flush.
     row_index: usize,
+    /// Rows finalized into the array builders since the last `flush()`.
+    /// Always 0 for structural tables (empty `fields`), which never emit.
+    rows_in_batch: usize,
+    /// Raw field-value bytes accumulated since the last `flush()`, summed
+    /// across all of a table's fields (one add per field per row). This is a
+    /// cheap *approximation* of the batch's heap footprint, not an exact
+    /// accounting: it counts only the raw value bytes, ignoring the fixed
+    /// per-row overhead every column carries regardless of value size (Arrow
+    /// offset buffers, validity bitmaps, the fixed-width value and `<level>`
+    /// FK columns). It therefore under-counts total builder memory for rows
+    /// whose values are short, empty, or null — so `max_rows_per_batch`, not
+    /// the byte budget, is the true bound on builder memory. Its purpose is
+    /// narrower: capping accumulated Utf8 bytes so a `StringBuilder`'s
+    /// i32-offset 2 GiB ceiling is not reached across many normal rows (see
+    /// `MAX_BATCH_BYTES_CEILING`).
+    bytes_in_batch: usize,
 }
 
 impl TableBuilder {
-    fn new(table_config: &TableConfig) -> Self {
+    fn new(table_config: &TableConfig, schema: Arc<Schema>) -> Self {
         let mut index_builders = Vec::with_capacity(table_config.levels.len());
         index_builders.resize_with(table_config.levels.len(), UInt32Builder::default);
         let mut field_builders = Vec::with_capacity(table_config.fields.len());
@@ -445,9 +462,12 @@ impl TableBuilder {
         }
         Self {
             meta: TableMeta::from_config(table_config),
+            schema,
             index_builders,
             field_builders,
             row_index: 0,
+            rows_in_batch: 0,
+            bytes_in_batch: 0,
         }
     }
 
@@ -470,17 +490,30 @@ impl TableBuilder {
     }
 
     fn save_row(&mut self, indices: &[u32]) -> Result<()> {
-        // 1. Write the parent foreign keys.
-        // The `indices` slice contains the row_index of each ancestor table,
-        // in order of hierarchy. These align 1:1 with the `levels` defined
-        // in this table's configuration.
-        for (index, index_builder) in indices.iter().zip(&mut self.index_builders) {
-            index_builder.append_value(*index);
-        }
+        // Structural tables (empty `fields`) exist only to feed their
+        // `row_index` counter to child tables; they are skipped by every
+        // emission path. Appending their index values would grow builders
+        // nobody ever reads — under streaming, where all *output* tables
+        // flush periodically, that would be the one unbounded allocation.
+        // Only the `row_index` advance below is observable for them.
+        if !self.field_builders.is_empty() {
+            // 1. Write the parent foreign keys.
+            // The `indices` slice contains the row_index of each ancestor table,
+            // in order of hierarchy. These align 1:1 with the `levels` defined
+            // in this table's configuration.
+            for (index, index_builder) in indices.iter().zip(&mut self.index_builders) {
+                index_builder.append_value(*index);
+            }
 
-        // 2. Write the actual field values for this table.
-        for field_builder in &mut self.field_builders {
-            field_builder.append_current_value()?;
+            // 2. Write the actual field values for this table.
+            let mut row_bytes = 0usize;
+            for field_builder in &mut self.field_builders {
+                row_bytes += field_builder.current_value.len();
+                field_builder.append_current_value()?;
+            }
+
+            self.rows_in_batch += 1;
+            self.bytes_in_batch = self.bytes_in_batch.saturating_add(row_bytes);
         }
 
         // 3. Advance this table's primary key.
@@ -488,26 +521,31 @@ impl TableBuilder {
         Ok(())
     }
 
-    fn finish(&mut self) -> Result<RecordBatch> {
+    /// Finishes the accumulated rows into a `RecordBatch` and resets the
+    /// array builders (Arrow's `finish()` contract) so accumulation can
+    /// continue into the next batch. `row_index` is deliberately untouched —
+    /// see its field doc; flushing is *value-transparent*: concatenating all
+    /// batches a table emits yields exactly the single batch a non-streaming
+    /// parse would have produced.
+    fn flush(&mut self) -> Result<RecordBatch> {
         let num_arrays = self.field_builders.len() + self.index_builders.len();
         let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(num_arrays);
-        let mut fields: Vec<Field> = Vec::with_capacity(num_arrays);
-        for (level, index_builder) in self.meta.levels.iter().zip(&mut self.index_builders) {
+        for index_builder in &mut self.index_builders {
             arrays.push(Arc::new(index_builder.finish()));
-            fields.push(Field::new(format!("<{level}>"), DataType::UInt32, false));
         }
         for field_builder in &mut self.field_builders {
-            let array = field_builder.finish();
-            arrays.push(array);
-            fields.push(field_builder.field.clone());
+            arrays.push(field_builder.finish());
         }
-        let schema = Schema::new(fields);
-        Ok(RecordBatch::try_new(Arc::new(schema), arrays).map_err(|e| {
-            arrow::error::ArrowError::InvalidArgumentError(format!(
-                "Failed to create RecordBatch for table with name {} and XML path {}: {}",
-                self.meta.name, self.meta.xml_path, e
-            ))
-        })?)
+        self.rows_in_batch = 0;
+        self.bytes_in_batch = 0;
+        Ok(
+            RecordBatch::try_new(self.schema.clone(), arrays).map_err(|e| {
+                arrow::error::ArrowError::InvalidArgumentError(format!(
+                    "Failed to create RecordBatch for table with name {} and XML path {}: {}",
+                    self.meta.name, self.meta.xml_path, e
+                ))
+            })?,
+        )
     }
 }
 
@@ -548,30 +586,76 @@ struct XmlToArrowConverter<'a> {
     /// prefix); when `false`, the raw qualified `name()` is used, skipping the
     /// per-name `:` scan. Cached here so the hot path reads a plain `bool`.
     strip_namespaces: bool,
+    /// Per-batch flush thresholds (rows / raw value bytes). The
+    /// collect-everything entry points pass `usize::MAX`, so the two per-row
+    /// comparisons in `end_current_row` are always-false, perfectly
+    /// predicted branches there.
+    max_rows_per_batch: usize,
+    max_bytes_per_batch: usize,
+    /// Set by `end_current_row` when the just-finalized row pushed its table
+    /// over a batch threshold. The streaming loop takes it and flushes that
+    /// table; the collect loops never observe it set (thresholds are MAX).
+    /// At most one table can become pending per event, because each event
+    /// finalizes at most one row.
+    pending_flush: Option<usize>,
 }
+
+/// Upper bound applied to `max_bytes_per_batch`: a `StringBuilder` addresses
+/// its value buffer with i32 offsets, so a single Utf8 column cannot exceed
+/// `i32::MAX` bytes. Since `bytes_in_batch` sums all fields, keeping the whole
+/// budget at or below this ceiling keeps every individual Utf8 column under
+/// its offset limit across the many-normal-rows case. It does *not* rescue a
+/// single value that is itself ≥ 2 GiB — that overflows the column on append,
+/// before any row-boundary flush check can fire (the same limitation the
+/// non-streaming path has always had).
+const MAX_BATCH_BYTES_CEILING: usize = i32::MAX as usize;
 
 impl<'a> XmlToArrowConverter<'a> {
     /// Builds the fresh per-parse state from an already-compiled [`Parser`].
     ///
     /// This is the only work that *must* happen on every document: allocating
     /// the Arrow builders that will hold the parsed values. The expensive setup
-    /// (config validation, path-trie construction) was already done once in
-    /// [`Parser::new`], so this stays cheap even for tiny documents.
-    fn new(parser: &'a Parser) -> Self {
+    /// (config validation, path-trie construction, schema construction) was
+    /// already done once in [`Parser::new`], so this stays cheap even for tiny
+    /// documents.
+    ///
+    /// The row threshold is clamped to at least 1 so a zero value can never
+    /// emit empty batches (a yielded batch always has ≥ 1 row). The byte
+    /// threshold is likewise clamped into `1..=MAX_BATCH_BYTES_CEILING`, so a
+    /// caller cannot raise it past the point where accumulated Utf8 bytes would
+    /// overflow a `StringBuilder`'s i32 offsets.
+    fn new(parser: &'a Parser, max_rows_per_batch: usize, max_bytes_per_batch: usize) -> Self {
         let config = &parser.config;
         let mut table_builders = Vec::with_capacity(config.tables.len());
-        for table_config in &config.tables {
-            table_builders.push(TableBuilder::new(table_config));
+        for (table_config, schema) in config.tables.iter().zip(&parser.table_schemas) {
+            table_builders.push(TableBuilder::new(table_config, schema.clone()));
         }
 
-        Self {
+        let mut converter = Self {
             table_builders,
             builder_stack: Vec::new(),
             registry: &parser.registry,
             parent_indices_buffer: Vec::new(),
             validate_attributes: config.parser_options.validate_attributes,
             strip_namespaces: config.parser_options.strip_namespaces,
+            max_rows_per_batch: max_rows_per_batch.max(1),
+            max_bytes_per_batch: max_bytes_per_batch.clamp(1, MAX_BATCH_BYTES_CEILING),
+            pending_flush: None,
+        };
+
+        // Start the root-level table (xml_path: /) if it exists AND has fields
+        // defined. We only start it if it has fields, because adding it to the
+        // builder_stack would affect parent_row_indices for all nested tables,
+        // breaking their level indexing. Tables with xml_path: / and no fields
+        // are just used for hierarchy purposes and don't need to be on the stack.
+        if let Some(table_idx) = parser.registry.get_table_index(PathNodeId::ROOT)
+            && !converter.table_builders[table_idx]
+                .field_builders
+                .is_empty()
+        {
+            converter.start_table(table_idx, PathNodeId::ROOT);
         }
+        converter
     }
 
     /// Sets a field value for the current table using path node information.
@@ -626,6 +710,17 @@ impl<'a> XmlToArrowConverter<'a> {
         Ok(())
     }
 
+    /// Builds the `RowIndexOverflow` error for `end_current_row`. Out of
+    /// line and cold, like `duplicate_value_error`, so the checked cast in
+    /// the per-row path stays a bare compare.
+    #[cold]
+    #[inline(never)]
+    fn row_index_overflow_error(&self, table_idx: usize) -> Error {
+        Error::RowIndexOverflow {
+            table: Arc::from(self.table_builders[table_idx].meta.name.as_str()),
+        }
+    }
+
     /// Builds the `DuplicateValue` error for `check_element_not_repeated`.
     /// Out of line and cold so the check above stays a bare `has_value`
     /// branch in the per-element hot path; the allocations here only run
@@ -668,12 +763,29 @@ impl<'a> XmlToArrowConverter<'a> {
             if entry.node_id == PathNodeId::ROOT {
                 continue;
             }
-            #[allow(clippy::cast_possible_truncation)] // Row count won't exceed u32::MAX
-            self.parent_indices_buffer
-                .push(self.table_builders[entry.table_idx].row_index as u32);
+            // Checked, not `as`: the streaming entry points removed the
+            // memory ceiling that used to make >u32::MAX rows per scope
+            // unreachable, and a wrapped foreign key would silently link
+            // child rows to the wrong parents. The happy path is a single
+            // predictable compare per ancestor.
+            let row_index = self.table_builders[entry.table_idx].row_index;
+            let Ok(index) = u32::try_from(row_index) else {
+                return Err(self.row_index_overflow_error(entry.table_idx));
+            };
+            self.parent_indices_buffer.push(index);
         }
         if let Some(entry) = self.builder_stack.last() {
-            self.table_builders[entry.table_idx].end_row(&self.parent_indices_buffer)?;
+            let table_idx = entry.table_idx;
+            let table = &mut self.table_builders[table_idx];
+            table.end_row(&self.parent_indices_buffer)?;
+            // Batch-threshold check, on the only path where a row finalizes.
+            // Structural tables keep `rows_in_batch == 0`, so they can never
+            // trip this even with tiny thresholds.
+            if table.rows_in_batch >= self.max_rows_per_batch
+                || table.bytes_in_batch >= self.max_bytes_per_batch
+            {
+                self.pending_flush = Some(table_idx);
+            }
         }
         Ok(())
     }
@@ -699,7 +811,7 @@ impl<'a> XmlToArrowConverter<'a> {
         let mut record_batches = IndexMap::new();
         for table_builder in &mut self.table_builders {
             if !table_builder.field_builders.is_empty() {
-                let record_batch = table_builder.finish()?;
+                let record_batch = table_builder.flush()?;
                 record_batches.insert(table_builder.meta.name.clone(), record_batch);
             }
         }
@@ -751,6 +863,34 @@ pub struct Parser {
     /// Whether any configured field maps to an attribute. Cached so the hot
     /// path can pick the attribute-free event loop without re-scanning config.
     needs_attrs: bool,
+    /// Per-table output schemas (index columns + value columns), aligned with
+    /// `config.tables`. Computed once here so every batch a table emits —
+    /// streamed or collected — shares one `Arc<Schema>`, and so
+    /// [`Parser::schema`] can serve consumers (IPC writers, DataFusion
+    /// registration) before any document is parsed.
+    table_schemas: Vec<Arc<Schema>>,
+    /// Table names as shared strings, aligned with `config.tables`. Streamed
+    /// [`TableBatch`]es carry a clone; `Arc<str>` keeps that per-batch cost
+    /// to a refcount bump.
+    table_names: Vec<Arc<str>>,
+}
+
+/// Builds a table's output schema exactly as its batches are laid out:
+/// one non-nullable `UInt32` index column per `levels` entry (named
+/// `<level>`), followed by the configured fields in order.
+fn build_table_schema(table_config: &TableConfig) -> Schema {
+    let mut fields = Vec::with_capacity(table_config.levels.len() + table_config.fields.len());
+    for level in &table_config.levels {
+        fields.push(Field::new(format!("<{level}>"), DataType::UInt32, false));
+    }
+    for fc in &table_config.fields {
+        fields.push(Field::new(
+            &fc.name,
+            fc.data_type.as_arrow_type(),
+            fc.nullable,
+        ));
+    }
+    Schema::new(fields)
 }
 
 impl Parser {
@@ -775,12 +915,60 @@ impl Parser {
             .filter_map(|path| registry.resolve_path(path))
             .collect::<Vec<_>>();
 
+        let table_schemas = config
+            .tables
+            .iter()
+            .map(|tc| Arc::new(build_table_schema(tc)))
+            .collect();
+        let table_names = config
+            .tables
+            .iter()
+            .map(|tc| Arc::from(tc.name.as_str()))
+            .collect();
+
         Ok(Self {
             config: config.clone(),
             registry,
             stop_node_ids,
             needs_attrs: config.requires_attribute_parsing(),
+            table_schemas,
+            table_names,
         })
+    }
+
+    /// Returns the output schema of `table` without parsing any document.
+    ///
+    /// The schema is fully determined by the [`Config`]: one non-nullable
+    /// `UInt32` index column per `levels` entry (named `<level>`), followed by
+    /// the configured fields. Every batch the table produces — via
+    /// [`Parser::parse`] or the streaming entry points — shares this exact
+    /// `Arc<Schema>`.
+    ///
+    /// Returns `None` for unknown table names and for *structural* tables
+    /// (empty `fields`), which never appear in any output.
+    #[must_use]
+    pub fn schema(&self, table: &str) -> Option<SchemaRef> {
+        self.config
+            .tables
+            .iter()
+            .position(|tc| tc.name == table && !tc.fields.is_empty())
+            .map(|idx| self.table_schemas[idx].clone())
+    }
+
+    /// Returns the schema of the config's unique output table — the table
+    /// that [`Parser::parse_single_table`] streams.
+    ///
+    /// Consumers wiring the single-table stream into schema-first sinks
+    /// (Parquet writers, Arrow C-stream exports for Python) need this before
+    /// constructing the reader; exposing it here keeps the "exactly one
+    /// output table" rule and its error in one place.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfig`] when the config does not have exactly
+    /// one table with fields, exactly like [`Parser::parse_single_table`].
+    pub fn single_table_schema(&self) -> Result<SchemaRef> {
+        Ok(self.table_schemas[self.single_output_table_index()?].clone())
     }
 
     /// Parses XML from a streaming reader (e.g. a `File`) into Arrow batches.
@@ -824,6 +1012,179 @@ impl Parser {
         })
     }
 
+    /// Parses XML from a streaming reader, yielding Arrow batches
+    /// incrementally with bounded memory.
+    ///
+    /// This is the entry point for documents too large to hold in memory as
+    /// one set of Arrow tables (multi-GB data files, Wikipedia-style dumps).
+    /// The returned [`BatchStream`] is an
+    /// `Iterator<Item = Result<TableBatch>>`: each item names the table it
+    /// belongs to and carries a batch of its rows. A table's batch is emitted
+    /// whenever it crosses one of the [`BatchOptions`] thresholds, and the
+    /// remainder is drained when the document ends (or a
+    /// `stop_at_paths` match stops it early).
+    ///
+    /// Guarantees:
+    ///
+    /// - **Value transparency**: concatenating a table's batches in yield
+    ///   order (e.g. `arrow::compute::concat_batches`) produces exactly the
+    ///   `RecordBatch` that [`Parser::parse`] would have returned for it —
+    ///   including the `<level>` index columns.
+    /// - Batches of one table share one `Arc<Schema>`, equal to
+    ///   [`Parser::schema`], and always contain at least one row (tables with
+    ///   no rows yield nothing — use [`Parser::schema`] when a sink needs a
+    ///   schema up front).
+    /// - Within a table, rows appear in document order across batches. No
+    ///   ordering promise across tables; note that a parent table's row
+    ///   always finalizes *after* its children's rows (its element closes
+    ///   last), so a child batch can reference a parent row that arrives in
+    ///   a later batch of the parent table.
+    /// - On error the stream yields the `Err` once and then fuses;
+    ///   already-yielded batches remain valid.
+    ///
+    /// The `<level>` caveat from the non-streaming API carries over
+    /// unchanged: index values are per-scope ordinals, so incremental joins
+    /// must match on all level columns (see the `levels` documentation).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use xml2arrow::{BatchOptions, Parser, config::{Config, TableConfig, FieldConfigBuilder, DType}};
+    ///
+    /// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build().unwrap()];
+    /// let tables = vec![TableConfig::new("items", "/data", vec![], fields)];
+    /// let config = Config { tables, parser_options: Default::default() };
+    /// let parser = Parser::new(&config).unwrap();
+    ///
+    /// let xml: &[u8] = b"<data><item><value>1</value></item><item><value>2</value></item></data>";
+    /// let options = BatchOptions::default().with_max_rows_per_batch(1);
+    /// for item in parser.parse_batches(xml, options) {
+    ///     let batch = item.unwrap();
+    ///     assert_eq!(&*batch.table, "items");
+    ///     assert_eq!(batch.batch.num_rows(), 1);
+    /// }
+    /// ```
+    pub fn parse_batches<R: BufRead>(
+        &self,
+        reader: R,
+        options: BatchOptions,
+    ) -> BatchStream<'_, ReaderSource<R>> {
+        let mut reader = Reader::from_reader(reader);
+        self.configure_reader(&mut reader);
+        BatchStream::new(
+            self,
+            ReaderSource {
+                reader,
+                buf: Vec::with_capacity(4096),
+            },
+            options,
+        )
+    }
+
+    /// Zero-copy variant of [`Parser::parse_batches`] for XML already in
+    /// memory (or memory-mapped): events borrow directly from the slice, no
+    /// per-event buffer copy. Combined with a memory-mapped file this parses
+    /// arbitrarily large documents with bounded heap — the OS pages the
+    /// input, the batch thresholds bound the builders.
+    pub fn parse_batches_slice<'a>(
+        &'a self,
+        xml: &'a [u8],
+        options: BatchOptions,
+    ) -> BatchStream<'a, SliceSource<'a>> {
+        let mut reader = Reader::from_reader(xml);
+        self.configure_reader(&mut reader);
+        BatchStream::new(self, SliceSource { reader }, options)
+    }
+
+    /// Callback-style wrapper over [`Parser::parse_batches`]: drives the
+    /// stream to completion, handing each batch to `sink`. A `sink` error
+    /// aborts the parse and is returned as-is.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error the underlying stream yields (XML parsing,
+    /// value conversion, or `RecordBatch` creation), or the first error
+    /// returned by `sink` — whichever occurs first aborts the parse.
+    pub fn parse_streaming<R, F>(&self, reader: R, options: BatchOptions, mut sink: F) -> Result<()>
+    where
+        R: BufRead,
+        F: FnMut(&str, RecordBatch) -> Result<()>,
+    {
+        for item in self.parse_batches(reader, options) {
+            let TableBatch { table, batch } = item?;
+            sink(&table, batch)?;
+        }
+        Ok(())
+    }
+
+    /// Streams the single output table of this config as an
+    /// [`arrow::array::RecordBatchReader`].
+    ///
+    /// Many configs — and virtually all "huge document" ones — define exactly
+    /// one table with fields. For those, this adapter exposes the parse as
+    /// the Arrow ecosystem's standard reader abstraction, directly consumable
+    /// by `parquet::arrow::ArrowWriter`, DataFusion, or (through the C stream
+    /// interface) pyarrow.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfig`] when the config does not have exactly
+    /// one table with fields (structural tables don't count — they produce no
+    /// output). Use [`Parser::parse_batches`] for multi-table configs.
+    pub fn parse_single_table<R: BufRead>(
+        &self,
+        reader: R,
+        options: BatchOptions,
+    ) -> Result<SingleTableReader<'_, ReaderSource<R>>> {
+        let table_idx = self.single_output_table_index()?;
+        Ok(SingleTableReader {
+            schema: self.table_schemas[table_idx].clone(),
+            stream: self.parse_batches(reader, options),
+        })
+    }
+
+    /// Zero-copy variant of [`Parser::parse_single_table`] for in-memory (or
+    /// memory-mapped) XML.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfig`] when the config does not have exactly
+    /// one table with fields, exactly like [`Parser::parse_single_table`].
+    pub fn parse_single_table_slice<'a>(
+        &'a self,
+        xml: &'a [u8],
+        options: BatchOptions,
+    ) -> Result<SingleTableReader<'a, SliceSource<'a>>> {
+        let table_idx = self.single_output_table_index()?;
+        Ok(SingleTableReader {
+            schema: self.table_schemas[table_idx].clone(),
+            stream: self.parse_batches_slice(xml, options),
+        })
+    }
+
+    /// Index of the unique output table (non-empty `fields`), or the
+    /// `SingleTableRequired` config error.
+    fn single_output_table_index(&self) -> Result<usize> {
+        let mut output_tables = self
+            .config
+            .tables
+            .iter()
+            .enumerate()
+            .filter(|(_, tc)| !tc.fields.is_empty())
+            .map(|(idx, _)| idx);
+        let first = output_tables.next();
+        match (first, output_tables.next()) {
+            (Some(idx), None) => Ok(idx),
+            _ => Err(Error::InvalidConfig {
+                reason: ConfigIssue::SingleTableRequired {
+                    // Either no output table at all, or the two found plus
+                    // whatever the iterator still holds.
+                    output_tables: first.map_or(0, |_| 2 + output_tables.count()),
+                },
+            }),
+        }
+    }
+
     /// Applies `ParserOptions` to the shared `quick_xml::Reader` config.
     ///
     /// Both entry points configure the reader identically; isolating that
@@ -861,21 +1222,10 @@ impl Parser {
             &[PathNodeId],
         ) -> Result<()>,
     {
-        let mut xml_to_arrow_converter = XmlToArrowConverter::new(self);
+        // usize::MAX thresholds: collect everything, never trigger a flush
+        // (root-table priming happens inside the converter constructor).
+        let mut xml_to_arrow_converter = XmlToArrowConverter::new(self, usize::MAX, usize::MAX);
         let mut path_tracker = PathTracker::new(&self.registry);
-
-        // Start the root-level table (xml_path: /) if it exists AND has fields
-        // defined. We only start it if it has fields, because adding it to the
-        // builder_stack would affect parent_row_indices for all nested tables,
-        // breaking their level indexing. Tables with xml_path: / and no fields
-        // are just used for hierarchy purposes and don't need to be on the stack.
-        if let Some(table_idx) = self.registry.get_table_index(PathNodeId::ROOT)
-            && !xml_to_arrow_converter.table_builders[table_idx]
-                .field_builders
-                .is_empty()
-        {
-            xml_to_arrow_converter.start_table(table_idx, PathNodeId::ROOT);
-        }
 
         run_events(
             reader,
@@ -987,6 +1337,12 @@ pub fn parse_xml_slice(xml: &[u8], config: &Config) -> Result<IndexMap<String, R
 //
 // Both delegate to `handle_event` for the actual event processing so the
 // match-arm logic is written exactly once.
+//
+// A THIRD pump exists in `BatchStream::next` (streaming output): it reads
+// through the `EventSource` abstraction and steps one event at a time so a
+// batch can be yielded mid-parse. All three share `handle_event`, but the
+// read/Break/buffer discipline around it is written three times — any change
+// to the loops below must be mirrored there, and vice versa.
 
 /// The result of processing a single XML event, telling the event loop
 /// whether to continue reading or stop (on EOF or a stop-path match).
@@ -1401,6 +1757,367 @@ fn parse_attributes(
     Ok(())
 }
 
+// === Streaming (batched) output ===
+//
+// The collect-everything entry points above accumulate the whole document
+// into one RecordBatch per table; peak memory is proportional to the
+// dataset. The types below bound that: `BatchStream` steps the same
+// `handle_event` core one event at a time and emits a table's accumulated
+// rows whenever the table crosses a `BatchOptions` threshold. Flushing is
+// value-transparent (see `TableBuilder::flush`): concatenating a table's
+// streamed batches reproduces the collect-everything output exactly.
+
+/// Flush thresholds for the streaming entry points ([`Parser::parse_batches`]
+/// and friends). A table's batch is emitted as soon as *either* threshold is
+/// reached. Both are checked at row boundaries only, so a batch can exceed
+/// `max_bytes_per_batch` by at most one row's bytes.
+///
+/// Marked `#[non_exhaustive]`; construct via `Default` and adjust fields, or
+/// chain the `with_*` setters:
+///
+/// ```rust
+/// use xml2arrow::BatchOptions;
+/// let options = BatchOptions::default().with_max_rows_per_batch(1024);
+/// ```
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct BatchOptions {
+    /// Emit a table's batch once it holds this many rows. Defaults to 8192
+    /// (the de-facto Arrow ecosystem working batch size). `0` is treated as
+    /// `1` — a yielded batch always has at least one row.
+    pub max_rows_per_batch: usize,
+    /// Also emit once a table has accumulated this many *raw value bytes*
+    /// (summed across its fields), whichever threshold is hit first. Defaults
+    /// to 128 MiB.
+    ///
+    /// This counts only the bytes of the parsed values, not the fixed per-row
+    /// overhead every column carries (Arrow offset buffers, validity bitmaps,
+    /// fixed-width value and `<level>` FK columns). It is therefore *not* an
+    /// exact cap on builder memory and under-counts it for short, empty, or
+    /// null values: treat [`Self::max_rows_per_batch`] as the real bound on
+    /// how large a batch's builders can grow, and this as a secondary guard
+    /// that keeps text-heavy batches from letting a `StringBuilder`'s
+    /// i32-offset 2 GiB ceiling be reached across many rows.
+    ///
+    /// Values above ~2 GiB (`i32::MAX`) are clamped down to that ceiling, since
+    /// accumulating more Utf8 bytes than a single column's offsets can address
+    /// would panic. A *single* value that is itself ≥ 2 GiB is unsupported and
+    /// will still panic on append (as it does on the non-streaming path).
+    pub max_bytes_per_batch: usize,
+}
+
+impl Default for BatchOptions {
+    fn default() -> Self {
+        Self {
+            max_rows_per_batch: 8192,
+            max_bytes_per_batch: 128 * 1024 * 1024,
+        }
+    }
+}
+
+impl BatchOptions {
+    /// Returns `self` with `max_rows_per_batch` replaced.
+    #[must_use]
+    pub fn with_max_rows_per_batch(mut self, rows: usize) -> Self {
+        self.max_rows_per_batch = rows;
+        self
+    }
+
+    /// Returns `self` with `max_bytes_per_batch` replaced.
+    #[must_use]
+    pub fn with_max_bytes_per_batch(mut self, bytes: usize) -> Self {
+        self.max_bytes_per_batch = bytes;
+        self
+    }
+}
+
+/// One streamed batch: the table it belongs to and a `RecordBatch` of its
+/// rows. Yielded by [`BatchStream`].
+#[derive(Debug, Clone)]
+pub struct TableBatch {
+    /// The configured table name. `Arc<str>`: all batches of one table share
+    /// the allocation, cloning is a refcount bump.
+    pub table: Arc<str>,
+    /// The rows accumulated since this table's previous batch.
+    pub batch: RecordBatch,
+}
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// A source of XML events for [`BatchStream`] — the streaming counterpart of
+/// the buffered/zero-copy split in the collect-everything entry points.
+///
+/// Sealed: implemented only by [`ReaderSource`] (buffered, any `BufRead`) and
+/// [`SliceSource`] (zero-copy, in-memory slice). The trait exists so the
+/// streaming machinery is written once; its methods are an internal detail.
+pub trait EventSource: sealed::Sealed {
+    #[doc(hidden)]
+    fn read_event(&mut self) -> std::result::Result<Event<'_>, quick_xml::Error>;
+    #[doc(hidden)]
+    fn decoder(&self) -> Decoder;
+}
+
+/// Buffered [`EventSource`] over any `BufRead` (files, sockets,
+/// decompression adapters). Each event is copied into a reusable buffer —
+/// required for streaming readers, same trade-off as [`Parser::parse`].
+pub struct ReaderSource<R: BufRead> {
+    reader: Reader<R>,
+    buf: Vec<u8>,
+}
+
+impl<R: BufRead> sealed::Sealed for ReaderSource<R> {}
+
+impl<R: BufRead> EventSource for ReaderSource<R> {
+    fn read_event(&mut self) -> std::result::Result<Event<'_>, quick_xml::Error> {
+        self.buf.clear();
+        self.reader.read_event_into(&mut self.buf)
+    }
+
+    fn decoder(&self) -> Decoder {
+        self.reader.decoder()
+    }
+}
+
+/// Zero-copy [`EventSource`] over an in-memory byte slice; events borrow
+/// directly from the input, same trade-off as [`Parser::parse_slice`].
+pub struct SliceSource<'x> {
+    reader: Reader<&'x [u8]>,
+}
+
+impl sealed::Sealed for SliceSource<'_> {}
+
+impl EventSource for SliceSource<'_> {
+    fn read_event(&mut self) -> std::result::Result<Event<'_>, quick_xml::Error> {
+        self.reader.read_event()
+    }
+
+    fn decoder(&self) -> Decoder {
+        self.reader.decoder()
+    }
+}
+
+/// Where the streaming loop is in its lifecycle.
+#[derive(Clone, Copy, Debug)]
+enum StreamState {
+    /// Reading events; batches are emitted on threshold crossings.
+    Running,
+    /// Input exhausted (EOF or a stop-path match). Emitting each table's
+    /// remaining rows in config order, resuming at `next_table`.
+    Draining { next_table: usize },
+    /// Everything emitted, or an error was yielded. Only `None` from here.
+    Done,
+}
+
+/// Incremental XML → Arrow parse: an iterator of [`TableBatch`]es with
+/// bounded memory.
+///
+/// Created by [`Parser::parse_batches`] / [`Parser::parse_batches_slice`];
+/// see [`Parser::parse_batches`] for the yielded guarantees. The stream
+/// borrows its [`Parser`] immutably, so one compiled parser can serve many
+/// concurrent streams.
+///
+/// The iterator is fused: after `None` — or after yielding an `Err` — it
+/// only returns `None`.
+pub struct BatchStream<'p, S> {
+    parser: &'p Parser,
+    source: S,
+    /// Copy of the reader's decoder, read once — the encoding cannot change
+    /// once parsing begins (mirrors the collect-everything loops).
+    decoder: Decoder,
+    path_tracker: PathTracker,
+    converter: XmlToArrowConverter<'p>,
+    attr_name_buffer: Vec<u8>,
+    state: StreamState,
+}
+
+impl<'p, S: EventSource> BatchStream<'p, S> {
+    fn new(parser: &'p Parser, source: S, options: BatchOptions) -> Self {
+        let decoder = source.decoder();
+        Self {
+            parser,
+            source,
+            decoder,
+            path_tracker: PathTracker::new(&parser.registry),
+            converter: XmlToArrowConverter::new(
+                parser,
+                options.max_rows_per_batch,
+                options.max_bytes_per_batch,
+            ),
+            attr_name_buffer: Vec::with_capacity(64),
+            state: StreamState::Running,
+        }
+    }
+
+    /// Flushes `table_idx`'s accumulated rows into a [`TableBatch`].
+    fn flush_table(&mut self, table_idx: usize) -> Result<TableBatch> {
+        let batch = self.converter.table_builders[table_idx].flush()?;
+        Ok(TableBatch {
+            table: self.parser.table_names[table_idx].clone(),
+            batch,
+        })
+    }
+
+    /// Yields the next non-empty leftover table during the drain phase,
+    /// advancing to `Done` when none remain.
+    fn drain_next(&mut self) -> Option<Result<TableBatch>> {
+        let StreamState::Draining { next_table } = self.state else {
+            return None;
+        };
+        for table_idx in next_table..self.converter.table_builders.len() {
+            let table = &self.converter.table_builders[table_idx];
+            // Structural tables never emit; tables whose rows all went out
+            // in threshold flushes have nothing left. Skipping them keeps
+            // the "a yielded batch always has ≥ 1 row" contract.
+            if table.field_builders.is_empty() || table.rows_in_batch == 0 {
+                continue;
+            }
+            self.state = StreamState::Draining {
+                next_table: table_idx + 1,
+            };
+            return match self.flush_table(table_idx) {
+                Ok(item) => Some(Ok(item)),
+                Err(e) => {
+                    self.state = StreamState::Done;
+                    Some(Err(e))
+                }
+            };
+        }
+        self.state = StreamState::Done;
+        None
+    }
+}
+
+impl<'p, S: EventSource> Iterator for BatchStream<'p, S> {
+    type Item = Result<TableBatch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.state {
+                StreamState::Done => return None,
+                StreamState::Draining { .. } => return self.drain_next(),
+                StreamState::Running => {
+                    let event = match self.source.read_event() {
+                        Ok(event) => event,
+                        Err(e) => {
+                            self.state = StreamState::Done;
+                            return Some(Err(e.into()));
+                        }
+                    };
+                    // Runtime dispatch on `needs_attrs` where the collect
+                    // loops monomorphize: one perfectly-predicted branch per
+                    // event buys a single public stream type per source.
+                    // Keep the surrounding read/Break discipline in lockstep
+                    // with `process_xml_events` / `process_xml_events_slice`.
+                    let handled = if self.parser.needs_attrs {
+                        handle_event::<true>(
+                            event,
+                            self.decoder,
+                            &mut self.path_tracker,
+                            &mut self.converter,
+                            &self.parser.stop_node_ids,
+                            &mut self.attr_name_buffer,
+                        )
+                    } else {
+                        handle_event::<false>(
+                            event,
+                            self.decoder,
+                            &mut self.path_tracker,
+                            &mut self.converter,
+                            &self.parser.stop_node_ids,
+                            &mut self.attr_name_buffer,
+                        )
+                    };
+                    let action = match handled {
+                        Ok(action) => action,
+                        Err(e) => {
+                            self.state = StreamState::Done;
+                            return Some(Err(e));
+                        }
+                    };
+                    // Transition on Break *before* emitting a pending flush:
+                    // a stop-path close can both finalize a row (tripping a
+                    // threshold) and end the parse. The flushed batch goes
+                    // out now; the next call continues draining.
+                    if matches!(action, LoopAction::Break) {
+                        self.state = StreamState::Draining { next_table: 0 };
+                    }
+                    if let Some(table_idx) = self.converter.pending_flush.take() {
+                        return match self.flush_table(table_idx) {
+                            Ok(item) => Some(Ok(item)),
+                            Err(e) => {
+                                self.state = StreamState::Done;
+                                Some(Err(e))
+                            }
+                        };
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<'p, S: EventSource> FusedIterator for BatchStream<'p, S> {}
+
+/// Manual `Debug` (rather than derive) so it exists for every source type —
+/// `Reader<R>` internals aren't `Debug` — and so users can `unwrap`/`expect`
+/// on `Result`s containing the stream in tests.
+impl<S> std::fmt::Debug for BatchStream<'_, S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BatchStream")
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A [`RecordBatchReader`] over the single output table of a config.
+///
+/// Created by [`Parser::parse_single_table`] /
+/// [`Parser::parse_single_table_slice`]. Yields the table's batches in row
+/// order; [`RecordBatchReader::schema`] returns the same `Arc<Schema>` every
+/// batch carries, available before the first byte is parsed.
+///
+/// Errors surface as `ArrowError` (the trait's error type): native Arrow
+/// errors pass through, everything else wraps as
+/// `ArrowError::ExternalError` with this crate's [`Error`] as the source.
+pub struct SingleTableReader<'p, S> {
+    schema: SchemaRef,
+    stream: BatchStream<'p, S>,
+}
+
+impl<'p, S: EventSource> Iterator for SingleTableReader<'p, S> {
+    type Item = std::result::Result<RecordBatch, arrow::error::ArrowError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // The stream can only ever yield the one output table (structural
+        // tables never emit), so no name filtering is needed.
+        match self.stream.next()? {
+            Ok(table_batch) => Some(Ok(table_batch.batch)),
+            Err(Error::Arrow(e)) => Some(Err(e)),
+            Err(e) => Some(Err(arrow::error::ArrowError::ExternalError(Box::new(e)))),
+        }
+    }
+}
+
+impl<'p, S: EventSource> FusedIterator for SingleTableReader<'p, S> {}
+
+impl<'p, S: EventSource> RecordBatchReader for SingleTableReader<'p, S> {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+}
+
+/// Manual `Debug` for the same reasons as [`BatchStream`]'s — and because
+/// `Result<SingleTableReader, _>::unwrap_err()` in caller tests requires it.
+impl<S> std::fmt::Debug for SingleTableReader<'_, S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SingleTableReader")
+            .field("schema", &self.schema)
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -1742,6 +2459,8 @@ mod tests {
     }
 
     #[test]
+    // 3.14 and 2.718… are arbitrary fixture values, not approximations of π/e.
+    #[allow(clippy::approx_constant)]
     fn test_all_numeric_dtypes_parsed_correctly() {
         let xml_content = r#"
         <data>
@@ -4374,6 +5093,8 @@ mod tests {
     }
 
     #[test]
+    // 3.14 is an arbitrary fixture value, not an approximation of π.
+    #[allow(clippy::approx_constant)]
     fn test_empty_element_float64_nullable_produces_null() {
         let xml_content = r#"
         <data>
@@ -5684,6 +6405,670 @@ mod tests {
         );
         let batch = record_batches.get("t").unwrap();
         assert_array_values!(batch, "v", vec![1i32, 2], Int32Array);
+    }
+
+    mod streaming {
+        //! Tests for the batched/streaming output path.
+        //!
+        //! The load-bearing check is the *value-transparency equivalence*:
+        //! for any document, config, and thresholds, concatenating a table's
+        //! streamed batches must reproduce the collect-everything
+        //! `RecordBatch` exactly — including `<level>` foreign keys, whose
+        //! continuity across flushes is the one thing a buggy flush would
+        //! silently corrupt.
+
+        use super::*;
+        use crate::{BatchOptions, TableBatch};
+        use arrow::compute::concat_batches;
+
+        /// A nested fixture exercising everything at once: a small header
+        /// table, a parent table, and a child table with two `<level>`
+        /// columns. Station S2's measurements ensure FK values (station 1)
+        /// span flush boundaries at small batch sizes.
+        const NESTED_XML: &str = r#"<report>
+            <header><title>Weather</title></header>
+            <stations>
+                <station>
+                    <id>S1</id>
+                    <measurements>
+                        <measurement><v>1.5</v></measurement>
+                        <measurement><v>2.5</v></measurement>
+                        <measurement><v>3.5</v></measurement>
+                    </measurements>
+                </station>
+                <station>
+                    <id>S2</id>
+                    <measurements>
+                        <measurement><v>4.5</v></measurement>
+                        <measurement><v>5.5</v></measurement>
+                    </measurements>
+                </station>
+            </stations>
+        </report>"#;
+
+        const NESTED_YAML: &str = r#"
+            parser_options:
+              trim_text: true
+            tables:
+              - name: header
+                xml_path: /report/header
+                levels: []
+                fields:
+                  - name: title
+                    xml_path: /report/header/title
+                    data_type: Utf8
+              - name: stations
+                xml_path: /report/stations
+                levels: [station]
+                fields:
+                  - name: id
+                    xml_path: /report/stations/station/id
+                    data_type: Utf8
+              - name: measurements
+                xml_path: /report/stations/station/measurements
+                levels: [station, measurement]
+                fields:
+                  - name: v
+                    xml_path: /report/stations/station/measurements/measurement/v
+                    data_type: Float64
+            "#;
+
+        /// Runs `parse_batches`, groups the yielded batches per table
+        /// (asserting the ≥ 1 row contract on each), and returns them in
+        /// yield order.
+        fn collect_streamed(
+            parser: &Parser,
+            xml: &str,
+            options: BatchOptions,
+        ) -> IndexMap<String, Vec<RecordBatch>> {
+            let mut grouped: IndexMap<String, Vec<RecordBatch>> = IndexMap::new();
+            for item in parser.parse_batches(xml.as_bytes(), options) {
+                let TableBatch { table, batch } = item.unwrap();
+                assert!(batch.num_rows() > 0, "yielded an empty batch for '{table}'");
+                grouped.entry(table.to_string()).or_default().push(batch);
+            }
+            grouped
+        }
+
+        /// The acceptance property behind the whole feature: concatenating a
+        /// table's streamed batches, in yield order, must reproduce the
+        /// collect-everything `parse()` output exactly — for any thresholds.
+        fn assert_stream_equals_full_parse(xml: &str, yaml: &str, options: BatchOptions) {
+            let config = config_from_yaml!(yaml);
+            let parser = Parser::new(&config).unwrap();
+            let full = parser.parse(xml.as_bytes()).unwrap();
+            let streamed = collect_streamed(&parser, xml, options);
+
+            for (name, batches) in &streamed {
+                let schema = parser
+                    .schema(name)
+                    .unwrap_or_else(|| panic!("no schema for streamed table '{name}'"));
+                let concatenated = concat_batches(&schema, batches).unwrap();
+                assert_eq!(
+                    &concatenated,
+                    full.get(name).unwrap(),
+                    "concatenated stream differs from full parse for table '{name}'"
+                );
+            }
+            // Tables absent from the stream must be exactly the empty ones.
+            for (name, batch) in &full {
+                if !streamed.contains_key(name) {
+                    assert_eq!(
+                        batch.num_rows(),
+                        0,
+                        "table '{name}' has rows but streamed no batches"
+                    );
+                }
+            }
+        }
+
+        #[rstest]
+        fn streamed_batches_concat_to_full_parse_result(
+            #[values(1, 2, 3, 7, 8192)] max_rows: usize,
+        ) {
+            assert_stream_equals_full_parse(
+                NESTED_XML,
+                NESTED_YAML,
+                BatchOptions::default().with_max_rows_per_batch(max_rows),
+            );
+        }
+
+        #[rstest]
+        fn byte_budget_triggers_flushes_transparently(#[values(1, 10, 40)] max_bytes: usize) {
+            // Tiny byte budgets force flushes at varying row counts; the
+            // equivalence must hold regardless of which threshold fires.
+            assert_stream_equals_full_parse(
+                NESTED_XML,
+                NESTED_YAML,
+                BatchOptions::default().with_max_bytes_per_batch(max_bytes),
+            );
+        }
+
+        #[test]
+        fn zero_thresholds_are_clamped_to_one_row() {
+            // 0 must not emit empty batches — clamped to 1, so every batch
+            // carries exactly one row (asserted inside collect_streamed).
+            let options = BatchOptions::default()
+                .with_max_rows_per_batch(0)
+                .with_max_bytes_per_batch(0);
+            assert_stream_equals_full_parse(NESTED_XML, NESTED_YAML, options);
+        }
+
+        #[test]
+        fn foreign_keys_continue_across_flush_boundaries() {
+            // The one value a flush could silently corrupt, asserted directly
+            // rather than via equivalence: with one-row batches, the
+            // measurement batches' <station> FK must keep counting
+            // (0,0,0,1,1) across five separate flushes — a flush that reset
+            // `row_index` would restart it at 0 and mis-link every child row
+            // after the first boundary.
+            let config = config_from_yaml!(NESTED_YAML);
+            let parser = Parser::new(&config).unwrap();
+            let options = BatchOptions::default().with_max_rows_per_batch(1);
+
+            let mut station_fks = Vec::new();
+            for item in parser.parse_batches(NESTED_XML.as_bytes(), options) {
+                let TableBatch { table, batch } = item.unwrap();
+                if &*table == "measurements" {
+                    let fk = batch
+                        .column_by_name("<station>")
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<UInt32Array>()
+                        .unwrap();
+                    station_fks.extend(fk.values().iter().copied());
+                }
+            }
+            assert_eq!(station_fks, vec![0, 0, 0, 1, 1]);
+        }
+
+        #[test]
+        fn batches_share_one_schema_with_parser_schema() {
+            let config = config_from_yaml!(NESTED_YAML);
+            let parser = Parser::new(&config).unwrap();
+            let options = BatchOptions::default().with_max_rows_per_batch(1);
+
+            for item in parser.parse_batches(NESTED_XML.as_bytes(), options) {
+                let TableBatch { table, batch } = item.unwrap();
+                let expected = parser.schema(&table).unwrap();
+                assert!(
+                    Arc::ptr_eq(&batch.schema(), &expected),
+                    "batch schema for '{table}' is not the parser's shared Arc"
+                );
+            }
+        }
+
+        #[test]
+        fn parse_batches_slice_matches_buffered_stream() {
+            let config = config_from_yaml!(NESTED_YAML);
+            let parser = Parser::new(&config).unwrap();
+            let options = BatchOptions::default().with_max_rows_per_batch(2);
+
+            let buffered: Vec<_> = parser
+                .parse_batches(NESTED_XML.as_bytes(), options)
+                .map(|item| item.unwrap())
+                .collect();
+            let zero_copy: Vec<_> = parser
+                .parse_batches_slice(NESTED_XML.as_bytes(), options)
+                .map(|item| item.unwrap())
+                .collect();
+
+            assert_eq!(buffered.len(), zero_copy.len());
+            for (a, b) in buffered.iter().zip(&zero_copy) {
+                assert_eq!(a.table, b.table);
+                assert_eq!(a.batch, b.batch);
+            }
+        }
+
+        #[test]
+        fn structural_table_feeds_fks_but_never_emits() {
+            // A fields-less table exists only to feed its row counter to
+            // child `levels`; it must not appear in the stream (and its
+            // builders must not grow — the drain would otherwise yield it).
+            let xml = r#"<data>
+                <group><items><item><v>1</v></item><item><v>2</v></item></items></group>
+                <group><items><item><v>3</v></item></items></group>
+            </data>"#;
+            let yaml = r#"
+                parser_options:
+                  trim_text: true
+                tables:
+                  - name: groups
+                    xml_path: /data
+                    levels: [group]
+                    fields: []
+                  - name: items
+                    xml_path: /data/group/items
+                    levels: [group, item]
+                    fields:
+                      - name: v
+                        xml_path: /data/group/items/item/v
+                        data_type: Int32
+                "#;
+            assert_stream_equals_full_parse(
+                xml,
+                yaml,
+                BatchOptions::default().with_max_rows_per_batch(1),
+            );
+
+            let config = config_from_yaml!(yaml);
+            let parser = Parser::new(&config).unwrap();
+            let streamed = collect_streamed(
+                &parser,
+                xml,
+                BatchOptions::default().with_max_rows_per_batch(1),
+            );
+            assert!(!streamed.contains_key("groups"));
+            let group_fks: Vec<u32> = streamed["items"]
+                .iter()
+                .flat_map(|b| {
+                    b.column_by_name("<group>")
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<UInt32Array>()
+                        .unwrap()
+                        .values()
+                        .to_vec()
+                })
+                .collect();
+            assert_eq!(group_fks, vec![0, 0, 1]);
+        }
+
+        #[test]
+        fn root_table_streams_its_single_row() {
+            let xml = r#"<data><count>42</count></data>"#;
+            let yaml = r#"
+                tables:
+                  - name: root
+                    xml_path: /
+                    levels: []
+                    fields:
+                      - name: count
+                        xml_path: /data/count
+                        data_type: Int32
+                "#;
+            assert_stream_equals_full_parse(xml, yaml, BatchOptions::default());
+        }
+
+        #[test]
+        fn stop_at_paths_drains_accumulated_rows() {
+            let yaml_with_stop = r#"
+                parser_options:
+                  trim_text: true
+                  stop_at_paths: [/report/header]
+                tables:
+                  - name: header
+                    xml_path: /report/header
+                    levels: []
+                    fields:
+                      - name: title
+                        xml_path: /report/header/title
+                        data_type: Utf8
+                  - name: stations
+                    xml_path: /report/stations
+                    levels: [station]
+                    fields:
+                      - name: id
+                        xml_path: /report/stations/station/id
+                        data_type: Utf8
+                "#;
+            // Equivalence holds (both sides stop early)...
+            assert_stream_equals_full_parse(NESTED_XML, yaml_with_stop, BatchOptions::default());
+
+            // ...and the streamed output contains the pre-stop rows only.
+            let config = config_from_yaml!(yaml_with_stop);
+            let parser = Parser::new(&config).unwrap();
+            let streamed = collect_streamed(&parser, NESTED_XML, BatchOptions::default());
+            assert_eq!(streamed["header"].len(), 1);
+            assert!(!streamed.contains_key("stations"));
+        }
+
+        #[test]
+        fn error_is_yielded_once_then_stream_fuses() {
+            // Row 3 is malformed; with one-row batches the first two rows
+            // stream out as valid batches, then the error, then only None.
+            let xml = r#"<data><row><v>1</v></row><row><v>2</v></row><row><v>oops</v></row><row><v>4</v></row></data>"#;
+            let yaml = r#"
+                tables:
+                  - name: t
+                    xml_path: /data
+                    levels: [row]
+                    fields:
+                      - name: v
+                        xml_path: /data/row/v
+                        data_type: Int32
+                "#;
+            let config = config_from_yaml!(yaml);
+            let parser = Parser::new(&config).unwrap();
+            let mut stream = parser.parse_batches(
+                xml.as_bytes(),
+                BatchOptions::default().with_max_rows_per_batch(1),
+            );
+
+            assert!(stream.next().unwrap().is_ok());
+            assert!(stream.next().unwrap().is_ok());
+            let err = stream.next().unwrap().unwrap_err();
+            assert!(matches!(err, Error::ParseError { .. }));
+            assert!(stream.next().is_none(), "stream must fuse after an error");
+            assert!(stream.next().is_none());
+        }
+
+        #[test]
+        fn parse_streaming_callback_receives_all_batches() {
+            let config = config_from_yaml!(NESTED_YAML);
+            let parser = Parser::new(&config).unwrap();
+            let full = parser.parse(NESTED_XML.as_bytes()).unwrap();
+
+            let mut grouped: IndexMap<String, Vec<RecordBatch>> = IndexMap::new();
+            parser
+                .parse_streaming(
+                    NESTED_XML.as_bytes(),
+                    BatchOptions::default().with_max_rows_per_batch(2),
+                    |table, batch| {
+                        grouped.entry(table.to_string()).or_default().push(batch);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+
+            let schema = parser.schema("measurements").unwrap();
+            let concatenated = concat_batches(&schema, &grouped["measurements"]).unwrap();
+            assert_eq!(&concatenated, full.get("measurements").unwrap());
+        }
+
+        #[test]
+        fn parse_streaming_sink_error_aborts() {
+            let config = config_from_yaml!(NESTED_YAML);
+            let parser = Parser::new(&config).unwrap();
+            let mut calls = 0;
+            let result = parser.parse_streaming(
+                NESTED_XML.as_bytes(),
+                BatchOptions::default().with_max_rows_per_batch(1),
+                |_, _| {
+                    calls += 1;
+                    Err(Error::Io(std::io::Error::other("sink full")))
+                },
+            );
+            assert!(matches!(result.unwrap_err(), Error::Io(_)));
+            assert_eq!(calls, 1, "parse must stop after the sink errors");
+        }
+
+        #[test]
+        fn single_table_reader_streams_with_stable_schema() {
+            let xml = r#"<data><row><v>1</v></row><row><v>2</v></row><row><v>3</v></row></data>"#;
+            let yaml = r#"
+                tables:
+                  - name: t
+                    xml_path: /data
+                    levels: [row]
+                    fields:
+                      - name: v
+                        xml_path: /data/row/v
+                        data_type: Int32
+                "#;
+            let config = config_from_yaml!(yaml);
+            let parser = Parser::new(&config).unwrap();
+            let reader = parser
+                .parse_single_table(
+                    xml.as_bytes(),
+                    BatchOptions::default().with_max_rows_per_batch(2),
+                )
+                .unwrap();
+
+            // Schema is available before any parsing and matches the batches.
+            let schema = reader.schema();
+            assert!(Arc::ptr_eq(&schema, &parser.schema("t").unwrap()));
+
+            let batches: Vec<RecordBatch> = reader.map(|b| b.unwrap()).collect();
+            assert_eq!(
+                batches
+                    .iter()
+                    .map(RecordBatch::num_rows)
+                    .collect::<Vec<_>>(),
+                vec![2, 1]
+            );
+            let concatenated = concat_batches(&schema, &batches).unwrap();
+            let full = parser.parse(xml.as_bytes()).unwrap();
+            assert_eq!(&concatenated, full.get("t").unwrap());
+        }
+
+        #[test]
+        fn single_table_reader_rejects_multi_table_configs() {
+            let config = config_from_yaml!(NESTED_YAML);
+            let parser = Parser::new(&config).unwrap();
+            // unwrap_err doubles as a regression test that SingleTableReader
+            // implements Debug (required for unwrap_err's bound).
+            let err = parser
+                .parse_single_table(&b"<report/>"[..], BatchOptions::default())
+                .unwrap_err();
+            assert!(matches!(err, Error::InvalidConfig { .. }));
+            assert!(err.to_string().contains("exactly one table"));
+            assert!(err.to_string().contains('3'));
+        }
+
+        #[test]
+        fn single_table_reader_ignores_structural_tables() {
+            // Structural (fields-less) tables produce no output, so a config
+            // with one output table plus structural helpers still qualifies.
+            let xml = r#"<data><group><items><item><v>7</v></item></items></group></data>"#;
+            let yaml = r#"
+                tables:
+                  - name: groups
+                    xml_path: /data
+                    levels: [group]
+                    fields: []
+                  - name: items
+                    xml_path: /data/group/items
+                    levels: [group, item]
+                    fields:
+                      - name: v
+                        xml_path: /data/group/items/item/v
+                        data_type: Int32
+                "#;
+            let config = config_from_yaml!(yaml);
+            let parser = Parser::new(&config).unwrap();
+            let reader = parser
+                .parse_single_table(xml.as_bytes(), BatchOptions::default())
+                .unwrap();
+            let batches: Vec<RecordBatch> = reader.map(|b| b.unwrap()).collect();
+            assert_eq!(batches.len(), 1);
+            assert_array_values!(&batches[0], "v", vec![7i32], Int32Array);
+        }
+
+        #[test]
+        fn single_table_schema_matches_schema_and_validates() {
+            let xml_yaml = r#"
+                tables:
+                  - name: t
+                    xml_path: /data
+                    levels: [row]
+                    fields:
+                      - name: v
+                        xml_path: /data/row/v
+                        data_type: Int32
+                "#;
+            let config = config_from_yaml!(xml_yaml);
+            let parser = Parser::new(&config).unwrap();
+            let schema = parser.single_table_schema().unwrap();
+            assert!(Arc::ptr_eq(&schema, &parser.schema("t").unwrap()));
+
+            // Multi-table configs are rejected with the same error as
+            // parse_single_table.
+            let config = config_from_yaml!(NESTED_YAML);
+            let parser = Parser::new(&config).unwrap();
+            let err = parser.single_table_schema().unwrap_err();
+            assert!(matches!(err, Error::InvalidConfig { .. }));
+            assert!(err.to_string().contains("exactly one table"));
+        }
+
+        #[test]
+        fn schema_reports_output_tables_only() {
+            let yaml = r#"
+                tables:
+                  - name: structural
+                    xml_path: /data
+                    levels: [group]
+                    fields: []
+                  - name: items
+                    xml_path: /data/group
+                    levels: [group, item]
+                    fields:
+                      - name: v
+                        xml_path: /data/group/item/v
+                        data_type: Int32
+                      - name: label
+                        xml_path: /data/group/item/label
+                        data_type: Utf8
+                        nullable: true
+                "#;
+            let config = config_from_yaml!(yaml);
+            let parser = Parser::new(&config).unwrap();
+
+            let schema = parser.schema("items").unwrap();
+            let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+            assert_eq!(names, vec!["<group>", "<item>", "v", "label"]);
+            assert_eq!(schema.field(0).data_type(), &DataType::UInt32);
+            assert!(!schema.field(0).is_nullable());
+            assert_eq!(schema.field(2).data_type(), &DataType::Int32);
+            assert!(schema.field(3).is_nullable());
+
+            assert!(parser.schema("structural").is_none());
+            assert!(parser.schema("nonexistent").is_none());
+        }
+
+        #[test]
+        fn empty_table_streams_nothing_but_full_parse_returns_empty_batch() {
+            // The documented contract difference: parse() includes a 0-row
+            // batch for a table that matched nothing; the stream yields no
+            // batch for it (consumers get the schema from Parser::schema).
+            let xml = r#"<data><row><v>1</v></row></data>"#;
+            let yaml = r#"
+                tables:
+                  - name: t
+                    xml_path: /data
+                    levels: [row]
+                    fields:
+                      - name: v
+                        xml_path: /data/row/v
+                        data_type: Int32
+                  - name: missing
+                    xml_path: /data/other
+                    levels: []
+                    fields:
+                      - name: x
+                        xml_path: /data/other/x
+                        data_type: Int32
+                        nullable: true
+                "#;
+            let config = config_from_yaml!(yaml);
+            let parser = Parser::new(&config).unwrap();
+
+            let full = parser.parse(xml.as_bytes()).unwrap();
+            assert_eq!(full.get("missing").unwrap().num_rows(), 0);
+
+            let streamed = collect_streamed(&parser, xml, BatchOptions::default());
+            assert!(!streamed.contains_key("missing"));
+            assert_eq!(streamed["t"].len(), 1);
+        }
+
+        #[test]
+        #[cfg(target_pointer_width = "64")] // u32::MAX + 1 needs a 64-bit usize
+        fn row_index_past_u32_max_errors_instead_of_wrapping_fks() {
+            // 2^32 real rows aren't testable, so drive the mechanism
+            // directly: place a table on the stack with its (private)
+            // row_index just past what a UInt32 <level> column can hold and
+            // finalize a row. Before the checked conversion this wrapped
+            // silently, mis-linking every subsequent child row.
+            let config = config_from_yaml!(
+                r#"
+                tables:
+                  - name: items
+                    xml_path: /data
+                    levels: [item]
+                    fields:
+                      - name: v
+                        xml_path: /data/item/v
+                        data_type: Int32
+                "#
+            );
+            let parser = Parser::new(&config).unwrap();
+            let mut converter = XmlToArrowConverter::new(&parser, usize::MAX, usize::MAX);
+            let node_id = parser.registry.resolve_path("/data").unwrap();
+            converter.start_table(0, node_id);
+
+            // The last representable index is fine...
+            converter.table_builders[0].row_index = u32::MAX as usize;
+            converter.table_builders[0].field_builders[0].set_current_value(b"1");
+            converter.end_current_row().unwrap();
+
+            // ...one past it must error, naming the table.
+            converter.table_builders[0].row_index = u32::MAX as usize + 1;
+            converter.table_builders[0].field_builders[0].set_current_value(b"2");
+            let err = converter.end_current_row().unwrap_err();
+            assert!(matches!(err, Error::RowIndexOverflow { .. }));
+            assert!(err.to_string().contains("items"));
+        }
+
+        #[test]
+        fn max_bytes_per_batch_is_clamped_to_stringbuilder_ceiling() {
+            // A byte budget above a StringBuilder's i32-offset limit would let
+            // accumulated Utf8 bytes overflow the column's offsets before any
+            // flush fired. The converter must clamp it down to the ceiling
+            // (and, as ever, clamp a zero budget up to 1).
+            let config = config_from_yaml!(
+                r#"
+                tables:
+                  - name: t
+                    xml_path: /data
+                    levels: [row]
+                    fields:
+                      - name: v
+                        xml_path: /data/row/v
+                        data_type: Utf8
+                "#
+            );
+            let parser = Parser::new(&config).unwrap();
+
+            let clamped_high = XmlToArrowConverter::new(&parser, 8192, usize::MAX);
+            assert_eq!(clamped_high.max_bytes_per_batch, MAX_BATCH_BYTES_CEILING);
+
+            let clamped_low = XmlToArrowConverter::new(&parser, 8192, 0);
+            assert_eq!(clamped_low.max_bytes_per_batch, 1);
+
+            // A value already within the ceiling is left untouched.
+            let unclamped = XmlToArrowConverter::new(&parser, 8192, 64 * 1024 * 1024);
+            assert_eq!(unclamped.max_bytes_per_batch, 64 * 1024 * 1024);
+        }
+
+        #[test]
+        fn large_document_flushes_at_default_row_threshold() {
+            // 20_000 rows with default options must arrive as 8192 + 8192 +
+            // 3616 — the drain carrying the remainder.
+            let mut xml = String::from("<data>");
+            for i in 0..20_000 {
+                xml.push_str(&format!("<row><v>{i}</v></row>"));
+            }
+            xml.push_str("</data>");
+            let yaml = r#"
+                tables:
+                  - name: t
+                    xml_path: /data
+                    levels: [row]
+                    fields:
+                      - name: v
+                        xml_path: /data/row/v
+                        data_type: Int64
+                "#;
+            let config = config_from_yaml!(yaml);
+            let parser = Parser::new(&config).unwrap();
+            let row_counts: Vec<usize> = parser
+                .parse_batches(xml.as_bytes(), BatchOptions::default())
+                .map(|item| item.unwrap().batch.num_rows())
+                .collect();
+            assert_eq!(row_counts, vec![8192, 8192, 3616]);
+
+            assert_stream_equals_full_parse(&xml, yaml, BatchOptions::default());
+        }
     }
 
     // --- Numeric parsing: whitespace tolerance & rejection of trailing garbage ---
