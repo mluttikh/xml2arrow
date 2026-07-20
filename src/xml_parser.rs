@@ -437,10 +437,18 @@ struct TableBuilder {
     /// Rows finalized into the array builders since the last `flush()`.
     /// Always 0 for structural tables (empty `fields`), which never emit.
     rows_in_batch: usize,
-    /// Raw value bytes accumulated since the last `flush()`. Approximates the
-    /// batch's heap footprint cheaply (one add per field per row) so the
-    /// byte-budget flush trigger can protect `StringBuilder`'s i32-offset
-    /// 2 GiB ceiling without scanning builder internals.
+    /// Raw field-value bytes accumulated since the last `flush()`, summed
+    /// across all of a table's fields (one add per field per row). This is a
+    /// cheap *approximation* of the batch's heap footprint, not an exact
+    /// accounting: it counts only the raw value bytes, ignoring the fixed
+    /// per-row overhead every column carries regardless of value size (Arrow
+    /// offset buffers, validity bitmaps, the fixed-width value and `<level>`
+    /// FK columns). It therefore under-counts total builder memory for rows
+    /// whose values are short, empty, or null — so `max_rows_per_batch`, not
+    /// the byte budget, is the true bound on builder memory. Its purpose is
+    /// narrower: capping accumulated Utf8 bytes so a `StringBuilder`'s
+    /// i32-offset 2 GiB ceiling is not reached across many normal rows (see
+    /// `MAX_BATCH_BYTES_CEILING`).
     bytes_in_batch: usize,
 }
 
@@ -592,6 +600,16 @@ struct XmlToArrowConverter<'a> {
     pending_flush: Option<usize>,
 }
 
+/// Upper bound applied to `max_bytes_per_batch`: a `StringBuilder` addresses
+/// its value buffer with i32 offsets, so a single Utf8 column cannot exceed
+/// `i32::MAX` bytes. Since `bytes_in_batch` sums all fields, keeping the whole
+/// budget at or below this ceiling keeps every individual Utf8 column under
+/// its offset limit across the many-normal-rows case. It does *not* rescue a
+/// single value that is itself ≥ 2 GiB — that overflows the column on append,
+/// before any row-boundary flush check can fire (the same limitation the
+/// non-streaming path has always had).
+const MAX_BATCH_BYTES_CEILING: usize = i32::MAX as usize;
+
 impl<'a> XmlToArrowConverter<'a> {
     /// Builds the fresh per-parse state from an already-compiled [`Parser`].
     ///
@@ -601,8 +619,11 @@ impl<'a> XmlToArrowConverter<'a> {
     /// already done once in [`Parser::new`], so this stays cheap even for tiny
     /// documents.
     ///
-    /// The batch thresholds are clamped to at least 1 so a zero value can
-    /// never emit empty batches (a yielded batch always has ≥ 1 row).
+    /// The row threshold is clamped to at least 1 so a zero value can never
+    /// emit empty batches (a yielded batch always has ≥ 1 row). The byte
+    /// threshold is likewise clamped into `1..=MAX_BATCH_BYTES_CEILING`, so a
+    /// caller cannot raise it past the point where accumulated Utf8 bytes would
+    /// overflow a `StringBuilder`'s i32 offsets.
     fn new(parser: &'a Parser, max_rows_per_batch: usize, max_bytes_per_batch: usize) -> Self {
         let config = &parser.config;
         let mut table_builders = Vec::with_capacity(config.tables.len());
@@ -618,7 +639,7 @@ impl<'a> XmlToArrowConverter<'a> {
             validate_attributes: config.parser_options.validate_attributes,
             strip_namespaces: config.parser_options.strip_namespaces,
             max_rows_per_batch: max_rows_per_batch.max(1),
-            max_bytes_per_batch: max_bytes_per_batch.max(1),
+            max_bytes_per_batch: max_bytes_per_batch.clamp(1, MAX_BATCH_BYTES_CEILING),
             pending_flush: None,
         };
 
@@ -1765,10 +1786,23 @@ pub struct BatchOptions {
     /// (the de-facto Arrow ecosystem working batch size). `0` is treated as
     /// `1` — a yielded batch always has at least one row.
     pub max_rows_per_batch: usize,
-    /// Also emit once a table has accumulated this many raw value bytes,
-    /// whichever threshold is hit first. Defaults to 128 MiB. This guards
-    /// against fat rows (multi-MB text fields) exhausting `StringBuilder`'s
-    /// i32-offset 2 GiB ceiling long before the row cap is reached.
+    /// Also emit once a table has accumulated this many *raw value bytes*
+    /// (summed across its fields), whichever threshold is hit first. Defaults
+    /// to 128 MiB.
+    ///
+    /// This counts only the bytes of the parsed values, not the fixed per-row
+    /// overhead every column carries (Arrow offset buffers, validity bitmaps,
+    /// fixed-width value and `<level>` FK columns). It is therefore *not* an
+    /// exact cap on builder memory and under-counts it for short, empty, or
+    /// null values: treat [`Self::max_rows_per_batch`] as the real bound on
+    /// how large a batch's builders can grow, and this as a secondary guard
+    /// that keeps text-heavy batches from letting a `StringBuilder`'s
+    /// i32-offset 2 GiB ceiling be reached across many rows.
+    ///
+    /// Values above ~2 GiB (`i32::MAX`) are clamped down to that ceiling, since
+    /// accumulating more Utf8 bytes than a single column's offsets can address
+    /// would panic. A *single* value that is itself ≥ 2 GiB is unsupported and
+    /// will still panic on append (as it does on the non-streaming path).
     pub max_bytes_per_batch: usize,
 }
 
@@ -6973,6 +7007,37 @@ mod tests {
             let err = converter.end_current_row().unwrap_err();
             assert!(matches!(err, Error::RowIndexOverflow { .. }));
             assert!(err.to_string().contains("items"));
+        }
+
+        #[test]
+        fn max_bytes_per_batch_is_clamped_to_stringbuilder_ceiling() {
+            // A byte budget above a StringBuilder's i32-offset limit would let
+            // accumulated Utf8 bytes overflow the column's offsets before any
+            // flush fired. The converter must clamp it down to the ceiling
+            // (and, as ever, clamp a zero budget up to 1).
+            let config = config_from_yaml!(
+                r#"
+                tables:
+                  - name: t
+                    xml_path: /data
+                    levels: [row]
+                    fields:
+                      - name: v
+                        xml_path: /data/row/v
+                        data_type: Utf8
+                "#
+            );
+            let parser = Parser::new(&config).unwrap();
+
+            let clamped_high = XmlToArrowConverter::new(&parser, 8192, usize::MAX);
+            assert_eq!(clamped_high.max_bytes_per_batch, MAX_BATCH_BYTES_CEILING);
+
+            let clamped_low = XmlToArrowConverter::new(&parser, 8192, 0);
+            assert_eq!(clamped_low.max_bytes_per_batch, 1);
+
+            // A value already within the ceiling is left untouched.
+            let unclamped = XmlToArrowConverter::new(&parser, 8192, 64 * 1024 * 1024);
+            assert_eq!(unclamped.max_bytes_per_batch, 64 * 1024 * 1024);
         }
 
         #[test]
