@@ -74,6 +74,12 @@ pub enum Error {
     /// no raw value to show, and the fix is a configuration change
     /// (`nullable: true`) rather than cleaning input data.
     MissingRequiredField { field: Arc<str>, path: Arc<str> },
+    /// A table's per-scope row counter passed `u32::MAX`, the largest value a
+    /// `<level>` index column can hold. Continuing would silently wrap the
+    /// foreign keys of every subsequent child row, so the parse fails
+    /// instead. Only reachable on enormous inputs (more than 2^32 rows in a
+    /// single table scope), which the streaming entry points make possible.
+    RowIndexOverflow { table: Arc<str> },
     /// A scale or offset was configured on a data type that doesn't support it.
     UnsupportedConversion {
         conversion: ConversionKind,
@@ -121,7 +127,9 @@ pub enum ConversionKind {
     Offset,
 }
 
-/// A classification of configuration problems detected by `Config::validate`.
+/// A classification of configuration problems, detected by
+/// `Config::validate` or by API entry points with additional config
+/// requirements (e.g. `Parser::parse_single_table`).
 /// Having this as a dedicated enum (rather than a free-form string) lets the
 /// Python bindings and structured logs distinguish e.g. a duplicate-name bug
 /// from a misaligned xml_path without substring matching.
@@ -159,6 +167,14 @@ pub enum ConfigIssue {
         table_path: String,
         field: String,
         field_path: String,
+    },
+    /// An operation that requires exactly one output table (a table with a
+    /// non-empty `fields` list) — e.g. `Parser::parse_single_table`, which
+    /// exposes the parse as a single-schema `RecordBatchReader` — was invoked
+    /// on a config with a different number of them. Structural tables (empty
+    /// `fields`) don't count: they never produce output.
+    SingleTableRequired {
+        output_tables: usize,
     },
 }
 
@@ -204,6 +220,11 @@ impl fmt::Display for Error {
             Error::MissingRequiredField { field, path } => write!(
                 f,
                 "Missing value for non-nullable field '{field}' at path {path}"
+            ),
+            Error::RowIndexOverflow { table } => write!(
+                f,
+                "Table '{table}' exceeded {} rows in a single scope; UInt32 <level> index columns cannot link further child rows",
+                u32::MAX
             ),
             Error::UnsupportedConversion {
                 conversion,
@@ -259,6 +280,10 @@ impl fmt::Display for ConfigIssue {
             } => write!(
                 f,
                 "Field '{field}' has xml_path '{field_path}' which is not under table '{table}' xml_path '{table_path}'"
+            ),
+            ConfigIssue::SingleTableRequired { output_tables } => write!(
+                f,
+                "This operation requires a config with exactly one table with fields, but found {output_tables}"
             ),
         }
     }
@@ -373,6 +398,7 @@ impl From<Error> for PyErr {
             Error::Yaml(e) => YamlParsingError::new_err(e.to_string()),
             e @ Error::ParseError { .. } => ParseError::new_err(e.to_string()),
             e @ Error::MissingRequiredField { .. } => ParseError::new_err(e.to_string()),
+            e @ Error::RowIndexOverflow { .. } => ParseError::new_err(e.to_string()),
             e @ Error::UnsupportedConversion { .. } => {
                 UnsupportedConversionError::new_err(e.to_string())
             }
@@ -422,6 +448,7 @@ mod tests {
             | Error::Utf8Error(_)
             | Error::ParseError { .. }
             | Error::MissingRequiredField { .. }
+            | Error::RowIndexOverflow { .. }
             | Error::UnsupportedConversion { .. }
             | Error::InvalidConfig { .. } => {}
         }
@@ -475,6 +502,9 @@ mod tests {
             Error::MissingRequiredField {
                 field: Arc::from("f"),
                 path: Arc::from("/p"),
+            },
+            Error::RowIndexOverflow {
+                table: Arc::from("t"),
             },
             Error::UnsupportedConversion {
                 conversion: ConversionKind::Scaling,
