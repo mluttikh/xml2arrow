@@ -587,28 +587,53 @@ struct XmlToArrowConverter<'a> {
     /// per-name `:` scan. Cached here so the hot path reads a plain `bool`.
     strip_namespaces: bool,
     /// Per-batch flush thresholds (rows / raw value bytes). The
-    /// collect-everything entry points pass `usize::MAX`, so the two per-row
-    /// comparisons in `end_current_row` are always-false, perfectly
-    /// predicted branches there.
+    /// collect-everything entry points pass `usize::MAX` for both; the row
+    /// threshold stays there, so its per-row comparison is an always-false,
+    /// perfectly predicted branch. The byte threshold is clamped down to
+    /// `MAX_BATCH_BYTES_CEILING` even for them, so a collect parse of a table
+    /// accumulating more than ~1 GiB of value bytes *can* trip it — see
+    /// `pending_flush` for why that is inert rather than wrong.
     max_rows_per_batch: usize,
     max_bytes_per_batch: usize,
     /// Set by `end_current_row` when the just-finalized row pushed its table
     /// over a batch threshold. The streaming loop takes it and flushes that
-    /// table; the collect loops never observe it set (thresholds are MAX).
-    /// At most one table can become pending per event, because each event
-    /// finalizes at most one row.
+    /// table.
+    ///
+    /// The collect loops never *read* it, so on those paths this is inert
+    /// bookkeeping rather than a missed flush: `finish()` emits every table
+    /// whole regardless of what was signalled here.
+    ///
+    /// A single slot suffices because at most one table can become pending per
+    /// event — each event finalizes at most one row. That invariant is checked
+    /// by the `debug_assert!` at the assignment site; were it ever broken, a
+    /// pending flush would be silently dropped and the batch would grow past
+    /// its threshold unnoticed.
     pending_flush: Option<usize>,
 }
 
-/// Upper bound applied to `max_bytes_per_batch`: a `StringBuilder` addresses
-/// its value buffer with i32 offsets, so a single Utf8 column cannot exceed
-/// `i32::MAX` bytes. Since `bytes_in_batch` sums all fields, keeping the whole
-/// budget at or below this ceiling keeps every individual Utf8 column under
-/// its offset limit across the many-normal-rows case. It does *not* rescue a
-/// single value that is itself ≥ 2 GiB — that overflows the column on append,
-/// before any row-boundary flush check can fire (the same limitation the
-/// non-streaming path has always had).
-const MAX_BATCH_BYTES_CEILING: usize = i32::MAX as usize;
+/// Upper bound applied to `max_bytes_per_batch`.
+///
+/// A `StringBuilder` addresses its value buffer with i32 offsets, so a single
+/// Utf8 column cannot hold more than `i32::MAX` bytes. Overflowing that limit
+/// *panics* inside Arrow (`byte array offset overflow`) rather than raising a
+/// recoverable error, so the budget must stay clear of it. Since
+/// `bytes_in_batch` sums every field, holding the whole budget below this
+/// ceiling keeps each individual Utf8 column under the offset limit.
+///
+/// The ceiling is deliberately *half* the addressable range rather than
+/// `i32::MAX` itself, because the budget is only consulted at row boundaries —
+/// after `save_row` has already appended the row. Accumulated bytes can
+/// therefore reach `max_bytes_per_batch - 1 + <the final row's bytes>`, and a
+/// ceiling of exactly `i32::MAX` would let that last row overflow the column
+/// as it is appended, before any flush check could fire. Reserving the upper
+/// half as headroom makes the guard hold for every row up to ~1 GiB — orders
+/// of magnitude beyond any "normal row", which is the case the byte budget
+/// exists to bound.
+///
+/// What no ceiling can rescue is a single row whose own values exceed that
+/// headroom (most plainly: one ≥ 1 GiB value). Such a row overflows the column
+/// while being appended, on the streaming and non-streaming paths alike.
+const MAX_BATCH_BYTES_CEILING: usize = (i32::MAX / 2) as usize;
 
 impl<'a> XmlToArrowConverter<'a> {
     /// Builds the fresh per-parse state from an already-compiled [`Parser`].
@@ -784,6 +809,17 @@ impl<'a> XmlToArrowConverter<'a> {
             if table.rows_in_batch >= self.max_rows_per_batch
                 || table.bytes_in_batch >= self.max_bytes_per_batch
             {
+                // The single slot relies on the streaming loop draining it
+                // after every event, which holds only because an event
+                // finalizes at most one row. Overwriting an unread signal
+                // would drop a flush silently — no error, no failing test,
+                // just a batch growing past its bound. Cost-free in release.
+                debug_assert!(
+                    self.pending_flush.is_none(),
+                    "pending flush for table {:?} overwritten by table {table_idx} — \
+                     more than one row finalized in a single event",
+                    self.pending_flush
+                );
                 self.pending_flush = Some(table_idx);
             }
         }
@@ -1799,10 +1835,13 @@ pub struct BatchOptions {
     /// that keeps text-heavy batches from letting a `StringBuilder`'s
     /// i32-offset 2 GiB ceiling be reached across many rows.
     ///
-    /// Values above ~2 GiB (`i32::MAX`) are clamped down to that ceiling, since
-    /// accumulating more Utf8 bytes than a single column's offsets can address
-    /// would panic. A *single* value that is itself ≥ 2 GiB is unsupported and
-    /// will still panic on append (as it does on the non-streaming path).
+    /// Values above an internal ceiling (~1 GiB) are clamped down to it. The
+    /// ceiling sits below Arrow's 2 GiB per-`Utf8`-column offset limit rather
+    /// than at it, because the budget is only checked *after* a row has been
+    /// appended: the reserved headroom is what keeps the final row before a
+    /// flush from overflowing a column. A single row whose values exceed that
+    /// headroom (most plainly: one ≥ 1 GiB value) is unsupported and will still
+    /// panic on append, exactly as on the non-streaming path.
     pub max_bytes_per_batch: usize,
 }
 
@@ -7010,11 +7049,21 @@ mod tests {
         }
 
         #[test]
-        fn max_bytes_per_batch_is_clamped_to_stringbuilder_ceiling() {
-            // A byte budget above a StringBuilder's i32-offset limit would let
-            // accumulated Utf8 bytes overflow the column's offsets before any
-            // flush fired. The converter must clamp it down to the ceiling
-            // (and, as ever, clamp a zero budget up to 1).
+        fn max_bytes_per_batch_ceiling_reserves_headroom_below_i32_offsets() {
+            // The budget is checked only *after* a row is appended, so the
+            // ceiling has to sit far enough below a StringBuilder's i32-offset
+            // limit that the final row before a flush still fits. A ceiling of
+            // exactly i32::MAX would not: the row crossing it panics inside
+            // Arrow on append, before any flush check runs. Pin the headroom
+            // itself, not just the clamp, since that is the property doing the
+            // work — without asserting the exact split, which is tunable.
+            let headroom = i32::MAX as usize - MAX_BATCH_BYTES_CEILING;
+            assert!(
+                headroom >= 64 * 1024 * 1024,
+                "ceiling leaves only {headroom} bytes below the i32 offset \
+                 limit — too little to absorb the row that trips the flush"
+            );
+
             let config = config_from_yaml!(
                 r#"
                 tables:
@@ -7029,9 +7078,16 @@ mod tests {
             );
             let parser = Parser::new(&config).unwrap();
 
+            // An over-large budget is clamped down to the ceiling...
             let clamped_high = XmlToArrowConverter::new(&parser, 8192, usize::MAX);
             assert_eq!(clamped_high.max_bytes_per_batch, MAX_BATCH_BYTES_CEILING);
 
+            // ...including one that would land exactly on the hard limit the
+            // headroom exists to stay clear of.
+            let at_hard_limit = XmlToArrowConverter::new(&parser, 8192, i32::MAX as usize);
+            assert_eq!(at_hard_limit.max_bytes_per_batch, MAX_BATCH_BYTES_CEILING);
+
+            // A zero budget is clamped up to 1, so no batch is ever empty.
             let clamped_low = XmlToArrowConverter::new(&parser, 8192, 0);
             assert_eq!(clamped_low.max_bytes_per_batch, 1);
 
