@@ -209,8 +209,8 @@ otherwise dominate; for a single large file the win is negligible.
 
 `parse_xml` and `parser.parse` read the input incrementally, but they
 accumulate *all* rows into one `RecordBatch` per table — peak memory grows
-with the dataset. For documents that don't fit in memory (multi-GB data
-files, Wikipedia-style dumps), use `parser.parse_batches`: it yields each
+with the dataset. For documents that don't fit in memory (multi-GB exports,
+archives, log or catalogue extracts), use `parser.parse_batches`: it yields each
 table's rows as a stream of batches, flushing whenever a table crosses a
 row-count or byte-size threshold, so memory stays bounded by the batch
 limits instead of the file size.
@@ -248,8 +248,8 @@ Guarantees and behavior:
   later batch of the parent table. Writing each table to its own sink (the
   Parquet case) is unaffected.
 - Compressed input composes as a plain `BufRead` adapter (e.g. a
-  `bzip2::bufread::MultiBzDecoder` around the file for Wikipedia dumps) —
-  no crate support needed.
+  `flate2::bufread::GzDecoder` or `bzip2::bufread::BzDecoder` wrapped around
+  the file) — no crate support needed.
 
 Variants: `parser.parse_batches_slice(&xml, options)` is the zero-copy
 version for in-memory or memory-mapped input, and

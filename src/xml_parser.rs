@@ -1052,8 +1052,8 @@ impl Parser {
     /// incrementally with bounded memory.
     ///
     /// This is the entry point for documents too large to hold in memory as
-    /// one set of Arrow tables (multi-GB data files, Wikipedia-style dumps).
-    /// The returned [`BatchStream`] is an
+    /// one set of Arrow tables (multi-GB exports, archives, log or catalogue
+    /// extracts). The returned [`BatchStream`] is an
     /// `Iterator<Item = Result<TableBatch>>`: each item names the table it
     /// belongs to and carries a batch of its rows. A table's batch is emitted
     /// whenever it crosses one of the [`BatchOptions`] thresholds, and the
