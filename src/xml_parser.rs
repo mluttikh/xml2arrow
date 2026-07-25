@@ -1872,6 +1872,16 @@ impl BatchOptions {
 
 /// One streamed batch: the table it belongs to and a `RecordBatch` of its
 /// rows. Yielded by [`BatchStream`].
+///
+/// Destructuring is the intended way to consume one:
+/// `let TableBatch { table, batch } = item?;`
+// Deliberately NOT `#[non_exhaustive]`, unlike `BatchOptions`. The two face
+// opposite directions: callers *construct* `BatchOptions` (where the attribute
+// earns its keep), but only ever *destructure* this — where it would cost every
+// caller a `..` in the pattern, permanently, to buy the ability to add a field.
+// Pre-1.0 that purchase is free anyway: every 0.x minor bump is already a
+// breaking change under Cargo's semver rules, so a field can be added in a
+// future 0.x. Revisit at the 1.0 boundary, when the field set is settled.
 #[derive(Debug, Clone)]
 pub struct TableBatch {
     /// The configured table name. `Arc<str>`: all batches of one table share
@@ -1959,6 +1969,10 @@ enum StreamState {
 ///
 /// The iterator is fused: after `None` — or after yielding an `Err` — it
 /// only returns `None`.
+// `Iterator`'s own `#[must_use]` does not carry over to a concrete named type,
+// so without this `parser.parse_batches(reader, options);` compiles and parses
+// nothing at all — silently, since the work is entirely lazy.
+#[must_use = "a BatchStream is lazy — dropping it without iterating parses nothing"]
 pub struct BatchStream<'p, S> {
     parser: &'p Parser,
     source: S,
@@ -2120,6 +2134,11 @@ impl<S> std::fmt::Debug for BatchStream<'_, S> {
 /// Errors surface as `ArrowError` (the trait's error type): native Arrow
 /// errors pass through, everything else wraps as
 /// `ArrowError::ExternalError` with this crate's [`Error`] as the source.
+// Lazy like [`BatchStream`]. The enclosing `Result` already carries a
+// `must_use`, but that only catches discarding the whole call — this also
+// catches `parser.parse_single_table(..).unwrap();`, which throws the reader
+// away after successfully building it.
+#[must_use = "a SingleTableReader is lazy — dropping it without iterating parses nothing"]
 pub struct SingleTableReader<'p, S> {
     schema: SchemaRef,
     stream: BatchStream<'p, S>,
