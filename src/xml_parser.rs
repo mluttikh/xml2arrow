@@ -6512,6 +6512,20 @@ mod tests {
                     data_type: Float64
             "#;
 
+        /// The minimal single-output-table config: one `<row>`-delimited table
+        /// with a single Int32 field. Used by the tests that exercise the
+        /// single-table entry points, where nesting would only add noise.
+        const SINGLE_TABLE_YAML: &str = r#"
+            tables:
+              - name: t
+                xml_path: /data
+                levels: [row]
+                fields:
+                  - name: v
+                    xml_path: /data/row/v
+                    data_type: Int32
+            "#;
+
         /// Runs `parse_batches`, groups the yielded batches per table
         /// (asserting the ≥ 1 row contract on each), and returns them in
         /// yield order.
@@ -6883,6 +6897,57 @@ mod tests {
             assert!(matches!(err, Error::InvalidConfig { .. }));
             assert!(err.to_string().contains("exactly one table"));
             assert!(err.to_string().contains('3'));
+
+            // The slice variant documents "exactly like parse_single_table";
+            // assert that here so the two can't drift apart silently.
+            let slice_err = parser
+                .parse_single_table_slice(b"<report/>", BatchOptions::default())
+                .unwrap_err();
+            assert_eq!(slice_err.to_string(), err.to_string());
+        }
+
+        #[test]
+        fn single_table_reader_slice_matches_buffered_reader() {
+            // The zero-copy counterpart of `parse_single_table`, which had no
+            // coverage at all. Two things are pinned: the batches match the
+            // buffered reader's exactly, and the signature is actually usable
+            // — `parse_single_table_slice<'a>(&'a self, xml: &'a [u8], ..)`
+            // unifies the parser and slice lifetimes, so a caller binding the
+            // reader to locals (the Parquet-writer shape) must still compile.
+            let xml = String::from(
+                r#"<data><row><v>1</v></row><row><v>2</v></row><row><v>3</v></row></data>"#,
+            );
+            let config = config_from_yaml!(SINGLE_TABLE_YAML);
+            let parser = Parser::new(&config).unwrap();
+            let options = BatchOptions::default().with_max_rows_per_batch(2);
+
+            let zero_copy = parser
+                .parse_single_table_slice(xml.as_bytes(), options)
+                .unwrap();
+            // Schema is available before the first batch, and is the same
+            // shared Arc the buffered reader and `Parser::schema` hand out.
+            let schema = zero_copy.schema();
+            assert!(Arc::ptr_eq(&schema, &parser.schema("t").unwrap()));
+
+            let zero_copy_batches: Vec<RecordBatch> =
+                zero_copy.map(|b| b.unwrap()).collect::<Vec<_>>();
+            let buffered_batches: Vec<RecordBatch> = parser
+                .parse_single_table(xml.as_bytes(), options)
+                .unwrap()
+                .map(|b| b.unwrap())
+                .collect();
+
+            assert_eq!(zero_copy_batches, buffered_batches);
+            assert_eq!(
+                zero_copy_batches
+                    .iter()
+                    .map(RecordBatch::num_rows)
+                    .collect::<Vec<_>>(),
+                vec![2, 1]
+            );
+            let concatenated = concat_batches(&schema, &zero_copy_batches).unwrap();
+            let full = parser.parse_slice(xml.as_bytes()).unwrap();
+            assert_eq!(&concatenated, full.get("t").unwrap());
         }
 
         #[test]

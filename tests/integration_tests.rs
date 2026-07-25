@@ -13,9 +13,13 @@ mod common;
 use std::fs::File;
 use std::io::{BufReader, Write};
 
-use arrow::array::{Array, Float64Array, Int32Array, StringArray, UInt32Array};
+use arrow::array::{
+    Array, Float64Array, Int32Array, RecordBatch, RecordBatchReader, StringArray, UInt32Array,
+};
+use arrow::compute::concat_batches;
+use indexmap::IndexMap;
 use tempfile::NamedTempFile;
-use xml2arrow::{Config, Parser, parse_xml};
+use xml2arrow::{BatchOptions, Config, Parser, TableBatch, parse_xml};
 
 use common::{parse_xml_file, write_xml_tempfile};
 
@@ -366,6 +370,276 @@ fn test_whitespace_only_file_returns_empty_batch() {
     let result = parse_xml(reader, &config);
 
     assert!(result.is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// Streaming (batched) output
+// ---------------------------------------------------------------------------
+//
+// The unit tests in `src/xml_parser.rs` cover the streaming *semantics* over
+// in-memory byte slices. What only an integration test reaches is the
+// file-based half: a real `File` behind a `BufReader` (the shape the feature
+// exists for), BOM handling on the streaming pump, and one compiled `Parser`
+// driving several streams — a documented guarantee with no unit coverage.
+
+/// Builds a nested sensor document: `sensors` sensors, each with
+/// `readings_per_sensor` readings. Enough rows that small batch thresholds
+/// force repeated flushes, and nested enough that the child table's
+/// `<sensor>` foreign keys must keep counting across those flush boundaries.
+fn sensor_xml(sensors: usize, readings_per_sensor: usize) -> String {
+    let mut xml = String::from(r#"<?xml version="1.0" encoding="UTF-8"?><sensorData><sensors>"#);
+    for s in 0..sensors {
+        xml.push_str(&format!("<sensor><id>S{s:03}</id><readings>"));
+        for r in 0..readings_per_sensor {
+            xml.push_str(&format!(
+                "<reading><value>{}.5</value></reading>",
+                s * 100 + r
+            ));
+        }
+        xml.push_str("</readings></sensor>");
+    }
+    xml.push_str("</sensors></sensorData>");
+    xml
+}
+
+const SENSOR_YAML: &str = r#"
+    tables:
+      - name: sensors
+        xml_path: /sensorData/sensors
+        levels: [sensor]
+        fields:
+          - name: id
+            xml_path: /sensorData/sensors/sensor/id
+            data_type: Utf8
+      - name: readings
+        xml_path: /sensorData/sensors/sensor/readings
+        levels: [sensor, reading]
+        fields:
+          - name: value
+            xml_path: /sensorData/sensors/sensor/readings/reading/value
+            data_type: Float64
+    "#;
+
+const COUNTER_YAML: &str = r#"
+    tables:
+      - name: rows
+        xml_path: /data
+        levels: [row]
+        fields:
+          - name: v
+            xml_path: /data/row/v
+            data_type: Int32
+    "#;
+
+/// Drives `parse_batches` over a file and groups the batches per table,
+/// asserting the "every yielded batch has ≥ 1 row" contract as it goes.
+fn stream_file(
+    parser: &Parser,
+    path: &std::path::Path,
+    options: BatchOptions,
+) -> IndexMap<String, Vec<RecordBatch>> {
+    let reader = BufReader::new(File::open(path).expect("Failed to open temp file"));
+    let mut grouped: IndexMap<String, Vec<RecordBatch>> = IndexMap::new();
+    for item in parser.parse_batches(reader, options) {
+        let TableBatch { table, batch } = item.expect("streamed batch failed");
+        assert!(batch.num_rows() > 0, "yielded an empty batch for '{table}'");
+        grouped.entry(table.to_string()).or_default().push(batch);
+    }
+    grouped
+}
+
+#[test]
+fn test_streaming_from_file_matches_full_parse() {
+    // The acceptance property, end-to-end over a real file: concatenating a
+    // table's streamed batches reproduces exactly what `parse` returns for it.
+    let xml_file = write_xml_tempfile(&sensor_xml(5, 7));
+    let config: Config = yaml_serde::from_str(SENSOR_YAML).unwrap();
+    let parser = Parser::new(&config).unwrap();
+
+    let full = parser
+        .parse(BufReader::new(File::open(xml_file.path()).unwrap()))
+        .unwrap();
+
+    let options = BatchOptions::default().with_max_rows_per_batch(3);
+    let streamed = stream_file(&parser, xml_file.path(), options);
+
+    // Guard the guard: if the threshold stopped forcing flushes, the
+    // equivalence below would hold trivially and prove nothing.
+    assert!(
+        streamed["readings"].len() > 1,
+        "expected several batches, got {}",
+        streamed["readings"].len()
+    );
+
+    for (name, batches) in &streamed {
+        let schema = parser.schema(name).unwrap();
+        let concatenated = concat_batches(&schema, batches).unwrap();
+        assert_eq!(
+            &concatenated,
+            full.get(name).unwrap(),
+            "streamed batches differ from full parse for table '{name}'"
+        );
+    }
+}
+
+#[test]
+fn test_streaming_handles_utf8_bom_file() {
+    // BOM stripping is a reader-level concern, so it has to hold on the
+    // streaming pump too, not only in `parse`. Same 0xEF 0xBB 0xBF prefix as
+    // `test_utf8_bom_file_parsed_correctly`.
+    let mut xml_file = NamedTempFile::new().unwrap();
+    xml_file.write_all(&[0xEF, 0xBB, 0xBF]).unwrap();
+    write!(
+        xml_file,
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+        <data><row><v>42</v></row></data>"#
+    )
+    .unwrap();
+
+    let config: Config = yaml_serde::from_str(COUNTER_YAML).unwrap();
+    let parser = Parser::new(&config).unwrap();
+    let streamed = stream_file(&parser, xml_file.path(), BatchOptions::default());
+
+    assert_eq!(streamed["rows"].len(), 1);
+    assert_array_values!(&streamed["rows"][0], "v", &[42], Int32Array);
+}
+
+#[test]
+fn test_parser_reused_across_sequential_streams() {
+    // Each stream must build fresh per-parse state. A leaked row counter or
+    // builder_stack would show up as wrong `<sensor>` foreign keys on the
+    // second document, so assert those and not just row counts.
+    let file_a = write_xml_tempfile(&sensor_xml(2, 2));
+    let file_b = write_xml_tempfile(&sensor_xml(1, 3));
+    let config: Config = yaml_serde::from_str(SENSOR_YAML).unwrap();
+    let parser = Parser::new(&config).unwrap();
+    let options = BatchOptions::default().with_max_rows_per_batch(2);
+
+    let schema = parser.schema("readings").unwrap();
+
+    let streamed_a = stream_file(&parser, file_a.path(), options);
+    let readings_a = concat_batches(&schema, &streamed_a["readings"]).unwrap();
+    assert_eq!(readings_a.num_rows(), 4);
+    assert_array_values!(&readings_a, "<sensor>", &[0, 0, 1, 1], UInt32Array);
+
+    let streamed_b = stream_file(&parser, file_b.path(), options);
+    let readings_b = concat_batches(&schema, &streamed_b["readings"]).unwrap();
+    assert_eq!(readings_b.num_rows(), 3);
+    assert_array_values!(&readings_b, "<sensor>", &[0, 0, 0], UInt32Array);
+    assert_array_values!(&readings_b, "<reading>", &[0, 1, 2], UInt32Array);
+}
+
+#[test]
+fn test_parser_serves_two_concurrent_streams() {
+    // `BatchStream` borrows its `Parser` immutably, which the docs advertise
+    // as "one compiled parser can serve many concurrent streams". Two live
+    // streams advanced alternately must stay fully independent — each owns its
+    // own converter, path tracker and row counters, sharing only the
+    // immutable compiled trie.
+    let file_a = write_xml_tempfile(
+        r#"<data><row><v>1</v></row><row><v>2</v></row><row><v>3</v></row></data>"#,
+    );
+    let file_b = write_xml_tempfile(r#"<data><row><v>10</v></row><row><v>20</v></row></data>"#);
+    let config: Config = yaml_serde::from_str(COUNTER_YAML).unwrap();
+    let parser = Parser::new(&config).unwrap();
+    // One row per batch, so each `next()` surfaces exactly one row and the
+    // interleaving is observable.
+    let options = BatchOptions::default().with_max_rows_per_batch(1);
+
+    let mut stream_a =
+        parser.parse_batches(BufReader::new(File::open(file_a.path()).unwrap()), options);
+    let mut stream_b =
+        parser.parse_batches(BufReader::new(File::open(file_b.path()).unwrap()), options);
+
+    let mut values_a = Vec::new();
+    let mut values_b = Vec::new();
+    loop {
+        let next_a = stream_a.next().transpose().unwrap();
+        let next_b = stream_b.next().transpose().unwrap();
+        if next_a.is_none() && next_b.is_none() {
+            break;
+        }
+        for (batch, sink) in [(next_a, &mut values_a), (next_b, &mut values_b)] {
+            if let Some(TableBatch { batch, .. }) = batch {
+                let column = batch
+                    .column_by_name("v")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .unwrap();
+                sink.extend(column.values().iter().copied());
+            }
+        }
+    }
+
+    assert_eq!(values_a, vec![1, 2, 3]);
+    assert_eq!(values_b, vec![10, 20]);
+}
+
+#[test]
+fn test_single_table_reader_over_file_exposes_schema_before_parsing() {
+    // The `RecordBatchReader` adapter is the integration point for
+    // schema-first sinks (`parquet::arrow::ArrowWriter`, DataFusion): the
+    // schema must be obtainable before the first batch is read, and be the
+    // one every batch then carries.
+    let xml_file = write_xml_tempfile(&sensor_xml(3, 4));
+    // `sensors` is structural (no fields): it feeds its row counter to the
+    // child's `<sensor>` level but produces no output, so this still counts as
+    // a single-output-table config — exercised here over a real file.
+    let config: Config = yaml_serde::from_str(
+        r#"
+        tables:
+          - name: sensors
+            xml_path: /sensorData/sensors
+            levels: [sensor]
+            fields: []
+          - name: readings
+            xml_path: /sensorData/sensors/sensor/readings
+            levels: [sensor, reading]
+            fields:
+              - name: value
+                xml_path: /sensorData/sensors/sensor/readings/reading/value
+                data_type: Float64
+        "#,
+    )
+    .unwrap();
+    let parser = Parser::new(&config).unwrap();
+
+    let reader = parser
+        .parse_single_table(
+            BufReader::new(File::open(xml_file.path()).unwrap()),
+            BatchOptions::default().with_max_rows_per_batch(5),
+        )
+        .unwrap();
+
+    // Read the schema before consuming a single batch, as a writer would.
+    let schema = reader.schema();
+    assert_eq!(
+        schema
+            .fields()
+            .iter()
+            .map(|f| f.name().as_str())
+            .collect::<Vec<_>>(),
+        vec!["<sensor>", "<reading>", "value"]
+    );
+
+    let batches: Vec<RecordBatch> = reader.map(|b| b.unwrap()).collect();
+    assert_eq!(
+        batches
+            .iter()
+            .map(RecordBatch::num_rows)
+            .collect::<Vec<_>>(),
+        vec![5, 5, 2]
+    );
+    for batch in &batches {
+        assert_eq!(batch.schema(), schema);
+    }
+
+    let concatenated = concat_batches(&schema, &batches).unwrap();
+    let full = parser
+        .parse(BufReader::new(File::open(xml_file.path()).unwrap()))
+        .unwrap();
+    assert_eq!(&concatenated, full.get("readings").unwrap());
 }
 
 // ---------------------------------------------------------------------------
