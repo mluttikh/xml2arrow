@@ -586,6 +586,9 @@ struct XmlToArrowConverter<'a> {
     /// prefix); when `false`, the raw qualified `name()` is used, skipping the
     /// per-name `:` scan. Cached here so the hot path reads a plain `bool`.
     strip_namespaces: bool,
+    /// Mirror of `ParserOptions::allow_truncated_input`; read once per parse,
+    /// on the `Event::Eof` arm.
+    allow_truncated_input: bool,
     /// Per-batch flush thresholds (rows / raw value bytes). The
     /// collect-everything entry points pass `usize::MAX` for both; the row
     /// threshold stays there, so its per-row comparison is an always-false,
@@ -663,6 +666,7 @@ impl<'a> XmlToArrowConverter<'a> {
             parent_indices_buffer: Vec::new(),
             validate_attributes: config.parser_options.validate_attributes,
             strip_namespaces: config.parser_options.strip_namespaces,
+            allow_truncated_input: config.parser_options.allow_truncated_input,
             max_rows_per_batch: max_rows_per_batch.max(1),
             max_bytes_per_batch: max_bytes_per_batch.clamp(1, MAX_BATCH_BYTES_CEILING),
             pending_flush: None,
@@ -1434,6 +1438,15 @@ fn close_element(
     Ok(LoopAction::Continue)
 }
 
+/// Builds the `TruncatedInput` error for the EOF completeness check. Outlined
+/// to keep `handle_event`'s body small (AGENTS.md §1), even though the check
+/// itself runs only once per parse.
+#[cold]
+#[inline(never)]
+fn truncated_input_error(open_elements: usize) -> Error {
+    Error::TruncatedInput { open_elements }
+}
+
 /// Resolves a general reference in element text (`&#66;`, `&amp;`,
 /// `&custom;`) and appends the resolved bytes to the fields listening at
 /// `node_id`.
@@ -1645,6 +1658,22 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
             }
         }
         Event::Eof => {
+            // A well-formed document closes every element it opened, so the
+            // tracker is back at root depth here. Anything else means the input
+            // ended mid-element — a truncated file, a killed writer, a short
+            // read — and the rows parsed so far are a plausible-looking
+            // *partial* result. Returning them silently is the worst failure
+            // mode this crate has, so fail instead.
+            //
+            // quick-xml's `check_end_names` only rejects *mismatched* end tags,
+            // never *missing* ones, so this is the only point at which
+            // truncation is detectable. `stop_at_paths` exits via
+            // `close_element`'s Break and never reaches this arm, so deliberate
+            // early stops keep working.
+            let depth = path_tracker.depth();
+            if depth > 0 && !xml_to_arrow_converter.allow_truncated_input {
+                return Err(truncated_input_error(depth));
+            }
             return Ok(LoopAction::Break);
         }
         _ => (),
@@ -1969,6 +1998,20 @@ enum StreamState {
 ///
 /// The iterator is fused: after `None` — or after yielding an `Err` — it
 /// only returns `None`.
+///
+/// # An error invalidates the batches already yielded
+///
+/// Because batches are handed out as they fill, a failure detected later in
+/// the document — a malformed value, or an
+/// [`Error::TruncatedInput`](crate::errors::Error) raised at EOF — arrives
+/// *after* the consumer already holds earlier batches. Those batches are not
+/// wrong in themselves, but they are an incomplete view of the document.
+///
+/// Treat any `Err` from this iterator as invalidating the whole stream, not as
+/// one bad batch to skip: discard what you have accumulated, or stage it
+/// somewhere you can roll back. The collect-everything entry points
+/// ([`Parser::parse`], [`Parser::parse_slice`]) do not have this problem —
+/// they return `Err` and nothing else.
 // `Iterator`'s own `#[must_use]` does not carry over to a concrete named type,
 // so without this `parser.parse_batches(reader, options);` compiles and parses
 // nothing at all — silently, since the work is entirely lazy.
@@ -7389,5 +7432,69 @@ mod tests {
             parse_xml(r#"<data><row><v> 3x </v></row></data>"#.as_bytes(), &config).unwrap_err();
         assert!(matches!(err, Error::ParseError { .. }), "got: {err}");
         assert!(err.to_string().contains("' 3x '"), "got: {err}");
+    }
+
+    // --- Truncated input & nesting-depth guard ---
+    //
+    // The trust-model matrix (all three entry points × every adversarial
+    // input) lives in `tests/adversarial_tests.rs`. These unit tests cover the
+    // parser-internal specifics: which rows survive, and where the guard fires.
+
+    #[test]
+    fn test_truncated_document_is_rejected_not_returned_partially() {
+        // A document cut mid-element used to return the rows parsed before the
+        // cut, indistinguishable from a complete parse. The two complete rows
+        // here are exactly what made it dangerous: the result looked fine.
+        let config = config_from_yaml!(
+            r#"
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: v
+                      xml_path: /data/row/v
+                      data_type: Utf8
+            "#
+        );
+        let err = parse_xml_slice(
+            b"<data><row><v>a</v></row><row><v>b</v></row><row><v>c",
+            &config,
+        )
+        .unwrap_err();
+        match err {
+            Error::TruncatedInput { open_elements } => {
+                // `<data>`, `<row>` and `<v>` were all still open.
+                assert_eq!(open_elements, 3, "got: {open_elements}");
+            }
+            other => panic!("expected TruncatedInput, got {other}"),
+        }
+    }
+
+    #[test]
+    fn test_truncated_document_returns_completed_rows_when_opted_in() {
+        // The recovery hatch keeps the rows that *did* close, and drops the
+        // row that was still open at the cut.
+        let mut config = config_from_yaml!(
+            r#"
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: v
+                      xml_path: /data/row/v
+                      data_type: Utf8
+            "#
+        );
+        config.parser_options.allow_truncated_input = true;
+        let batches = parse_xml_slice(
+            b"<data><row><v>a</v></row><row><v>b</v></row><row><v>c",
+            &config,
+        )
+        .unwrap();
+        let batch = batches.get("t").unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        assert_array_values!(batch, "v", &["a", "b"], StringArray);
     }
 }

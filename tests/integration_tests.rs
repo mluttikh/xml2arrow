@@ -772,3 +772,44 @@ fn test_realistic_sensor_data_parsed_correctly() {
         StringArray
     );
 }
+
+#[test]
+fn test_truncated_file_is_rejected_rather_than_silently_short() {
+    // Regression: a file cut short mid-element (killed writer, short read,
+    // partial download) used to parse to `Ok` with only the rows that had
+    // closed before the cut — a partial result indistinguishable from a
+    // complete one. File-based because that is how truncation actually
+    // reaches users; the buffered reader must surface it just as the
+    // zero-copy path does.
+    let xml_file =
+        write_xml_tempfile(r#"<data><item><id>1</id></item><item><id>2</id></item><item><id>3"#);
+    let config: Config = yaml_serde::from_str(
+        r#"
+        tables:
+          - name: items
+            xml_path: /data
+            levels: [item]
+            fields:
+              - name: id
+                xml_path: /data/item/id
+                data_type: Int32
+        "#,
+    )
+    .unwrap();
+
+    let file = File::open(xml_file.path()).unwrap();
+    let err = parse_xml(BufReader::new(file), &config).unwrap_err();
+    assert!(
+        matches!(err, xml2arrow::Error::TruncatedInput { .. }),
+        "expected TruncatedInput, got: {err}"
+    );
+
+    // Opting in returns the two rows that did close, and nothing more.
+    let mut lenient = config.clone();
+    lenient.parser_options.allow_truncated_input = true;
+    let file = File::open(xml_file.path()).unwrap();
+    let batches = parse_xml(BufReader::new(file), &lenient).unwrap();
+    let items = batches.get("items").unwrap();
+    assert_eq!(items.num_rows(), 2);
+    assert_array_values!(items, "id", &[1, 2], Int32Array);
+}

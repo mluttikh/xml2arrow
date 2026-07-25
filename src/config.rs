@@ -10,7 +10,12 @@ use arrow::datatypes::DataType;
 use serde::{Deserialize, Serialize};
 
 /// Configuration for the XML parser.
+///
+/// Marked `#[non_exhaustive]`: construct via [`ParserOptions::default`] and
+/// mutate the fields you care about, so that adding an option in a future
+/// release stays a non-breaking change.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[non_exhaustive]
 pub struct ParserOptions {
     /// Whether to trim whitespace from text nodes. Defaults to false.
     #[serde(default)]
@@ -64,6 +69,22 @@ pub struct ParserOptions {
     /// uses no prefixes or your config already encodes them.
     #[serde(default = "default_true")]
     pub strip_namespaces: bool,
+    /// Whether to accept input that ends while elements are still open.
+    /// Defaults to `false`.
+    ///
+    /// A document cut short mid-element yields the rows parsed before the cut,
+    /// which is indistinguishable from a complete parse — silent data loss. By
+    /// default such input raises
+    /// [`Error::TruncatedInput`](crate::errors::Error) and no batches are
+    /// returned.
+    ///
+    /// Set to `true` only for recovery tooling that deliberately reads partial
+    /// documents (salvaging a killed writer's output, tailing a log). To stop
+    /// parsing early at a *known* point instead, use
+    /// [`stop_at_paths`](Self::stop_at_paths), which is unaffected by this
+    /// option.
+    #[serde(default)]
+    pub allow_truncated_input: bool,
 }
 
 impl Default for ParserOptions {
@@ -74,6 +95,7 @@ impl Default for ParserOptions {
             validate_closing_tags: true,
             validate_attributes: true,
             strip_namespaces: true,
+            allow_truncated_input: false,
         }
     }
 }
@@ -523,7 +545,11 @@ impl FieldConfigBuilder {
 }
 
 /// Represents the data type of a field.
+///
+/// Marked `#[non_exhaustive]`: downstream matches must include a wildcard arm,
+/// so that adding a data type in a future release stays a non-breaking change.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[non_exhaustive]
 pub enum DType {
     Boolean,
     Float32,

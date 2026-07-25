@@ -80,6 +80,17 @@ pub enum Error {
     /// instead. Only reachable on enormous inputs (more than 2^32 rows in a
     /// single table scope), which the streaming entry points make possible.
     RowIndexOverflow { table: Arc<str> },
+    /// The document ended while elements were still open — the input was
+    /// truncated.
+    ///
+    /// The rows parsed before the cut are *not* returned: a partial batch is
+    /// indistinguishable from a complete one, so returning it silently would
+    /// hand the caller quietly incomplete data. `open_elements` is how many
+    /// elements were still unclosed at EOF.
+    ///
+    /// Deliberate early exits via `ParserOptions::stop_at_paths` do not raise
+    /// this; `ParserOptions::allow_truncated_input` disables it entirely.
+    TruncatedInput { open_elements: usize },
     /// A scale or offset was configured on a data type that doesn't support it.
     UnsupportedConversion {
         conversion: ConversionKind,
@@ -225,6 +236,10 @@ impl fmt::Display for Error {
                 f,
                 "Table '{table}' exceeded {} rows in a single scope; UInt32 <level> index columns cannot link further child rows",
                 u32::MAX
+            ),
+            Error::TruncatedInput { open_elements } => write!(
+                f,
+                "Truncated document: input ended with {open_elements} element(s) still open; the rows parsed so far are incomplete and were discarded (set parser_options.allow_truncated_input to accept them)"
             ),
             Error::UnsupportedConversion {
                 conversion,
@@ -399,6 +414,9 @@ impl From<Error> for PyErr {
             e @ Error::ParseError { .. } => ParseError::new_err(e.to_string()),
             e @ Error::MissingRequiredField { .. } => ParseError::new_err(e.to_string()),
             e @ Error::RowIndexOverflow { .. } => ParseError::new_err(e.to_string()),
+            // A document-wellformedness failure, not a value-decoding one, so
+            // it belongs with the parsing exceptions rather than `ParseError`.
+            e @ Error::TruncatedInput { .. } => XmlParsingError::new_err(e.to_string()),
             e @ Error::UnsupportedConversion { .. } => {
                 UnsupportedConversionError::new_err(e.to_string())
             }
@@ -449,6 +467,7 @@ mod tests {
             | Error::ParseError { .. }
             | Error::MissingRequiredField { .. }
             | Error::RowIndexOverflow { .. }
+            | Error::TruncatedInput { .. }
             | Error::UnsupportedConversion { .. }
             | Error::InvalidConfig { .. } => {}
         }
@@ -506,6 +525,7 @@ mod tests {
             Error::RowIndexOverflow {
                 table: Arc::from("t"),
             },
+            Error::TruncatedInput { open_elements: 2 },
             Error::UnsupportedConversion {
                 conversion: ConversionKind::Scaling,
                 data_type: "Int32".into(),

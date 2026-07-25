@@ -27,7 +27,7 @@ Add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-xml2arrow = "0.19.0"
+xml2arrow = "0.20.0"
 ```
 
 ## Features
@@ -39,6 +39,7 @@ xml2arrow = "0.19.0"
 - 💡 **Attribute and element extraction** using `@`-prefixed path segments for attributes
 - ⏹️ **Early termination** via `stop_at_paths` for efficiently reading only part of a file
 - 🌊 **Bounded-memory streaming** for documents larger than RAM — batched output via `parse_batches`, with a `RecordBatchReader` adapter for single-table configs
+- 🔒 **Safe on untrusted input** — no external entity resolution, no entity expansion, no silent truncation ([details](#-security--trust-model))
 
 ## Usage
 
@@ -56,6 +57,10 @@ parser_options:
                                # Set false to match raw qualified names and skip
                                # the per-name prefix scan (~4-7% faster); paths must
                                # then spell out any prefix. Free for prefix-free XML.
+  allow_truncated_input: <bool> # Accept input that ends mid-element (default: false).
+                               # By default a truncated document is an error rather
+                               # than a silently short result — see "Security &
+                               # trust model". Enable only for recovery tooling.
 tables:
   - name: <table_name>         # Name of the resulting Arrow RecordBatch
     xml_path: <xml_path>       # Path to the element whose children are rows.
@@ -461,6 +466,49 @@ tables:
 
 The `<station>` index in the `measurements` table links each measurement to its
 parent station by row position, enabling a join on `stations.<station> = measurements.<station>`.
+
+---
+
+## 🔒 Security & trust model
+
+`xml2arrow` is built to ingest XML from sources you do not control. The
+guarantees below are properties of the parser, not settings that can be
+misconfigured. They are pinned by `tests/adversarial_tests.rs`.
+
+### What an untrusted document cannot do
+
+- **Cause a file or network read (XXE-safe by construction).** `quick-xml` has
+  no entity resolver, so `SYSTEM`/`PUBLIC` entities are never fetched — a
+  document containing `<!ENTITY xxe SYSTEM "file:///etc/passwd">` resolves to an
+  error, not to the file's contents. No parse ever touches the filesystem or the
+  network on a document's behalf.
+- **Amplify itself through entity expansion ("billion laughs").** Only the five
+  predefined entities (`&amp;` `&lt;` `&gt;` `&quot;` `&apos;`) and numeric
+  character references resolve. A nested-entity bomb fails at its first
+  reference, so there is nothing to expand.
+- **Overflow the stack.** Parsing is a flat event loop over a heap-allocated
+  path stack, never recursion; nesting depth cannot exhaust the call stack. Deep
+  nesting costs memory linearly in the input size (measured ~1.1×), so a
+  document cannot amplify its way to exhausting yours.
+- **Return quietly incomplete data.** A document that ends while elements are
+  still open is rejected with `Error::TruncatedInput` rather than returned as a
+  short batch. Set `parser_options.allow_truncated_input: true` if you are
+  deliberately recovering data from a partial document.
+
+### Known limitations
+
+- **Entities declared in a document's own DTD are not resolved.** Valid XML
+  using internal entities — `<!ENTITY greeting "hello">` … `&greeting;` — is
+  rejected with `ParseKind::UnresolvedEntity`. This is the trade-off that makes
+  the guarantees above unconditional rather than dependent on limits;
+  pre-process such documents if you need them.
+- **A single enormous text node is still buffered whole.** This is true of any
+  event-based parser: a one-gigabyte text node becomes a one-gigabyte value
+  regardless of batch settings.
+- **Streaming surfaces errors late.** `parse_batches` yields batches as they
+  fill, so a failure detected later in the document arrives after earlier
+  batches were handed out. Treat any error from a `BatchStream` as invalidating
+  the whole stream.
 
 ---
 
