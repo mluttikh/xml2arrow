@@ -1043,7 +1043,7 @@ tables:
         .unwrap()
         .parse_slice(b"<data><item><v>1</v></item></data>")
         .unwrap_err();
-    let Error::UnmatchedFields { fields } = &err else {
+    let Error::UnmatchedFields { fields, .. } = &err else {
         panic!("expected UnmatchedFields, got: {err}");
     };
     assert_eq!(fields.len(), 1);
@@ -1280,4 +1280,110 @@ tables:
     for handle in handles {
         assert_eq!(handle.join().unwrap(), 1);
     }
+}
+
+#[test]
+fn unmatched_field_detection_explains_itself_when_stopping_early() {
+    use xml2arrow::errors::Error;
+
+    // `stop_at_paths` guarantees that everything below the stop path captures
+    // nothing, so strict detection reports it. The report is accurate; the
+    // default advice ("check the xml_path spellings") is not, so the message
+    // has to name the real cause.
+    let config: Config = yaml_serde::from_str(
+        r#"
+parser_options:
+  stop_at_paths: [/data/header]
+  error_on_unmatched_fields: true
+tables:
+  - name: header
+    xml_path: /data/header
+    levels: []
+    fields: [{name: title, xml_path: /data/header/title, data_type: Utf8}]
+  - name: items
+    xml_path: /data/items
+    levels: []
+    fields: [{name: v, xml_path: /data/items/item/v, data_type: Int32}]
+"#,
+    )
+    .unwrap();
+    let xml = b"<data><header><title>t</title></header><items><item><v>1</v></item></items></data>";
+
+    let err = Parser::new(&config).unwrap().parse_slice(xml).unwrap_err();
+    let Error::UnmatchedFields {
+        fields,
+        stop_paths_configured,
+    } = &err
+    else {
+        panic!("expected UnmatchedFields, got: {err}");
+    };
+    assert_eq!(fields.len(), 1);
+    assert_eq!(fields[0].field, "v");
+    assert!(stop_paths_configured);
+    assert!(err.to_string().contains("stop_at_paths"), "{err}");
+
+    // Without stop paths the wording stays as it was — the hint is only added
+    // where it applies. (Dropping the stop path from *this* config would make
+    // the field match, so the comparison needs a genuinely misspelled path.)
+    let misspelled: Config = yaml_serde::from_str(
+        r#"
+parser_options:
+  error_on_unmatched_fields: true
+tables:
+  - name: items
+    xml_path: /data
+    levels: []
+    fields: [{name: v, xml_path: /data/item/valeu, data_type: Int32, nullable: true}]
+"#,
+    )
+    .unwrap();
+    let err = Parser::new(&misspelled)
+        .unwrap()
+        .parse_slice(b"<data><item><value>1</value></item></data>")
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("check the xml_path spellings"),
+        "{err}"
+    );
+    assert!(!err.to_string().contains("stop_at_paths"), "{err}");
+}
+
+#[test]
+fn the_value_cap_does_not_carry_over_between_rows() {
+    // Exceeding the cap is fatal today, so this asserts the reachable half:
+    // the row that trips it is the row reported. The reset in `end_row` is what
+    // keeps that true if a future value policy makes the error recoverable.
+    use xml2arrow::errors::Error;
+
+    let config: Config = yaml_serde::from_str(
+        r#"
+parser_options:
+  max_value_bytes: 4
+tables:
+  - name: items
+    xml_path: /data
+    levels: []
+    fields: [{name: s, xml_path: /data/item/s, data_type: Utf8}]
+"#,
+    )
+    .unwrap();
+    let parser = Parser::new(&config).unwrap();
+
+    // Three small rows then an oversized one: the error names row 3, so no
+    // earlier row was affected by the field's state.
+    let xml = b"<data><item><s>a</s></item><item><s>b</s></item><item><s>c</s></item><item><s>toolong</s></item></data>";
+    let err = parser.parse_slice(xml).unwrap_err();
+    let Error::ValueTooLarge { location, .. } = &err else {
+        panic!("expected ValueTooLarge, got: {err}");
+    };
+    assert_eq!(location.row, Some(3));
+
+    // And a document that never trips it parses clean.
+    assert_eq!(
+        parser
+            .parse_slice(b"<data><item><s>a</s></item><item><s>b</s></item></data>")
+            .unwrap()["items"]
+            .num_rows(),
+        2
+    );
 }

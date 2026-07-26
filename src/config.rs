@@ -97,6 +97,13 @@ pub struct ParserOptions {
     /// documents is a normal configuration, and enabling it would change the
     /// outcome of parses that work today. A future release makes strictness
     /// the default and moves the opt-out to the field.
+    ///
+    /// **Interaction with [`stop_at_paths`](Self::stop_at_paths):** stopping
+    /// early guarantees that every field below the stop path captures nothing,
+    /// so combining the two reports those fields as unmatched. That is
+    /// accurate but rarely what the caller means, and the error says so rather
+    /// than blaming the spelling. Use one or the other, or split the config so
+    /// that the header-only parse configures only header fields.
     #[serde(default)]
     pub error_on_unmatched_fields: bool,
     /// Maximum number of bytes a single field value may accumulate, or `None`

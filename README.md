@@ -65,7 +65,9 @@ parser_options:
   error_on_unmatched_fields: <bool>  # Fail if a configured field never matched
                                # anything in the document (default: false). Catches
                                # misspelled xml_paths, whose symptom is otherwise a
-                               # silently all-null column.
+                               # silently all-null column. Note that stop_at_paths
+                               # leaves everything below the stop path unmatched, so
+                               # the two options pull against each other.
   max_value_bytes: <number>    # Cap on the bytes a single field value may accumulate
                                # across text/CDATA/entity events (default: unlimited).
 tables:

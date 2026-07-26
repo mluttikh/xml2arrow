@@ -559,6 +559,12 @@ impl TableBuilder {
         for field_builder in &mut self.field_builders {
             field_builder.has_value = false;
             field_builder.current_value.clear();
+            // Per-row, like the two above. Exceeding the value cap is fatal
+            // today, so the parse never reaches another row and leaving this
+            // set would be invisible — but only until a value policy makes it
+            // recoverable, at which point one oversized value would reject
+            // every later row of the field.
+            field_builder.value_too_large = false;
         }
         Ok(())
     }
@@ -1011,7 +1017,10 @@ impl XmlToArrowConverter {
                     })
             })
             .collect();
-        (!fields.is_empty()).then_some(Error::UnmatchedFields { fields })
+        (!fields.is_empty()).then_some(Error::UnmatchedFields {
+            fields,
+            stop_paths_configured: !self.compiled.config.parser_options.stop_at_paths.is_empty(),
+        })
     }
 
     fn finish(mut self) -> Result<IndexMap<String, arrow::record_batch::RecordBatch>> {
@@ -2288,10 +2297,13 @@ enum StreamState {
 /// Incremental XML → Arrow parse: an iterator of [`TableBatch`]es with
 /// bounded memory.
 ///
-/// Created by [`Parser::parse_batches`] / [`Parser::parse_batches_slice`];
-/// see [`Parser::parse_batches`] for the yielded guarantees. The stream
-/// borrows its [`Parser`] immutably, so one compiled parser can serve many
-/// concurrent streams.
+/// Created by [`Parser::parse_batches`] / [`Parser::parse_batches_slice`], or
+/// by [`Parser::into_batches`] when the stream needs to outlive the binding the
+/// parser is in; see [`Parser::parse_batches`] for the yielded guarantees.
+///
+/// The stream holds its own handle on the compiled parser, so one [`Parser`]
+/// can serve any number of concurrent streams and none of them keeps the
+/// original binding alive.
 ///
 /// The iterator is fused: after `None` — or after yielding an `Err` — it
 /// only returns `None`.

@@ -94,7 +94,15 @@ pub enum Error {
     /// drifted away from the config); without this check the result is a
     /// silently all-null/empty column. Every unmatched field is reported at
     /// once so a broken config is fixed in one round trip.
-    UnmatchedFields { fields: Vec<UnmatchedField> },
+    ///
+    /// `stop_paths_configured` records whether `stop_at_paths` was in play,
+    /// because it makes the usual diagnosis wrong: a deliberate early exit
+    /// leaves every field below the stop path unmatched, and telling that user
+    /// to check their spelling sends them hunting for a bug they do not have.
+    UnmatchedFields {
+        fields: Vec<UnmatchedField>,
+        stop_paths_configured: bool,
+    },
     /// A single field's accumulated value exceeded
     /// `ParserOptions::max_value_bytes`.
     ///
@@ -363,10 +371,18 @@ impl fmt::Display for Error {
                 )?;
                 write_location(f, location)
             }
-            Error::UnmatchedFields { fields } => {
+            Error::UnmatchedFields {
+                fields,
+                stop_paths_configured,
+            } => {
+                let hint = if *stop_paths_configured {
+                    "check the xml_path spellings — and note that parser_options.stop_at_paths ends the parse early, so fields below a stop path never match"
+                } else {
+                    "check the xml_path spellings"
+                };
                 write!(
                     f,
-                    "{} configured field(s) never matched any element or attribute in the document (check the xml_path spellings):",
+                    "{} configured field(s) never matched any element or attribute in the document ({hint}):",
                     fields.len()
                 )?;
                 for (index, unmatched) in fields.iter().enumerate() {
@@ -712,6 +728,17 @@ mod tests {
                     field: "f".into(),
                     xml_path: "/p".into(),
                 }],
+                stop_paths_configured: false,
+            },
+            // The early-exit wording is a different arm, so it needs its own
+            // sample.
+            Error::UnmatchedFields {
+                fields: vec![UnmatchedField {
+                    table: "t".into(),
+                    field: "f".into(),
+                    xml_path: "/p".into(),
+                }],
+                stop_paths_configured: true,
             },
             Error::ValueTooLarge {
                 field: Arc::from("f"),

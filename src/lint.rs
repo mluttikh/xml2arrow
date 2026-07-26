@@ -216,22 +216,28 @@ impl Config {
         lints
     }
 
-    /// How many table scopes enclose a row of the table at `table_path`: its
-    /// non-root ancestor tables plus itself.
+    /// How many index values a row of the table at `table_path` receives: one
+    /// per enclosing non-root table scope, plus one for the table itself unless
+    /// *it* is the root table.
     ///
-    /// The root table (`xml_path: /`) is excluded because `end_current_row`
-    /// skips it when collecting parent indices — it represents the document,
-    /// not a repeating scope.
+    /// The root table (`xml_path: /`) is excluded on both counts, because
+    /// `end_current_row` skips it when collecting parent indices — it
+    /// represents the document rather than a repeating scope, and so supplies
+    /// no index to its own rows either. Counting it would let the one config
+    /// this lint exists to catch through: a root table declaring any level at
+    /// all has an index column that can never be filled.
     fn enclosing_table_scopes(&self, table_path: &str) -> usize {
-        1 + self
-            .tables
-            .iter()
-            .filter(|ancestor| {
-                path_segments(&ancestor.xml_path).next().is_some()
-                    && !paths_equal(&ancestor.xml_path, table_path)
-                    && path_is_under(table_path, &ancestor.xml_path)
-            })
-            .count()
+        let is_root = path_segments(table_path).next().is_none();
+        usize::from(!is_root)
+            + self
+                .tables
+                .iter()
+                .filter(|ancestor| {
+                    path_segments(&ancestor.xml_path).next().is_some()
+                        && !paths_equal(&ancestor.xml_path, table_path)
+                        && path_is_under(table_path, &ancestor.xml_path)
+                })
+                .count()
     }
 
     /// Every configured direct child *element* of `table_path`, in first-seen
@@ -446,6 +452,50 @@ tables:
     levels: [scope, item]
     fields:
       - {name: v, xml_path: /data/items/item/v, data_type: Int32}
+"#
+        );
+        assert!(
+            !config
+                .lint()
+                .iter()
+                .any(|lint| matches!(lint, Lint::ExcessLevels { .. }))
+        );
+    }
+
+    #[test]
+    fn a_root_table_declaring_any_level_is_reported() {
+        // The root table supplies no index even to its own rows, so a single
+        // level is already one more than can ever be filled. Without this the
+        // config parses and then dies at batch assembly with "all columns in a
+        // record batch must have the same length" — the opaque failure this
+        // lint exists to pre-empt.
+        let config = config_from_yaml!(
+            r#"
+tables:
+  - name: doc
+    xml_path: /
+    levels: [report]
+    fields:
+      - {name: title, xml_path: /report/title, data_type: Int32}
+"#
+        );
+        assert!(config.lint().contains(&Lint::ExcessLevels {
+            table: "doc".to_string(),
+            declared: 1,
+            available: 0,
+        }));
+    }
+
+    #[test]
+    fn a_root_table_without_levels_is_not_reported() {
+        let config = config_from_yaml!(
+            r#"
+tables:
+  - name: doc
+    xml_path: /
+    levels: []
+    fields:
+      - {name: title, xml_path: /report/title, data_type: Int32}
 "#
         );
         assert!(
