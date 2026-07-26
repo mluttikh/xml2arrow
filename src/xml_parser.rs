@@ -1010,9 +1010,6 @@ pub struct Parser {
     config: Config,
     /// The compiled path trie — the expensive artifact this type exists to reuse.
     registry: PathRegistry,
-    /// Path nodes that trigger early termination after their closing tags.
-    /// Resolved against `registry` once at construction.
-    stop_node_ids: Vec<PathNodeId>,
     /// Whether any configured field maps to an attribute. Cached so the hot
     /// path can pick the attribute-free event loop without re-scanning config.
     needs_attrs: bool,
@@ -1061,13 +1058,6 @@ impl Parser {
         // amortize across every document parsed through this `Parser`.
         let registry = PathRegistry::from_config(config);
 
-        let stop_node_ids = config
-            .parser_options
-            .stop_at_paths
-            .iter()
-            .filter_map(|path| registry.resolve_path(path))
-            .collect::<Vec<_>>();
-
         let table_schemas = config
             .tables
             .iter()
@@ -1082,7 +1072,6 @@ impl Parser {
         Ok(Self {
             config: config.clone(),
             registry,
-            stop_node_ids,
             needs_attrs: config.requires_attribute_parsing(),
             table_schemas,
             table_names,
@@ -1169,11 +1158,11 @@ impl Parser {
         let mut reader = Reader::from_reader(reader);
         self.configure_reader(&mut reader);
         let needs_attrs = self.needs_attrs;
-        self.run_parse(&mut reader, |r, t, c, s| {
+        self.run_parse(&mut reader, |r, t, c| {
             if needs_attrs {
-                process_xml_events::<_, true>(r, t, c, s)
+                process_xml_events::<_, true>(r, t, c)
             } else {
-                process_xml_events::<_, false>(r, t, c, s)
+                process_xml_events::<_, false>(r, t, c)
             }
         })
     }
@@ -1188,11 +1177,11 @@ impl Parser {
         let mut reader = Reader::from_reader(xml);
         self.configure_reader(&mut reader);
         let needs_attrs = self.needs_attrs;
-        self.run_parse(&mut reader, |r, t, c, s| {
+        self.run_parse(&mut reader, |r, t, c| {
             if needs_attrs {
-                process_xml_events_slice::<true>(r, t, c, s)
+                process_xml_events_slice::<true>(r, t, c)
             } else {
-                process_xml_events_slice::<false>(r, t, c, s)
+                process_xml_events_slice::<false>(r, t, c)
             }
         })
     }
@@ -1406,12 +1395,7 @@ impl Parser {
         run_events: F,
     ) -> Result<IndexMap<String, RecordBatch>>
     where
-        F: FnOnce(
-            &mut Reader<R>,
-            &mut PathTracker,
-            &mut XmlToArrowConverter<'_>,
-            &[PathNodeId],
-        ) -> Result<()>,
+        F: FnOnce(&mut Reader<R>, &mut PathTracker, &mut XmlToArrowConverter<'_>) -> Result<()>,
     {
         // usize::MAX thresholds: collect everything, never trigger a flush
         // (root-table priming happens inside the converter constructor).
@@ -1422,13 +1406,8 @@ impl Parser {
         // parked at the failing event, so annotating the byte offset *here* —
         // once per parse, not per event — loses no precision and keeps
         // position work entirely out of the loop.
-        run_events(
-            reader,
-            &mut path_tracker,
-            &mut xml_to_arrow_converter,
-            &self.stop_node_ids,
-        )
-        .map_err(|e| e.with_position(reader.buffer_position()))?;
+        run_events(reader, &mut path_tracker, &mut xml_to_arrow_converter)
+            .map_err(|e| e.with_position(reader.buffer_position()))?;
 
         xml_to_arrow_converter.finish()
     }
@@ -1557,48 +1536,40 @@ enum LoopAction {
     Break,
 }
 
-/// Closes the currently entered element: pops the table (if any), leaves the
-/// path tracker, finalizes the parent row (if the parent is a table or we are
-/// at the root table), and signals a break when a stop path matches.
+/// Closes the currently entered element: pops its frame, pops the table scope
+/// it opened, finalizes a row if this element delimits one, and signals a break
+/// when it is a stop path.
 ///
-/// Called by both `Event::End` (capturing the top frame's data first) and
-/// `Event::Empty` (which enters and immediately closes). Keeping the closing
-/// semantics in one place avoids subtle drift between the two.
+/// Called by both `Event::End` and `Event::Empty` (which enters and closes in
+/// one event). Keeping the closing semantics in one place avoids drift between
+/// them.
 ///
-/// `is_table` is the closing element's own table flag, captured by the
-/// caller from the path-tracker frame before this function pops it. After
-/// `path_tracker.leave()`, the new top of the stack is the parent — so
-/// `top_is_table()` answers "do we need to finalize a parent row?" without
-/// any second `node_info` lookup. The implicit root frame carries its own
-/// `is_table` (seeded at construction), so the root-table case does not
-/// need a special branch.
+/// Every decision here is a bit the frame has carried since `enter()` resolved
+/// it, so closing an element touches neither the registry nor the parent frame.
+/// `ends_row` in particular is the *precomputed* form of the rule this function
+/// used to evaluate — "the closing element is configured and its parent is a
+/// table" — see [`PathNodeInfo::ends_row`] for why the two are the same rule.
+/// Which table the row belongs to is unchanged: the innermost table still open,
+/// which is what makes an unconfigured subtree unable to perturb any output.
 #[inline]
 fn close_element(
-    node_id: Option<PathNodeId>,
-    is_table: bool,
     path_tracker: &mut PathTracker,
     xml_to_arrow_converter: &mut XmlToArrowConverter<'_>,
-    stop_node_ids: &[PathNodeId],
 ) -> Result<LoopAction> {
-    if is_table {
+    // `None` at root depth: a stray end tag with no open element is a no-op.
+    let Some(frame) = path_tracker.leave() else {
+        return Ok(LoopAction::Continue);
+    };
+
+    if frame.is_table {
         xml_to_arrow_converter.end_table();
     }
-    path_tracker.leave();
-
-    // Only *configured* elements delimit rows (node_id is Some). Letting an
-    // unknown element finalize a row would fabricate null/empty rows whenever
-    // the document grows siblings the config doesn't know about. Configured
-    // children keep the established behavior: each known direct child of a
-    // table element closing ends a row.
-    if node_id.is_some() && path_tracker.top_is_table() {
+    if frame.ends_row {
         xml_to_arrow_converter.end_current_row()?;
     }
-
-    // Stop after closing the configured path, so header-only reads can exit
-    // without scanning the remainder of the XML.
-    if let Some(node_id) = node_id
-        && stop_node_ids.contains(&node_id)
-    {
+    // Stop after closing the configured path, so header-only reads exit without
+    // scanning the remainder of the document.
+    if frame.is_stop {
         return Ok(LoopAction::Break);
     }
     Ok(LoopAction::Continue)
@@ -1693,7 +1664,6 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
     decoder: Decoder,
     path_tracker: &mut PathTracker,
     xml_to_arrow_converter: &mut XmlToArrowConverter<'_>,
-    stop_node_ids: &[PathNodeId],
     attr_name_buffer: &mut Vec<u8>,
 ) -> Result<LoopAction> {
     match event {
@@ -1754,21 +1724,16 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
                 e.name().into_inner()
             };
 
-            let (node_id_opt, table_index, has_attrs, is_table) =
+            let (node_id_opt, table_index, has_attrs) =
                 match path_tracker.enter(name_bytes, xml_to_arrow_converter.registry) {
                     Some((id, info)) => {
                         // Same repeated-element guard as Event::Start.
                         if !info.field_indices.is_empty() {
                             xml_to_arrow_converter.check_element_not_repeated(info)?;
                         }
-                        (
-                            Some(id),
-                            info.table_index,
-                            info.has_attribute_children,
-                            info.is_table(),
-                        )
+                        (Some(id), info.table_index, info.has_attribute_children)
                     }
-                    None => (None, None, false, false),
+                    None => (None, None, false),
                 };
 
             if let Some(table_idx) = table_index {
@@ -1785,17 +1750,10 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
                 )?;
             }
 
-            // Empty elements have no children or text; close immediately.
-            // `close_element` will pop this element's frame via leave(), so
-            // top_is_table() then reads the parent — exactly matching the
-            // Event::End behavior below.
-            return close_element(
-                node_id_opt,
-                is_table,
-                path_tracker,
-                xml_to_arrow_converter,
-                stop_node_ids,
-            );
+            // Empty elements have no children or text; close immediately. The
+            // frame `enter` just pushed carries the same bits an `Event::End`
+            // would pop, so the two paths cannot diverge.
+            return close_element(path_tracker, xml_to_arrow_converter);
         }
         Event::GeneralRef(e) => {
             if let Some(node_id) = path_tracker.current() {
@@ -1815,19 +1773,7 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
             }
         }
         Event::End(_) => {
-            // Read this element's own (node_id, is_table) from the top of
-            // the path-tracker stack BEFORE close_element pops it via
-            // leave(). peek_top() returns None at root depth, so a stray
-            // End with no matching open element is a no-op.
-            if let Some((node_id_opt, is_table)) = path_tracker.peek_top() {
-                return close_element(
-                    node_id_opt,
-                    is_table,
-                    path_tracker,
-                    xml_to_arrow_converter,
-                    stop_node_ids,
-                );
-            }
+            return close_element(path_tracker, xml_to_arrow_converter);
         }
         Event::Eof => {
             // A well-formed document closes every element it opened, so the
@@ -1862,7 +1808,6 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
     reader: &mut Reader<B>,
     path_tracker: &mut PathTracker,
     xml_to_arrow_converter: &mut XmlToArrowConverter<'_>,
-    stop_node_ids: &[PathNodeId],
 ) -> Result<()> {
     let mut buf = Vec::with_capacity(4096);
     let mut attr_name_buffer = Vec::with_capacity(64);
@@ -1877,7 +1822,6 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
             decoder,
             path_tracker,
             xml_to_arrow_converter,
-            stop_node_ids,
             &mut attr_name_buffer,
         )?;
         if matches!(action, LoopAction::Break) {
@@ -1898,7 +1842,6 @@ fn process_xml_events_slice<const PARSE_ATTRIBUTES: bool>(
     reader: &mut Reader<&[u8]>,
     path_tracker: &mut PathTracker,
     xml_to_arrow_converter: &mut XmlToArrowConverter<'_>,
-    stop_node_ids: &[PathNodeId],
 ) -> Result<()> {
     let mut attr_name_buffer = Vec::with_capacity(64);
     // Decoder is `Copy` and reflects the reader's encoding, which does not
@@ -1912,7 +1855,6 @@ fn process_xml_events_slice<const PARSE_ATTRIBUTES: bool>(
             decoder,
             path_tracker,
             xml_to_arrow_converter,
-            stop_node_ids,
             &mut attr_name_buffer,
         )?;
         if matches!(action, LoopAction::Break) {
@@ -2298,7 +2240,6 @@ impl<'p, S: EventSource> Iterator for BatchStream<'p, S> {
                             self.decoder,
                             &mut self.path_tracker,
                             &mut self.converter,
-                            &self.parser.stop_node_ids,
                             &mut self.attr_name_buffer,
                         )
                     } else {
@@ -2307,7 +2248,6 @@ impl<'p, S: EventSource> Iterator for BatchStream<'p, S> {
                             self.decoder,
                             &mut self.path_tracker,
                             &mut self.converter,
-                            &self.parser.stop_node_ids,
                             &mut self.attr_name_buffer,
                         )
                     };
@@ -7370,7 +7310,10 @@ mod tests {
             );
             let parser = Parser::new(&config).unwrap();
             let mut converter = XmlToArrowConverter::new(&parser, usize::MAX, usize::MAX);
-            let node_id = parser.registry.resolve_path("/data").unwrap();
+            let node_id = parser
+                .registry
+                .get_child(PathNodeId::ROOT, b"data")
+                .unwrap();
             converter.start_table(0, node_id);
 
             // The last representable index is fine...

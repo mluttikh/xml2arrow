@@ -66,6 +66,26 @@ pub struct PathNodeInfo {
     /// Whether any child of this node has an attribute path (starts with "@").
     /// Used to skip attribute parsing for elements that have no attribute fields configured.
     pub has_attribute_children: bool,
+    /// Whether this element's closing tag finalizes a row of the innermost
+    /// open table — true exactly when this node's **parent** is a table node.
+    ///
+    /// This is the row-boundary rule, precomputed. Evaluated at runtime it
+    /// reads "the closing element is configured *and* its parent frame is a
+    /// table", and both halves are static: a trie node has exactly one parent,
+    /// and every configured node exists once the registry is built. Hoisting
+    /// it here turns the close path into a single bit test on a frame the
+    /// parser has already popped, and is what the declared-row element will
+    /// extend rather than replace — a declared row marks *itself*, where the
+    /// inferred rule marks each configured child of a table.
+    ///
+    /// Attribute pseudo-nodes are never marked: `parse_attributes` enters and
+    /// leaves them directly, without going through the row-finalizing close
+    /// path, so an attribute has never delimited a row.
+    pub ends_row: bool,
+    /// Whether this node is a `stop_at_paths` target, so that closing it ends
+    /// the parse. Replaces a linear scan of the configured stop paths on every
+    /// element close.
+    pub is_stop: bool,
 }
 
 impl PathNodeInfo {
@@ -187,6 +207,25 @@ impl NodeChildren {
             NodeChildren::Large(map) => map.keys().any(|n| n.starts_with(b"@")),
         }
     }
+
+    /// Ids of the children that are *elements* — attribute pseudo-nodes
+    /// excluded. Collected into a `Vec` (setup-time only) so the caller can
+    /// mutate `node_info` while iterating.
+    fn element_child_ids(&self) -> Vec<PathNodeId> {
+        let is_element = |name: &[u8]| !name.starts_with(b"@");
+        match self {
+            NodeChildren::Small(entries) => entries
+                .iter()
+                .filter(|(name, _)| is_element(name))
+                .map(|(_, id)| *id)
+                .collect(),
+            NodeChildren::Large(map) => map
+                .iter()
+                .filter(|(name, _)| is_element(name))
+                .map(|(_, id)| *id)
+                .collect(),
+        }
+    }
 }
 
 impl PathRegistry {
@@ -226,10 +265,27 @@ impl PathRegistry {
                 registry.children[node_id_idx].any_attribute_name();
         }
 
-        // Phase 4: register optional stop paths so the parser can resolve them
-        // without string lookups in the hot loop.
+        // Phase 4: register optional stop paths and mark them, so ending the
+        // parse is a bit test rather than a scan of the configured paths.
         for stop_path in &config.parser_options.stop_at_paths {
-            registry.get_or_create_path(stop_path);
+            let node_id = registry.get_or_create_path(stop_path);
+            registry.node_info[node_id.index()].is_stop = true;
+        }
+
+        // Phase 5: mark the nodes whose closing tag finalizes a row — every
+        // element child of a table node. See `PathNodeInfo::ends_row` for why
+        // this is exactly the rule the parser used to evaluate per event.
+        //
+        // Must run *after* phase 4: a stop path can introduce nodes, and a node
+        // introduced under a table path delimits rows exactly like any other
+        // configured child. Marking before phase 4 would miss those and quietly
+        // change row counts for configs that combine the two.
+        for node_idx in 0..registry.children.len() {
+            if registry.node_info[node_idx].is_table() {
+                for child_id in registry.children[node_idx].element_child_ids() {
+                    registry.node_info[child_id.index()].ends_row = true;
+                }
+            }
         }
 
         registry
@@ -252,23 +308,6 @@ impl PathRegistry {
         }
 
         current_node
-    }
-
-    /// Resolves a path string to an existing node ID without creating new nodes.
-    ///
-    /// Returns `None` if the path doesn't exist in the registry.
-    pub fn resolve_path(&self, path_str: &str) -> Option<PathNodeId> {
-        let mut current_node = PathNodeId::ROOT;
-
-        for part in path_str
-            .trim_start_matches('/')
-            .split('/')
-            .filter(|s| !s.is_empty())
-        {
-            current_node = self.get_child(current_node, part.as_bytes())?;
-        }
-
-        Some(current_node)
     }
 
     /// Gets or creates a child node for the given parent and name.
@@ -330,10 +369,10 @@ impl PathRegistry {
 
 /// One frame on the `PathTracker` stack — a single open XML element.
 ///
-/// Carries the metadata the parser needs to react to the matching close
-/// without a second registry lookup. `is_table` is materialized at `enter()`
-/// time from `PathNodeInfo` so `Event::End` and `Event::Empty` can decide
-/// whether to finalize a row using only the stack.
+/// Carries everything the parser needs when the matching close arrives, all
+/// materialized once at `enter()` from `PathNodeInfo`. Closing an element is
+/// therefore a pop plus three bit tests, with no registry lookup and no look
+/// at the parent frame.
 #[derive(Debug, Clone, Copy)]
 struct StackEntry {
     /// Node ID for known paths; `ROOT` for unknown subtrees (placeholder).
@@ -342,6 +381,23 @@ struct StackEntry {
     is_known: bool,
     /// Whether this node is a table boundary. Only meaningful when `is_known`.
     is_table: bool,
+    /// Whether closing this element finalizes a row. See
+    /// [`PathNodeInfo::ends_row`].
+    ends_row: bool,
+    /// Whether closing this element ends the parse (`stop_at_paths`).
+    is_stop: bool,
+}
+
+/// The bits a closing element carries, returned by [`PathTracker::leave`].
+///
+/// An unknown element (one outside every configured path) yields all-false:
+/// it opens no table scope, delimits no row, and stops nothing — which is what
+/// keeps a document's unconfigured subtrees from perturbing the output.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ClosedFrame {
+    pub is_table: bool,
+    pub ends_row: bool,
+    pub is_stop: bool,
 }
 
 /// Tracks the current position in the path trie during parsing.
@@ -350,11 +406,12 @@ struct StackEntry {
 /// mirrors XML nesting depth; the bottom is always the implicit document
 /// root, so the stack is never empty.
 ///
-/// Each frame carries the few bits the parser needs at `Event::End` /
-/// `Event::Empty` time (`is_table`, `is_known`), captured once when `enter()`
-/// resolves the node. Closing an element therefore never re-reads
-/// `node_info[]` — a single stack pop answers both "was this a table?" and
-/// (via the new top) "does the parent finalize a row?".
+/// Each frame carries every bit the parser needs at `Event::End` /
+/// `Event::Empty` time, captured once when `enter()` resolves the node.
+/// Closing an element is therefore a single pop: the popped frame answers
+/// "was this a table scope?", "does this finalize a row?" and "does this end
+/// the parse?" on its own, without re-reading `node_info[]` and without
+/// consulting the parent frame.
 ///
 /// If a path is unknown, we keep pushing "unknown" placeholder frames until
 /// we exit that subtree. This avoids repeated registry lookups for
@@ -364,12 +421,25 @@ pub struct PathTracker {
     node_stack: Vec<StackEntry>,
 }
 
+impl StackEntry {
+    /// A frame for an element outside every configured path. Unknown subtrees
+    /// push these to keep depth aligned with XML nesting without touching the
+    /// registry again.
+    const UNKNOWN: Self = Self {
+        node_id: PathNodeId::ROOT,
+        is_known: false,
+        is_table: false,
+        ends_row: false,
+        is_stop: false,
+    };
+}
+
 impl PathTracker {
     /// Creates a new path tracker starting at the root.
     ///
-    /// `registry` is consulted exactly once to seed the root frame's
-    /// `is_table` flag (so `top_is_table()` works at root depth without
-    /// re-querying).
+    /// `registry` is consulted exactly once, to seed the root frame's
+    /// `is_table` flag. The root frame is never popped, so its remaining bits
+    /// are inert.
     pub fn new(registry: &PathRegistry) -> Self {
         let root_is_table = registry.is_table_path(PathNodeId::ROOT);
         Self {
@@ -377,6 +447,9 @@ impl PathTracker {
                 node_id: PathNodeId::ROOT,
                 is_known: true,
                 is_table: root_is_table,
+                // The root frame is never popped, so these are inert.
+                ends_row: false,
+                is_stop: false,
             }],
         }
     }
@@ -400,11 +473,7 @@ impl PathTracker {
         if !top.is_known {
             // Parent path is not in config, so children can't be either.
             // Push a placeholder so leave() pops at the right depth.
-            self.node_stack.push(StackEntry {
-                node_id: PathNodeId::ROOT,
-                is_known: false,
-                is_table: false,
-            });
+            self.node_stack.push(StackEntry::UNKNOWN);
             return None;
         }
 
@@ -414,28 +483,30 @@ impl PathTracker {
                 node_id: child_id,
                 is_known: true,
                 is_table: info.is_table(),
+                ends_row: info.ends_row,
+                is_stop: info.is_stop,
             });
             Some((child_id, info))
         } else {
-            self.node_stack.push(StackEntry {
-                node_id: PathNodeId::ROOT,
-                is_known: false,
-                is_table: false,
-            });
+            self.node_stack.push(StackEntry::UNKNOWN);
             None
         }
     }
 
-    /// Leaves the current element, returning to the parent path.
+    /// Leaves the current element, returning to the parent path and handing
+    /// back the closing element's precomputed bits.
     ///
-    /// Returns the node ID that was popped, or None if it wasn't a known path.
+    /// Returns `None` at root depth, where there is no open element to close —
+    /// which is how a stray end tag stays a no-op.
     #[inline]
-    pub fn leave(&mut self) -> Option<PathNodeId> {
+    pub fn leave(&mut self) -> Option<ClosedFrame> {
         if self.node_stack.len() > 1 {
             let entry = self.node_stack.pop().unwrap();
-            if entry.is_known {
-                return Some(entry.node_id);
-            }
+            return Some(ClosedFrame {
+                is_table: entry.is_table,
+                ends_row: entry.ends_row,
+                is_stop: entry.is_stop,
+            });
         }
         None
     }
@@ -449,34 +520,6 @@ impl PathTracker {
         } else {
             None
         }
-    }
-
-    /// Returns the top frame's `(node_id_if_known, is_table)` when an element
-    /// is open above root, or `None` at root depth (no element to close).
-    ///
-    /// Used by `Event::End` to read the closing element's attributes without
-    /// popping (the pop happens later inside `close_element` via `leave()`).
-    #[inline]
-    pub fn peek_top(&self) -> Option<(Option<PathNodeId>, bool)> {
-        if self.node_stack.len() > 1 {
-            let top = self.node_stack.last().unwrap();
-            let id = if top.is_known {
-                Some(top.node_id)
-            } else {
-                None
-            };
-            Some((id, top.is_table))
-        } else {
-            None
-        }
-    }
-
-    /// Returns true if the top of the stack is currently a table-boundary
-    /// path. After `leave()` this answers "is the parent a table?", which is
-    /// what `close_element` needs to decide whether to finalize a row.
-    #[inline]
-    pub fn top_is_table(&self) -> bool {
-        self.node_stack.last().unwrap().is_table
     }
 
     /// Returns the current node ID, or ROOT if unknown.
@@ -506,6 +549,146 @@ impl PathTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The row-boundary rule, checked at the level it is now decided: which
+    /// nodes carry `ends_row`. Evaluated per event it read "the closing element
+    /// is configured and its parent is a table"; these cases are the ones where
+    /// a precomputed form could drift from that.
+    mod ends_row {
+        use super::*;
+
+        fn registry(yaml: &str) -> PathRegistry {
+            PathRegistry::from_config(&config_from_yaml!(yaml))
+        }
+
+        fn ends_row(registry: &PathRegistry, path: &[&[u8]]) -> bool {
+            let mut node = PathNodeId::ROOT;
+            for segment in path {
+                node = registry.get_child(node, segment).expect("configured path");
+            }
+            registry.get_node_info(node).ends_row
+        }
+
+        const NESTED: &str = r#"
+tables:
+  - name: outer
+    xml_path: /data
+    levels: []
+    fields:
+      - {name: v, xml_path: /data/item/v, data_type: Int32}
+  - name: inner
+    xml_path: /data/item/sub
+    levels: []
+    fields:
+      - {name: w, xml_path: /data/item/sub/row/w, data_type: Int32}
+"#;
+
+        #[test]
+        fn children_of_a_table_delimit_rows() {
+            let registry = registry(NESTED);
+            assert!(ends_row(&registry, &[b"data", b"item"]));
+            assert!(ends_row(&registry, &[b"data", b"item", b"sub", b"row"]));
+        }
+
+        #[test]
+        fn grandchildren_of_a_table_do_not() {
+            // `v` sits under `item`, which is not a table, so closing it must
+            // not finalize anything.
+            let registry = registry(NESTED);
+            assert!(!ends_row(&registry, &[b"data", b"item", b"v"]));
+            assert!(!ends_row(
+                &registry,
+                &[b"data", b"item", b"sub", b"row", b"w"]
+            ));
+        }
+
+        #[test]
+        fn what_delimits_is_the_parent_being_a_table_not_the_node_itself() {
+            // `sub` opens a table scope, but its parent `item` is not a table,
+            // so closing it finalizes nothing. Being a table says nothing about
+            // whether *this* element ends a row — only the parent does.
+            let nested = registry(NESTED);
+            assert!(!ends_row(&nested, &[b"data", b"item", b"sub"]));
+
+            // Whereas a table that *is* a direct child of another table both
+            // opens a scope and ends a row of the enclosing table.
+            let sibling = registry(
+                r#"
+tables:
+  - name: outer
+    xml_path: /data
+    levels: []
+    fields:
+      - {name: n, xml_path: /data/n, data_type: Int32}
+  - name: inner
+    xml_path: /data/group
+    levels: []
+    fields:
+      - {name: v, xml_path: /data/group/row/v, data_type: Int32}
+"#,
+            );
+            assert!(ends_row(&sibling, &[b"data", b"group"]));
+        }
+
+        #[test]
+        fn attributes_never_delimit_rows() {
+            let registry = registry(
+                r#"
+tables:
+  - name: items
+    xml_path: /data
+    levels: []
+    fields:
+      - {name: id, xml_path: /data/@id, data_type: Utf8}
+      - {name: v, xml_path: /data/item/v, data_type: Int32}
+"#,
+            );
+            assert!(!ends_row(&registry, &[b"data", b"@id"]));
+            assert!(ends_row(&registry, &[b"data", b"item"]));
+        }
+
+        #[test]
+        fn a_stop_path_under_a_table_delimits_a_row_too() {
+            // Stop paths are registered before this is computed, so a node a
+            // stop path introduces delimits rows like any other configured
+            // child. Computing the flags first would silently drop that row.
+            let registry = registry(
+                r#"
+parser_options:
+  stop_at_paths: [/data/marker]
+tables:
+  - name: items
+    xml_path: /data
+    levels: []
+    fields:
+      - {name: v, xml_path: /data/item/v, data_type: Int32}
+"#,
+            );
+            let marker = &[b"data".as_slice(), b"marker".as_slice()];
+            assert!(ends_row(&registry, marker));
+            let mut node = PathNodeId::ROOT;
+            for segment in marker {
+                node = registry.get_child(node, segment).unwrap();
+            }
+            assert!(registry.get_node_info(node).is_stop);
+        }
+
+        #[test]
+        fn the_root_table_marks_the_document_element() {
+            let registry = registry(
+                r#"
+tables:
+  - name: doc
+    xml_path: /
+    levels: []
+    fields:
+      - {name: title, xml_path: /report/title, data_type: Utf8}
+"#,
+            );
+            assert!(ends_row(&registry, &[b"report"]));
+            assert!(!ends_row(&registry, &[b"report", b"title"]));
+        }
+    }
     use crate::config::{DType, FieldConfigBuilder, TableConfig};
     use crate::config_from_yaml;
 
