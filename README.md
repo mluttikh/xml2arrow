@@ -38,7 +38,7 @@ xml2arrow = "0.20.0"
 - 🎯 **Type conversion** including automatic scale and offset transforms for float fields
 - 💡 **Attribute and element extraction** using `@`-prefixed path segments for attributes
 - ⏹️ **Early termination** via `stop_at_paths` for efficiently reading only part of a file
-- 🌊 **Bounded-memory streaming** for documents larger than RAM — batched output via `parse_batches`, with a `RecordBatchReader` adapter for single-table configs
+- 🌊 **Bounded-memory streaming** for documents larger than RAM — batched output via `parse_batches`, owned (`'static`) streams via `into_batches`, and a `RecordBatchReader` adapter for single-table configs
 - 🔒 **Safe on untrusted input** — no external entity resolution, no entity expansion, no silent truncation ([details](#-security--trust-model))
 - 🔎 **Config lints** via `parser.warnings()` — advisory warnings about configs that are valid but behave surprisingly ([details](#checking-a-config-for-surprises))
 
@@ -323,6 +323,34 @@ for batch in reader {
 }
 writer.close()?;
 ```
+
+#### Streams that own their parser
+
+`parse_batches` borrows the parser, so the stream it returns cannot outlive the
+binding the parser is in. When the stream has to stand alone — returned from a
+function, stored in a struct, sent to another thread, or handed across an FFI
+boundary — use `into_batches` instead. A `Parser` is a cheap handle over shared
+compiled state, so cloning it is a refcount bump and the original stays usable:
+
+```rust
+use xml2arrow::{BatchOptions, Parser};
+
+let parser = Parser::new(&config)?;
+
+let stream = parser.clone().into_batches(file, BatchOptions::default());
+let rows = std::thread::spawn(move || {
+    stream.map(|item| item.unwrap().batch.num_rows()).sum::<usize>()
+});
+
+// `parser` is still usable here, and can serve other streams concurrently.
+```
+
+`into_single_table` is the same for the `RecordBatchReader` adapter, which is
+what schema-first sinks want: `ArrowWriter`, DataFusion, and pyarrow's C stream
+all expect to own the reader they are given.
+
+`Parser` is `Send + Sync`, so one compiled configuration can be shared across
+threads without recompiling the path trie per thread.
 
 ---
 
