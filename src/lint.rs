@@ -4,8 +4,10 @@
 //! [`Config::validate`] rejects configs that cannot work. This module reports
 //! the next tier: configs that parse and run, but whose row semantics or value
 //! handling depend on rules users routinely get wrong — chiefly that **row
-//! boundaries are inferred** from which elements happen to be configured
-//! (`TRANSITION_PLAN.md` §1), rather than declared.
+//! boundaries are inferred rather than declared**: a row of a table ends when
+//! any *configured* direct child of its `xml_path` closes, so a table with two
+//! such children yields two half-filled rows per container, and adding a field
+//! can change a table's row count.
 //!
 //! Two properties are deliberate:
 //!

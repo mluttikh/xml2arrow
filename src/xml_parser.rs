@@ -1605,8 +1605,9 @@ fn close_element(
 }
 
 /// Builds the `TruncatedInput` error for the EOF completeness check. Outlined
-/// to keep `handle_event`'s body small (AGENTS.md §1), even though the check
-/// itself runs only once per parse.
+/// to keep `handle_event`'s body small — code-size growth there has cost more
+/// than 10% through lost inlining — even though this check itself runs only
+/// once per parse.
 #[cold]
 #[inline(never)]
 fn truncated_input_error(open_elements: usize) -> Error {

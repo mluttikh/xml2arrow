@@ -30,9 +30,9 @@
 //! # When a case fails
 //!
 //! A failure means output changed. That is a finding, not a chore: either the
-//! change is a bug, or it is an intentional, *catalogued* semantic change (see
-//! `DESIGN_V2.md` §10.1) that belongs to an opt-in. Re-blessing is a deliberate
-//! act — read the diff first.
+//! change is a bug, or it is an intentional semantic change that belongs to an
+//! opt-in and has been documented as such. Re-recording is a deliberate act —
+//! read the diff first, and say in the commit message which of the two it was.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -75,9 +75,8 @@ fn frozen_corpus_output_is_unchanged() {
         "{} of {} frozen corpus case(s) changed:\n\n{}\n\n\
          Output changed. Decide which it is:\n\
          - a bug: fix the code;\n\
-         - an intentional, catalogued change behind an opt-in: update the \
-           catalogue, then re-record with `{FREEZE_ENV}=1 cargo test --test \
-           frozen_corpus`.",
+         - an intentional change behind an opt-in: document the delta, then \
+           re-record with `{FREEZE_ENV}=1 cargo test --test frozen_corpus`.",
         failures.len(),
         cases.len(),
         failures.join("\n\n")
