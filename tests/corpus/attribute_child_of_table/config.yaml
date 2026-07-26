@@ -1,0 +1,10 @@
+# The table has an attribute of its own element as a field, alongside an element
+# child. Attributes are entered and left without going through the close path,
+# so they must not delimit rows: exactly two rows, not four.
+tables:
+  - name: items
+    xml_path: /data
+    levels: []
+    fields:
+      - {name: id, xml_path: /data/@id, data_type: Utf8, nullable: true}
+      - {name: v, xml_path: /data/item/v, data_type: Int32, nullable: true}

@@ -1,0 +1,11 @@
+# A stop path that introduces a node the config does not otherwise mention,
+# directly under a table path. The node exists in the trie once the stop path is
+# registered, so its closing tag delimits a row like any other configured child.
+parser_options:
+  stop_at_paths: [/data/marker]
+tables:
+  - name: items
+    xml_path: /data
+    levels: []
+    fields:
+      - {name: v, xml_path: /data/item/v, data_type: Int32, nullable: true}

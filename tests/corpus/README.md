@@ -40,6 +40,7 @@ show the *old* values, proving the opt-in is genuinely opt-in.
 | `utf8_missing_yields_empty_string` | a missing non-nullable `Utf8` yields `""` where every other type errors | per-field `on_missing` |
 | `whitespace_without_trim` | `trim_text` governs strings, while numerics trim regardless | per-field `trim` |
 | `empty_document_yields_empty_tables`, `stop_at_paths` | a zero-row table is returned empty when collecting, but never appears in a stream | — (asymmetry pinned, not yet scheduled) |
+| `self_closing_table_element` | a field's value is **dropped** when a different table's scope is on top of the stack when it arrives (`outer.n` is null although `<n>1</n>` is present) | declared field ownership |
 | `error_truncated_input` | truncated input is an error, not a short result | already changed in 0.20 (was a silent partial result in 0.19) |
 
 ## Adding a case
