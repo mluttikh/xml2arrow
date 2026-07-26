@@ -76,6 +76,33 @@ impl TypedArrayBuilder {
         }
     }
 
+    /// Replaces this builder with an empty one sized for `rows` values.
+    ///
+    /// `finish()` hands the buffers to the finished array and leaves the
+    /// builder at zero capacity, so a streaming table re-grows every column
+    /// through the whole doubling sequence on each batch — around thirteen
+    /// reallocations per column at the default 8192-row threshold. Sizing the
+    /// next batch from the one just emitted turns that into one allocation.
+    ///
+    /// `Utf8` takes `data_capacity` for its value buffer as well; the row count
+    /// alone would only cover the offsets.
+    fn reset_with_capacity(&mut self, rows: usize, data_capacity: usize) {
+        match self {
+            Self::Boolean(b) => *b = BooleanBuilder::with_capacity(rows),
+            Self::Int8(b) => *b = Int8Builder::with_capacity(rows),
+            Self::UInt8(b) => *b = UInt8Builder::with_capacity(rows),
+            Self::Int16(b) => *b = Int16Builder::with_capacity(rows),
+            Self::UInt16(b) => *b = UInt16Builder::with_capacity(rows),
+            Self::Int32(b) => *b = Int32Builder::with_capacity(rows),
+            Self::UInt32(b) => *b = UInt32Builder::with_capacity(rows),
+            Self::Int64(b) => *b = Int64Builder::with_capacity(rows),
+            Self::UInt64(b) => *b = UInt64Builder::with_capacity(rows),
+            Self::Float32(b) => *b = Float32Builder::with_capacity(rows),
+            Self::Float64(b) => *b = Float64Builder::with_capacity(rows),
+            Self::Utf8(b) => *b = StringBuilder::with_capacity(rows, data_capacity),
+        }
+    }
+
     fn finish(&mut self) -> Arc<dyn Array> {
         match self {
             Self::Boolean(b) => Arc::new(b.finish()),
@@ -579,13 +606,36 @@ impl TableBuilder {
         Ok(())
     }
 
+    /// Re-sizes every builder for a batch like the one just emitted.
+    ///
+    /// The row count is the batch that just went out; the byte budget is split
+    /// evenly across the fields, which is crude but bounded — over-reserving a
+    /// short column costs a few unused bytes, while under-reserving costs a
+    /// reallocation. Nothing here changes what is produced, only how many times
+    /// the buffers are grown to produce it.
+    fn reserve_for_next_batch(&mut self) {
+        let rows = self.rows_in_batch;
+        if rows == 0 {
+            return;
+        }
+        for index_builder in &mut self.index_builders {
+            *index_builder = UInt32Builder::with_capacity(rows);
+        }
+        let bytes_per_field = self.bytes_in_batch / self.field_builders.len().max(1);
+        for field_builder in &mut self.field_builders {
+            field_builder
+                .array_builder
+                .reset_with_capacity(rows, bytes_per_field);
+        }
+    }
+
     /// Finishes the accumulated rows into a `RecordBatch` and resets the
     /// array builders (Arrow's `finish()` contract) so accumulation can
     /// continue into the next batch. `row_index` is deliberately untouched —
     /// see its field doc; flushing is *value-transparent*: concatenating all
     /// batches a table emits yields exactly the single batch a non-streaming
     /// parse would have produced.
-    fn flush(&mut self) -> Result<RecordBatch> {
+    fn flush(&mut self, reserve_next: bool) -> Result<RecordBatch> {
         let num_arrays = self.field_builders.len() + self.index_builders.len();
         let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(num_arrays);
         for index_builder in &mut self.index_builders {
@@ -593,6 +643,13 @@ impl TableBuilder {
         }
         for field_builder in &mut self.field_builders {
             arrays.push(field_builder.finish());
+        }
+        // Size the next batch from the one just emitted, before the counters
+        // that describe it are cleared. Only worth doing when another batch is
+        // actually coming: the collect-everything path flushes once, at the end,
+        // where reserving would allocate for rows that will never arrive.
+        if reserve_next {
+            self.reserve_for_next_batch();
         }
         self.rows_in_batch = 0;
         self.bytes_in_batch = 0;
@@ -962,7 +1019,7 @@ impl<'a> XmlToArrowConverter<'a> {
         let mut record_batches = IndexMap::new();
         for table_builder in &mut self.table_builders {
             if !table_builder.field_builders.is_empty() {
-                let record_batch = table_builder.flush()?;
+                let record_batch = table_builder.flush(false)?;
                 record_batches.insert(table_builder.meta.name.clone(), record_batch);
             }
         }
@@ -2171,8 +2228,12 @@ impl<'p, S: EventSource> BatchStream<'p, S> {
     }
 
     /// Flushes `table_idx`'s accumulated rows into a [`TableBatch`].
-    fn flush_table(&mut self, table_idx: usize) -> Result<TableBatch> {
-        let batch = self.converter.table_builders[table_idx].flush()?;
+    ///
+    /// `more_rows_expected` distinguishes a threshold flush, where the table
+    /// will keep accumulating and so wants its buffers sized, from the final
+    /// drain, where reserving would allocate for rows that never arrive.
+    fn flush_table(&mut self, table_idx: usize, more_rows_expected: bool) -> Result<TableBatch> {
+        let batch = self.converter.table_builders[table_idx].flush(more_rows_expected)?;
         Ok(TableBatch {
             table: self.parser.table_names[table_idx].clone(),
             batch,
@@ -2196,7 +2257,7 @@ impl<'p, S: EventSource> BatchStream<'p, S> {
             self.state = StreamState::Draining {
                 next_table: table_idx + 1,
             };
-            return match self.flush_table(table_idx) {
+            return match self.flush_table(table_idx, false) {
                 Ok(item) => Some(Ok(item)),
                 Err(e) => {
                     self.state = StreamState::Done;
@@ -2268,7 +2329,7 @@ impl<'p, S: EventSource> Iterator for BatchStream<'p, S> {
                         self.state = StreamState::Draining { next_table: 0 };
                     }
                     if let Some(table_idx) = self.converter.pending_flush.take() {
-                        return match self.flush_table(table_idx) {
+                        return match self.flush_table(table_idx, true) {
                             Ok(item) => Some(Ok(item)),
                             Err(e) => {
                                 self.state = StreamState::Done;
