@@ -12,6 +12,7 @@
 //! event loop can focus on direct indexing and appends.
 use std::io::BufRead;
 use std::iter::FusedIterator;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use arrow::array::{
@@ -682,13 +683,16 @@ struct TableStackEntry {
 /// validated config and compiled `PathRegistry` — lives in [`Parser`], which
 /// this borrows from. Splitting the two is what lets a single `Parser` parse
 /// many documents without rebuilding the path trie each time (see [`Parser`]).
-struct XmlToArrowConverter<'a> {
+struct XmlToArrowConverter {
     /// Table builders for each table defined in the configuration, indexed by position.
     table_builders: Vec<TableBuilder>,
     /// Stack of active tables representing the current nesting level.
     builder_stack: Vec<TableStackEntry>,
-    /// Path registry for efficient path lookups, borrowed from the owning `Parser`.
-    registry: &'a PathRegistry,
+    /// The compiled state this parse runs against, shared with the `Parser`
+    /// rather than borrowed from it. Holding an `Arc` (one pointer, like the
+    /// reference it replaces) is what lets a stream own its parser; reads go
+    /// through `self.compiled.registry` and cost the same load as before.
+    compiled: Arc<Compiled>,
     /// Reusable buffer for collecting parent row indices, avoiding per-row allocation.
     parent_indices_buffer: Vec<u32>,
     /// Mirror of `ParserOptions::validate_attributes`. When `false`, the
@@ -756,7 +760,7 @@ struct XmlToArrowConverter<'a> {
 /// while being appended, on the streaming and non-streaming paths alike.
 const MAX_BATCH_BYTES_CEILING: usize = (i32::MAX / 2) as usize;
 
-impl<'a> XmlToArrowConverter<'a> {
+impl XmlToArrowConverter {
     /// Builds the fresh per-parse state from an already-compiled [`Parser`].
     ///
     /// This is the only work that *must* happen on every document: allocating
@@ -770,11 +774,11 @@ impl<'a> XmlToArrowConverter<'a> {
     /// threshold is likewise clamped into `1..=MAX_BATCH_BYTES_CEILING`, so a
     /// caller cannot raise it past the point where accumulated Utf8 bytes would
     /// overflow a `StringBuilder`'s i32 offsets.
-    fn new(parser: &'a Parser, max_rows_per_batch: usize, max_bytes_per_batch: usize) -> Self {
-        let config = &parser.config;
+    fn new(parser: &Parser, max_rows_per_batch: usize, max_bytes_per_batch: usize) -> Self {
+        let config = &parser.inner.config;
         let max_value_bytes = config.parser_options.max_value_bytes.unwrap_or(usize::MAX);
         let mut table_builders = Vec::with_capacity(config.tables.len());
-        for (table_config, schema) in config.tables.iter().zip(&parser.table_schemas) {
+        for (table_config, schema) in config.tables.iter().zip(&parser.inner.table_schemas) {
             table_builders.push(TableBuilder::new(
                 table_config,
                 schema.clone(),
@@ -785,7 +789,7 @@ impl<'a> XmlToArrowConverter<'a> {
         let mut converter = Self {
             table_builders,
             builder_stack: Vec::new(),
-            registry: &parser.registry,
+            compiled: Arc::clone(&parser.inner),
             parent_indices_buffer: Vec::new(),
             validate_attributes: config.parser_options.validate_attributes,
             error_on_unmatched_fields: config.parser_options.error_on_unmatched_fields,
@@ -801,7 +805,7 @@ impl<'a> XmlToArrowConverter<'a> {
         // builder_stack would affect parent_row_indices for all nested tables,
         // breaking their level indexing. Tables with xml_path: / and no fields
         // are just used for hierarchy purposes and don't need to be on the stack.
-        if let Some(table_idx) = parser.registry.get_table_index(PathNodeId::ROOT)
+        if let Some(table_idx) = parser.inner.registry.get_table_index(PathNodeId::ROOT)
             && !converter.table_builders[table_idx]
                 .field_builders
                 .is_empty()
@@ -814,7 +818,7 @@ impl<'a> XmlToArrowConverter<'a> {
     /// Sets a field value for the current table using path node information.
     #[inline]
     pub fn set_field_value_for_node(&mut self, node_id: PathNodeId, value: &[u8]) {
-        let info = self.registry.get_node_info(node_id);
+        let info = self.compiled.registry.get_node_info(node_id);
         if info.field_indices.is_empty() {
             return;
         }
@@ -903,7 +907,7 @@ impl<'a> XmlToArrowConverter<'a> {
     /// unresolvable reference is an error (it would corrupt a field value)
     /// or ignorable (nothing is listening at this node).
     fn active_field_meta(&self, node_id: PathNodeId) -> Option<(&FieldMeta, usize)> {
-        let info = self.registry.get_node_info(node_id);
+        let info = self.compiled.registry.get_node_info(node_id);
         let current_table_idx = self.builder_stack.last()?.table_idx;
         info.field_indices
             .iter()
@@ -1062,6 +1066,17 @@ impl<'a> XmlToArrowConverter<'a> {
 /// }
 /// ```
 pub struct Parser {
+    /// The compiled state, shared rather than borrowed so that a stream can
+    /// *own* its parser: a `BatchStream` that borrowed one could never be
+    /// `'static`, which forces every FFI and async wrapper into a thread and a
+    /// channel to get around the lifetime. Cloning is a refcount bump, so one
+    /// compiled config can serve any number of concurrent streams.
+    inner: Arc<Compiled>,
+}
+
+/// Everything `Parser::new` computes once: immutable, `Sync`, and shared by
+/// every parse the parser serves.
+struct Compiled {
     /// Owned copy of the configuration, retained so each parse can rebuild its
     /// fresh `TableBuilder`s and re-apply the reader options.
     config: Config,
@@ -1080,6 +1095,15 @@ pub struct Parser {
     /// [`TableBatch`]es carry a clone; `Arc<str>` keeps that per-batch cost
     /// to a refcount bump.
     table_names: Vec<Arc<str>>,
+}
+
+impl Clone for Parser {
+    /// A refcount bump — the compiled trie and schemas are shared, never copied.
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
 }
 
 /// Builds a table's output schema exactly as its batches are laid out:
@@ -1127,11 +1151,13 @@ impl Parser {
             .collect();
 
         Ok(Self {
-            config: config.clone(),
-            registry,
-            needs_attrs: config.requires_attribute_parsing(),
-            table_schemas,
-            table_names,
+            inner: Arc::new(Compiled {
+                config: config.clone(),
+                registry,
+                needs_attrs: config.requires_attribute_parsing(),
+                table_schemas,
+                table_names,
+            }),
         })
     }
 
@@ -1164,7 +1190,7 @@ impl Parser {
     /// ```
     #[must_use]
     pub fn warnings(&self) -> Vec<Lint> {
-        self.config.lint()
+        self.inner.config.lint()
     }
 
     /// Returns the output schema of `table` without parsing any document.
@@ -1179,11 +1205,12 @@ impl Parser {
     /// (empty `fields`), which never appear in any output.
     #[must_use]
     pub fn schema(&self, table: &str) -> Option<SchemaRef> {
-        self.config
+        self.inner
+            .config
             .tables
             .iter()
             .position(|tc| tc.name == table && !tc.fields.is_empty())
-            .map(|idx| self.table_schemas[idx].clone())
+            .map(|idx| self.inner.table_schemas[idx].clone())
     }
 
     /// Returns the schema of the config's unique output table — the table
@@ -1199,7 +1226,7 @@ impl Parser {
     /// Returns [`Error::InvalidConfig`] when the config does not have exactly
     /// one table with fields, exactly like [`Parser::parse_single_table`].
     pub fn single_table_schema(&self) -> Result<SchemaRef> {
-        Ok(self.table_schemas[self.single_output_table_index()?].clone())
+        Ok(self.inner.table_schemas[self.single_output_table_index()?].clone())
     }
 
     /// Parses XML from a streaming reader (e.g. a `File`) into Arrow batches.
@@ -1214,7 +1241,7 @@ impl Parser {
     pub fn parse(&self, reader: impl BufRead) -> Result<IndexMap<String, RecordBatch>> {
         let mut reader = Reader::from_reader(reader);
         self.configure_reader(&mut reader);
-        let needs_attrs = self.needs_attrs;
+        let needs_attrs = self.inner.needs_attrs;
         self.run_parse(&mut reader, |r, t, c| {
             if needs_attrs {
                 process_xml_events::<_, true>(r, t, c)
@@ -1233,7 +1260,7 @@ impl Parser {
     pub fn parse_slice(&self, xml: &[u8]) -> Result<IndexMap<String, RecordBatch>> {
         let mut reader = Reader::from_reader(xml);
         self.configure_reader(&mut reader);
-        let needs_attrs = self.needs_attrs;
+        let needs_attrs = self.inner.needs_attrs;
         self.run_parse(&mut reader, |r, t, c| {
             if needs_attrs {
                 process_xml_events_slice::<true>(r, t, c)
@@ -1305,7 +1332,7 @@ impl Parser {
         let mut reader = Reader::from_reader(reader);
         self.configure_reader(&mut reader);
         BatchStream::new(
-            self,
+            self.clone(),
             ReaderSource {
                 reader,
                 buf: Vec::with_capacity(4096),
@@ -1326,7 +1353,82 @@ impl Parser {
     ) -> BatchStream<'a, SliceSource<'a>> {
         let mut reader = Reader::from_reader(xml);
         self.configure_reader(&mut reader);
-        BatchStream::new(self, SliceSource { reader }, options)
+        BatchStream::new(self.clone(), SliceSource { reader }, options)
+    }
+
+    /// Streams a reader into batches through a parser the stream **owns**,
+    /// yielding a `BatchStream<'static, _>` when the reader is `'static`.
+    ///
+    /// [`Parser::parse_batches`] borrows the parser, so its stream cannot
+    /// outlive the binding it came from. That is fine inside one function and
+    /// awkward everywhere else: an FFI wrapper, a struct field, or a thread
+    /// needs a value that stands alone, and the usual workaround — a producer
+    /// thread pushing batches down a channel — buys ownership at the cost of a
+    /// thread and a synchronisation protocol.
+    ///
+    /// Since a [`Parser`] is a handle over shared compiled state, taking it by
+    /// value costs a refcount bump. Callers who keep a parser around clone it:
+    ///
+    /// ```rust
+    /// # use xml2arrow::{BatchOptions, Parser, config_from_yaml};
+    /// # let config = config_from_yaml!(r#"
+    /// # tables:
+    /// #   - name: items
+    /// #     xml_path: /data
+    /// #     levels: []
+    /// #     fields: [{name: v, xml_path: /data/item/v, data_type: Int32}]
+    /// # "#);
+    /// let parser = Parser::new(&config)?;
+    /// let xml: &'static [u8] = b"<data><item><v>1</v></item></data>";
+    ///
+    /// // Owns its parser, so it can be returned, stored, or sent to a thread.
+    /// let stream = parser.clone().into_batches(xml, BatchOptions::default());
+    /// let handle = std::thread::spawn(move || stream.count());
+    /// assert_eq!(handle.join().unwrap(), 1);
+    ///
+    /// // The parser is still usable here.
+    /// let _ = parser.parse_slice(xml)?;
+    /// # Ok::<(), xml2arrow::Error>(())
+    /// ```
+    pub fn into_batches<R: BufRead>(
+        self,
+        reader: R,
+        options: BatchOptions,
+    ) -> BatchStream<'static, ReaderSource<R>> {
+        let mut reader = Reader::from_reader(reader);
+        self.configure_reader(&mut reader);
+        BatchStream::new(
+            self,
+            ReaderSource {
+                reader,
+                buf: Vec::with_capacity(4096),
+            },
+            options,
+        )
+    }
+
+    /// Owned counterpart of [`Parser::parse_single_table`]: a
+    /// [`RecordBatchReader`] that carries its own parser.
+    ///
+    /// This is the shape schema-first consumers want — `ArrowWriter`,
+    /// DataFusion, or a pyarrow C-stream export all take a reader and expect to
+    /// own it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfig`] when the config does not have exactly
+    /// one table with fields, exactly like [`Parser::parse_single_table`].
+    pub fn into_single_table<R: BufRead>(
+        self,
+        reader: R,
+        options: BatchOptions,
+    ) -> Result<SingleTableReader<'static, ReaderSource<R>>> {
+        let table_idx = self.single_output_table_index()?;
+        let schema = self.inner.table_schemas[table_idx].clone();
+        Ok(SingleTableReader {
+            schema,
+            stream: self.into_batches(reader, options),
+        })
     }
 
     /// Callback-style wrapper over [`Parser::parse_batches`]: drives the
@@ -1375,7 +1477,7 @@ impl Parser {
     ) -> Result<SingleTableReader<'_, ReaderSource<R>>> {
         let table_idx = self.single_output_table_index()?;
         Ok(SingleTableReader {
-            schema: self.table_schemas[table_idx].clone(),
+            schema: self.inner.table_schemas[table_idx].clone(),
             stream: self.parse_batches(reader, options),
         })
     }
@@ -1394,7 +1496,7 @@ impl Parser {
     ) -> Result<SingleTableReader<'a, SliceSource<'a>>> {
         let table_idx = self.single_output_table_index()?;
         Ok(SingleTableReader {
-            schema: self.table_schemas[table_idx].clone(),
+            schema: self.inner.table_schemas[table_idx].clone(),
             stream: self.parse_batches_slice(xml, options),
         })
     }
@@ -1403,6 +1505,7 @@ impl Parser {
     /// `SingleTableRequired` config error.
     fn single_output_table_index(&self) -> Result<usize> {
         let mut output_tables = self
+            .inner
             .config
             .tables
             .iter()
@@ -1430,10 +1533,10 @@ impl Parser {
     /// `ParserOptions::validate_closing_tags`.
     fn configure_reader<R>(&self, reader: &mut Reader<R>) {
         let rc = reader.config_mut();
-        if self.config.parser_options.trim_text {
+        if self.inner.config.parser_options.trim_text {
             rc.trim_text(true);
         }
-        if !self.config.parser_options.validate_closing_tags {
+        if !self.inner.config.parser_options.validate_closing_tags {
             rc.check_end_names = false;
         }
     }
@@ -1452,12 +1555,12 @@ impl Parser {
         run_events: F,
     ) -> Result<IndexMap<String, RecordBatch>>
     where
-        F: FnOnce(&mut Reader<R>, &mut PathTracker, &mut XmlToArrowConverter<'_>) -> Result<()>,
+        F: FnOnce(&mut Reader<R>, &mut PathTracker, &mut XmlToArrowConverter) -> Result<()>,
     {
         // usize::MAX thresholds: collect everything, never trigger a flush
         // (root-table priming happens inside the converter constructor).
         let mut xml_to_arrow_converter = XmlToArrowConverter::new(self, usize::MAX, usize::MAX);
-        let mut path_tracker = PathTracker::new(&self.registry);
+        let mut path_tracker = PathTracker::new(&self.inner.registry);
 
         // The event loop aborts on the first error with the reader still
         // parked at the failing event, so annotating the byte offset *here* —
@@ -1611,7 +1714,7 @@ enum LoopAction {
 #[inline]
 fn close_element(
     path_tracker: &mut PathTracker,
-    xml_to_arrow_converter: &mut XmlToArrowConverter<'_>,
+    xml_to_arrow_converter: &mut XmlToArrowConverter,
 ) -> Result<LoopAction> {
     // `None` at root depth: a stray end tag with no open element is a no-op.
     let Some(frame) = path_tracker.leave() else {
@@ -1661,7 +1764,7 @@ fn truncated_input_error(open_elements: usize) -> Error {
 fn handle_general_ref(
     e: BytesRef<'_>,
     node_id: PathNodeId,
-    xml_to_arrow_converter: &mut XmlToArrowConverter<'_>,
+    xml_to_arrow_converter: &mut XmlToArrowConverter,
 ) -> Result<()> {
     if let Some(ch) = e.resolve_char_ref()? {
         let mut utf8_buf = [0u8; 4];
@@ -1733,7 +1836,7 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
     event: Event<'_>,
     decoder: Decoder,
     path_tracker: &mut PathTracker,
-    xml_to_arrow_converter: &mut XmlToArrowConverter<'_>,
+    xml_to_arrow_converter: &mut XmlToArrowConverter,
     attr_name_buffer: &mut Vec<u8>,
 ) -> Result<LoopAction> {
     match event {
@@ -1754,7 +1857,7 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
             // the bits the rest of the arm needs are extracted into Copy
             // locals.
             let (node_id_opt, table_index, has_attrs) =
-                match path_tracker.enter(name_bytes, xml_to_arrow_converter.registry) {
+                match path_tracker.enter(name_bytes, &xml_to_arrow_converter.compiled.registry) {
                     Some((id, info)) => {
                         // Re-entering a field element whose row value is
                         // already set means the element appeared twice —
@@ -1795,7 +1898,7 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
             };
 
             let (node_id_opt, table_index, has_attrs) =
-                match path_tracker.enter(name_bytes, xml_to_arrow_converter.registry) {
+                match path_tracker.enter(name_bytes, &xml_to_arrow_converter.compiled.registry) {
                     Some((id, info)) => {
                         // Same repeated-element guard as Event::Start.
                         if !info.field_indices.is_empty() {
@@ -1877,7 +1980,7 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
 fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
     reader: &mut Reader<B>,
     path_tracker: &mut PathTracker,
-    xml_to_arrow_converter: &mut XmlToArrowConverter<'_>,
+    xml_to_arrow_converter: &mut XmlToArrowConverter,
 ) -> Result<()> {
     let mut buf = Vec::with_capacity(4096);
     let mut attr_name_buffer = Vec::with_capacity(64);
@@ -1911,7 +2014,7 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
 fn process_xml_events_slice<const PARSE_ATTRIBUTES: bool>(
     reader: &mut Reader<&[u8]>,
     path_tracker: &mut PathTracker,
-    xml_to_arrow_converter: &mut XmlToArrowConverter<'_>,
+    xml_to_arrow_converter: &mut XmlToArrowConverter,
 ) -> Result<()> {
     let mut attr_name_buffer = Vec::with_capacity(64);
     // Decoder is `Copy` and reflects the reader's encoding, which does not
@@ -1939,7 +2042,7 @@ fn parse_attributes(
     decoder: Decoder,
     mut attributes: Attributes,
     path_tracker: &mut PathTracker,
-    xml_to_arrow_converter: &mut XmlToArrowConverter<'_>,
+    xml_to_arrow_converter: &mut XmlToArrowConverter,
     attr_name_buffer: &mut Vec<u8>,
 ) -> Result<()> {
     // For trusted inputs, skip quick-xml's duplicate-attribute detection.
@@ -1969,7 +2072,7 @@ fn parse_attributes(
         // returned by enter() is dropped immediately so the converter can
         // be mutated below.
         let attr_node_id = path_tracker
-            .enter(attr_name_buffer, xml_to_arrow_converter.registry)
+            .enter(attr_name_buffer, &xml_to_arrow_converter.compiled.registry)
             .map(|(id, _)| id);
         if let Some(id) = attr_node_id {
             // Attribute values are almost always plain UTF-8 needing no
@@ -2211,32 +2314,43 @@ enum StreamState {
 // nothing at all — silently, since the work is entirely lazy.
 #[must_use = "a BatchStream is lazy — dropping it without iterating parses nothing"]
 pub struct BatchStream<'p, S> {
-    parser: &'p Parser,
+    /// Owned, so the stream can outlive the binding it was created from. The
+    /// `'p` parameter is retained for source compatibility and no longer
+    /// reflects a real borrow — see `_parser_lifetime`.
+    parser: Parser,
     source: S,
     /// Copy of the reader's decoder, read once — the encoding cannot change
     /// once parsing begins (mirrors the collect-everything loops).
     decoder: Decoder,
     path_tracker: PathTracker,
-    converter: XmlToArrowConverter<'p>,
+    converter: XmlToArrowConverter,
     attr_name_buffer: Vec<u8>,
     state: StreamState,
+    /// The stream holds its `Parser` by value, so nothing here borrows. The
+    /// lifetime survives only because it is part of the published type, and
+    /// removing it would break every caller that names the type; the borrowing
+    /// constructors still tie it to the parser they were given, which is
+    /// strictly more restrictive than reality and therefore always sound. It
+    /// goes away in the next major release.
+    _parser_lifetime: PhantomData<&'p Parser>,
 }
 
 impl<'p, S: EventSource> BatchStream<'p, S> {
-    fn new(parser: &'p Parser, source: S, options: BatchOptions) -> Self {
+    fn new(parser: Parser, source: S, options: BatchOptions) -> Self {
         let decoder = source.decoder();
         Self {
-            parser,
             source,
             decoder,
-            path_tracker: PathTracker::new(&parser.registry),
+            path_tracker: PathTracker::new(&parser.inner.registry),
             converter: XmlToArrowConverter::new(
-                parser,
+                &parser,
                 options.max_rows_per_batch,
                 options.max_bytes_per_batch,
             ),
             attr_name_buffer: Vec::with_capacity(64),
             state: StreamState::Running,
+            parser,
+            _parser_lifetime: PhantomData,
         }
     }
 
@@ -2248,7 +2362,7 @@ impl<'p, S: EventSource> BatchStream<'p, S> {
     fn flush_table(&mut self, table_idx: usize, more_rows_expected: bool) -> Result<TableBatch> {
         let batch = self.converter.table_builders[table_idx].flush(more_rows_expected)?;
         Ok(TableBatch {
-            table: self.parser.table_names[table_idx].clone(),
+            table: self.parser.inner.table_names[table_idx].clone(),
             batch,
         })
     }
@@ -2308,7 +2422,7 @@ impl<'p, S: EventSource> Iterator for BatchStream<'p, S> {
                     // event buys a single public stream type per source.
                     // Keep the surrounding read/Break discipline in lockstep
                     // with `process_xml_events` / `process_xml_events_slice`.
-                    let handled = if self.parser.needs_attrs {
+                    let handled = if self.parser.inner.needs_attrs {
                         handle_event::<true>(
                             event,
                             self.decoder,
@@ -7385,6 +7499,7 @@ mod tests {
             let parser = Parser::new(&config).unwrap();
             let mut converter = XmlToArrowConverter::new(&parser, usize::MAX, usize::MAX);
             let node_id = parser
+                .inner
                 .registry
                 .get_child(PathNodeId::ROOT, b"data")
                 .unwrap();

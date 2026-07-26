@@ -1098,3 +1098,186 @@ tables:
     assert_eq!(&**field, "s");
     assert_eq!(*limit, 16);
 }
+
+// ---------------------------------------------------------------------------
+// Owned streams (0.21): a stream that outlives the scope it was created in
+// ---------------------------------------------------------------------------
+//
+// The borrowing entry points cannot express any of these: a `BatchStream` that
+// borrows its parser is confined to the scope holding the parser, which is what
+// pushes FFI and async wrappers into a producer thread plus a channel.
+
+#[test]
+fn an_owned_stream_can_be_returned_from_the_scope_that_built_it() {
+    use std::io::Cursor;
+
+    // The parser is created and dropped inside the function; the stream it
+    // produced keeps working, which is the whole point.
+    fn build() -> impl Iterator<Item = xml2arrow::Result<TableBatch>> {
+        let config: Config = yaml_serde::from_str(
+            r#"
+tables:
+  - name: items
+    xml_path: /data
+    levels: []
+    fields:
+      - {name: v, xml_path: /data/item/v, data_type: Int32}
+"#,
+        )
+        .unwrap();
+        let xml = b"<data><item><v>1</v></item><item><v>2</v></item></data>".to_vec();
+        Parser::new(&config)
+            .unwrap()
+            .into_batches(Cursor::new(xml), BatchOptions::default())
+    }
+
+    let rows: usize = build().map(|b| b.unwrap().batch.num_rows()).sum();
+    assert_eq!(rows, 2);
+}
+
+#[test]
+fn an_owned_stream_can_be_sent_to_another_thread() {
+    use std::io::Cursor;
+
+    let config: Config = yaml_serde::from_str(
+        r#"
+tables:
+  - name: items
+    xml_path: /data
+    levels: []
+    fields:
+      - {name: v, xml_path: /data/item/v, data_type: Int32}
+"#,
+    )
+    .unwrap();
+    let parser = Parser::new(&config).unwrap();
+    let xml = b"<data><item><v>1</v></item><item><v>2</v></item><item><v>3</v></item></data>";
+
+    let stream = parser
+        .clone()
+        .into_batches(Cursor::new(xml.to_vec()), BatchOptions::default());
+    let rows = std::thread::spawn(move || {
+        stream
+            .map(|item| item.unwrap().batch.num_rows())
+            .sum::<usize>()
+    })
+    .join()
+    .unwrap();
+    assert_eq!(rows, 3);
+
+    // Cloning is a handle copy, so the original parser is untouched.
+    assert_eq!(parser.parse_slice(xml).unwrap()["items"].num_rows(), 3);
+}
+
+#[test]
+fn owned_and_borrowed_streams_produce_identical_output() {
+    use std::io::Cursor;
+
+    let config: Config = yaml_serde::from_str(
+        r#"
+tables:
+  - name: stations
+    xml_path: /report/stations
+    levels: []
+    fields:
+      - {name: name, xml_path: /report/stations/station/name, data_type: Utf8}
+  - name: readings
+    xml_path: /report/stations/station/readings
+    levels: [station]
+    fields:
+      - {name: v, xml_path: /report/stations/station/readings/reading/v, data_type: Int32}
+"#,
+    )
+    .unwrap();
+    let parser = Parser::new(&config).unwrap();
+    let xml = br#"<report><stations>
+        <station><name>a</name><readings><reading><v>1</v></reading><reading><v>2</v></reading></readings></station>
+        <station><name>b</name><readings><reading><v>3</v></reading></readings></station>
+    </stations></report>"#;
+    let options = BatchOptions::default().with_max_rows_per_batch(1);
+
+    let borrowed: Vec<(String, usize)> = parser
+        .parse_batches(&xml[..], options)
+        .map(|item| {
+            let b = item.unwrap();
+            (b.table.to_string(), b.batch.num_rows())
+        })
+        .collect();
+    let owned: Vec<(String, usize)> = parser
+        .clone()
+        .into_batches(Cursor::new(xml.to_vec()), options)
+        .map(|item| {
+            let b = item.unwrap();
+            (b.table.to_string(), b.batch.num_rows())
+        })
+        .collect();
+
+    assert_eq!(borrowed, owned);
+    assert!(!borrowed.is_empty());
+}
+
+#[test]
+fn an_owned_single_table_reader_exposes_its_schema_and_streams() {
+    use arrow::array::RecordBatchReader;
+    use std::io::Cursor;
+
+    let config: Config = yaml_serde::from_str(
+        r#"
+tables:
+  - name: items
+    xml_path: /data
+    levels: []
+    fields:
+      - {name: v, xml_path: /data/item/v, data_type: Int32}
+"#,
+    )
+    .unwrap();
+    let parser = Parser::new(&config).unwrap();
+    let xml = b"<data><item><v>1</v></item><item><v>2</v></item></data>".to_vec();
+
+    let reader = parser
+        .clone()
+        .into_single_table(
+            Cursor::new(xml),
+            BatchOptions::default().with_max_rows_per_batch(1),
+        )
+        .unwrap();
+    assert_eq!(reader.schema(), parser.schema("items").unwrap());
+
+    // A RecordBatchReader is what ArrowWriter and pyarrow's C stream take, and
+    // both want to own it.
+    let boxed: Box<dyn RecordBatchReader + Send> = Box::new(reader);
+    let rows: usize = boxed.map(|b| b.unwrap().num_rows()).sum();
+    assert_eq!(rows, 2);
+}
+
+#[test]
+fn a_parser_is_send_and_sync_and_shares_compiled_state() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Parser>();
+
+    let config: Config = yaml_serde::from_str(
+        r#"
+tables:
+  - name: items
+    xml_path: /data
+    levels: []
+    fields:
+      - {name: v, xml_path: /data/item/v, data_type: Int32}
+"#,
+    )
+    .unwrap();
+    let parser = Parser::new(&config).unwrap();
+    let xml = b"<data><item><v>7</v></item></data>";
+
+    // One compiled config, several threads, no rebuild per thread.
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            let parser = parser.clone();
+            std::thread::spawn(move || parser.parse_slice(xml).unwrap()["items"].num_rows())
+        })
+        .collect();
+    for handle in handles {
+        assert_eq!(handle.join().unwrap(), 1);
+    }
+}
