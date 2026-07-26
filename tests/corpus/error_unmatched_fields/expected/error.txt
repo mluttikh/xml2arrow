@@ -1,0 +1,1 @@
+2 configured field(s) never matched any element or attribute in the document (check the xml_path spellings): field 'typo' of table 'items' (xml_path '/data/item/valeu'), field 'absent' of table 'items' (xml_path '/data/item/@missing')

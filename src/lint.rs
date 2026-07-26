@@ -23,7 +23,7 @@
 
 use std::fmt;
 
-use crate::config::{Config, DType, path_is_under, path_segments};
+use crate::config::{Config, DType, path_is_under, path_segments, paths_equal};
 
 /// An advisory finding about a configuration.
 ///
@@ -61,6 +61,21 @@ pub enum Lint {
     /// exists only to feed its row counter to descendant tables' `levels`
     /// index columns.
     StructuralTable { table: String },
+    /// A table declares more `levels` than it has enclosing table scopes (its
+    /// non-root ancestor tables plus itself).
+    ///
+    /// Each level labels one parent-link index column, and the runtime can
+    /// only supply one index per enclosing scope, so the surplus columns never
+    /// receive a value — the parse fails later with an opaque column-length
+    /// mismatch, or silently produces nothing if the table stays empty.
+    /// Reported here rather than rejected outright: a config in which the
+    /// affected table never yields a row works today, and this phase does not
+    /// break working configs.
+    ExcessLevels {
+        table: String,
+        declared: usize,
+        available: usize,
+    },
     /// Non-nullable `Utf8` fields yield an empty string when the value is
     /// missing, where every other data type raises `MissingRequiredField`.
     ///
@@ -95,6 +110,17 @@ impl fmt::Display for Lint {
                  the table element itself do not delimit rows — move the table's xml_path up \
                  one level so that <{}> becomes its row element",
                 path_segments(xml_path).next_back().unwrap_or("/"),
+            ),
+            Lint::ExcessLevels {
+                table,
+                declared,
+                available,
+            } => write!(
+                f,
+                "Table '{table}' declares {declared} level(s) but only {available} enclosing \
+                 table scope(s) exist (its ancestor tables plus itself); each level labels one \
+                 index column, so the extra column(s) never receive a value and assembling the \
+                 batch will fail once the table produces a row"
             ),
             Lint::StructuralTable { table } => write!(
                 f,
@@ -163,6 +189,15 @@ impl Config {
                 }),
             }
 
+            let available = self.enclosing_table_scopes(&table.xml_path);
+            if table.levels.len() > available {
+                lints.push(Lint::ExcessLevels {
+                    table: table.name.clone(),
+                    declared: table.levels.len(),
+                    available,
+                });
+            }
+
             let implicit_empty: Vec<String> = table
                 .fields
                 .iter()
@@ -177,6 +212,24 @@ impl Config {
             }
         }
         lints
+    }
+
+    /// How many table scopes enclose a row of the table at `table_path`: its
+    /// non-root ancestor tables plus itself.
+    ///
+    /// The root table (`xml_path: /`) is excluded because `end_current_row`
+    /// skips it when collecting parent indices — it represents the document,
+    /// not a repeating scope.
+    fn enclosing_table_scopes(&self, table_path: &str) -> usize {
+        1 + self
+            .tables
+            .iter()
+            .filter(|ancestor| {
+                path_segments(&ancestor.xml_path).next().is_some()
+                    && !paths_equal(&ancestor.xml_path, table_path)
+                    && path_is_under(table_path, &ancestor.xml_path)
+            })
+            .count()
     }
 
     /// Every configured direct child *element* of `table_path`, in first-seen
@@ -350,6 +403,81 @@ tables:
                 table: "scope".to_string()
             }]
         );
+    }
+
+    #[test]
+    fn excess_levels_are_reported_against_enclosing_scopes() {
+        // `items` has one ancestor table (`scope`) plus itself = 2 scopes, so
+        // a third level can never receive a value.
+        let config = config_from_yaml!(
+            r#"
+tables:
+  - name: scope
+    xml_path: /data
+    levels: []
+    fields: []
+  - name: items
+    xml_path: /data/items
+    levels: [scope, item, surplus]
+    fields:
+      - {name: v, xml_path: /data/items/item/v, data_type: Int32}
+"#
+        );
+        assert!(config.lint().contains(&Lint::ExcessLevels {
+            table: "items".to_string(),
+            declared: 3,
+            available: 2,
+        }));
+    }
+
+    #[test]
+    fn levels_matching_the_scope_depth_are_not_reported() {
+        let config = config_from_yaml!(
+            r#"
+tables:
+  - name: scope
+    xml_path: /data
+    levels: []
+    fields: []
+  - name: items
+    xml_path: /data/items
+    levels: [scope, item]
+    fields:
+      - {name: v, xml_path: /data/items/item/v, data_type: Int32}
+"#
+        );
+        assert!(
+            !config
+                .lint()
+                .iter()
+                .any(|lint| matches!(lint, Lint::ExcessLevels { .. }))
+        );
+    }
+
+    #[test]
+    fn root_table_does_not_count_as_an_enclosing_scope() {
+        // The root table is skipped when parent indices are collected, so a
+        // table under it has only itself.
+        let config = config_from_yaml!(
+            r#"
+tables:
+  - name: doc
+    xml_path: /
+    levels: []
+    fields:
+      - {name: title, xml_path: /report/title, data_type: Utf8}
+  - name: items
+    xml_path: /report/items
+    levels: [a, b]
+    fields:
+      - {name: v, xml_path: /report/items/item/v, data_type: Int32}
+"#
+        );
+        assert!(config.lint().contains(&Lint::ExcessLevels {
+            table: "items".to_string(),
+            declared: 2,
+            available: 1,
+        }));
     }
 
     #[test]

@@ -1,1 +1,1 @@
-Missing value for non-nullable field 'v' at path /data/item/v
+Missing value for non-nullable field 'v' at path /data/item/v (row index 1, near byte offset 46)

@@ -1,0 +1,1 @@
+Value for field 's' at path /data/item/s exceeded the configured maximum of 8 bytes; raise parser_options.max_value_bytes (or set it to null) if values this large are expected (row index 1, near byte offset 83)

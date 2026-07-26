@@ -32,8 +32,10 @@ use crate::Config;
 use crate::config::{DType, FieldConfig, TableConfig};
 use crate::errors::ConfigIssue;
 use crate::errors::Error;
+use crate::errors::ErrorLocation;
 use crate::errors::ParseKind;
 use crate::errors::Result;
+use crate::errors::UnmatchedField;
 use crate::lint::Lint;
 use crate::path_registry::{PathNodeId, PathNodeInfo, PathRegistry, PathTracker};
 
@@ -149,6 +151,22 @@ struct FieldBuilder {
     /// and only for `Utf8` fields. Numeric and boolean parsers consume bytes
     /// directly.
     current_value: Vec<u8>,
+    /// Whether this field ever captured a value *anywhere* in the document —
+    /// the signal behind `ParserOptions::error_on_unmatched_fields`. Unlike
+    /// `has_value` it is never reset between rows.
+    ///
+    /// Set unconditionally rather than behind a check of the option: it is one
+    /// store into a cache line the same append is already dirtying, which is
+    /// cheaper than the branch that would guard it.
+    ever_matched: bool,
+    /// Largest value this field may accumulate, or `usize::MAX` when
+    /// unconfigured — so the per-append comparison is an always-false,
+    /// perfectly predicted branch on the common path.
+    max_value_bytes: usize,
+    /// Set when an append was refused because it would have crossed
+    /// `max_value_bytes`. Raised as `ValueTooLarge` when the row finalizes,
+    /// which is also where the row coordinate is known.
+    value_too_large: bool,
 }
 
 /// Parses a boolean token from a byte slice, trimming ASCII whitespace first.
@@ -224,6 +242,7 @@ macro_rules! append_int {
                                     type_name: $type_name,
                                     reason: e.to_string(),
                                 },
+                                location: Box::default(),
                             });
                         }
                     }
@@ -235,6 +254,7 @@ macro_rules! append_int {
             return Err(Error::MissingRequiredField {
                 field: Arc::from($field_config.name.as_str()),
                 path: Arc::from($field_config.xml_path.as_str()),
+                location: Box::default(),
             });
         }
     }};
@@ -277,6 +297,7 @@ macro_rules! append_float {
                             type_name: $type_name,
                             reason: e.to_string(),
                         },
+                        location: Box::default(),
                     });
                 }
             }
@@ -286,13 +307,14 @@ macro_rules! append_float {
             return Err(Error::MissingRequiredField {
                 field: Arc::from($field_config.name.as_str()),
                 path: Arc::from($field_config.xml_path.as_str()),
+                location: Box::default(),
             });
         }
     }};
 }
 
 impl FieldBuilder {
-    fn new(field_config: &FieldConfig) -> Self {
+    fn new(field_config: &FieldConfig, max_value_bytes: usize) -> Self {
         let array_builder = TypedArrayBuilder::from_dtype(field_config.data_type);
         let has_transform = field_config.scale.is_some() || field_config.offset.is_some();
         Self {
@@ -301,18 +323,33 @@ impl FieldBuilder {
             has_value: false,
             has_transform,
             current_value: Vec::with_capacity(128),
+            ever_matched: false,
+            max_value_bytes,
+            value_too_large: false,
         }
     }
 
     #[inline]
     fn set_current_value(&mut self, value: &[u8]) {
-        self.current_value.extend_from_slice(value);
         self.has_value = true;
+        self.ever_matched = true;
+        // Refuse the append rather than truncating into it: a value that stops
+        // mid-way is corrupt data, and the point of the cap is to bound memory,
+        // not to salvage the value. The row raises `ValueTooLarge` when it
+        // finalizes.
+        if self.current_value.len() + value.len() > self.max_value_bytes {
+            self.value_too_large = true;
+            return;
+        }
+        self.current_value.extend_from_slice(value);
     }
 
     /// Appends the currently accumulated value to the Arrow array builder,
     /// performing type conversion and handling nulls.
     fn append_current_value(&mut self) -> Result<()> {
+        if self.value_too_large {
+            return Err(self.value_too_large_error());
+        }
         let value = self.current_value.as_slice();
         let has_value = self.has_value;
         let has_transform = self.has_transform;
@@ -355,6 +392,7 @@ impl FieldBuilder {
                             return Err(Error::MissingRequiredField {
                                 field: Arc::from(fc.name.as_str()),
                                 path: Arc::from(fc.xml_path.as_str()),
+                                location: Box::default(),
                             });
                         }
                         Err(()) => {
@@ -363,6 +401,7 @@ impl FieldBuilder {
                                 path: Arc::from(fc.xml_path.as_str()),
                                 value: String::from_utf8_lossy(value).into_owned(),
                                 kind: ParseKind::InvalidBoolean,
+                                location: Box::default(),
                             });
                         }
                     }
@@ -372,11 +411,25 @@ impl FieldBuilder {
                     return Err(Error::MissingRequiredField {
                         field: Arc::from(fc.name.as_str()),
                         path: Arc::from(fc.xml_path.as_str()),
+                        location: Box::default(),
                     });
                 }
             }
         }
         Ok(())
+    }
+
+    /// Out of line and cold, like the converter's error constructors, so the
+    /// flag check above stays a bare branch in the per-row path.
+    #[cold]
+    #[inline(never)]
+    fn value_too_large_error(&self) -> Error {
+        Error::ValueTooLarge {
+            field: Arc::from(self.meta.name.as_str()),
+            path: Arc::from(self.meta.xml_path.as_str()),
+            limit: self.max_value_bytes,
+            location: Box::default(),
+        }
     }
 
     pub fn finish(&mut self) -> Arc<dyn Array> {
@@ -454,12 +507,12 @@ struct TableBuilder {
 }
 
 impl TableBuilder {
-    fn new(table_config: &TableConfig, schema: Arc<Schema>) -> Self {
+    fn new(table_config: &TableConfig, schema: Arc<Schema>, max_value_bytes: usize) -> Self {
         let mut index_builders = Vec::with_capacity(table_config.levels.len());
         index_builders.resize_with(table_config.levels.len(), UInt32Builder::default);
         let mut field_builders = Vec::with_capacity(table_config.fields.len());
         for field_config in &table_config.fields {
-            field_builders.push(FieldBuilder::new(field_config));
+            field_builders.push(FieldBuilder::new(field_config, max_value_bytes));
         }
         Self {
             meta: TableMeta::from_config(table_config),
@@ -510,7 +563,11 @@ impl TableBuilder {
             let mut row_bytes = 0usize;
             for field_builder in &mut self.field_builders {
                 row_bytes += field_builder.current_value.len();
-                field_builder.append_current_value()?;
+                // The closure only runs on the error path; the happy path
+                // stays a plain `Ok` check.
+                field_builder
+                    .append_current_value()
+                    .map_err(|e| e.with_row(self.row_index))?;
             }
 
             self.rows_in_batch += 1;
@@ -599,6 +656,9 @@ struct XmlToArrowConverter<'a> {
     /// `pending_flush` for why that is inert rather than wrong.
     max_rows_per_batch: usize,
     max_bytes_per_batch: usize,
+    /// Mirror of `ParserOptions::error_on_unmatched_fields`, read once when
+    /// the document ends.
+    error_on_unmatched_fields: bool,
     /// Set by `end_current_row` when the just-finalized row pushed its table
     /// over a batch threshold. The streaming loop takes it and flushes that
     /// table.
@@ -655,9 +715,14 @@ impl<'a> XmlToArrowConverter<'a> {
     /// overflow a `StringBuilder`'s i32 offsets.
     fn new(parser: &'a Parser, max_rows_per_batch: usize, max_bytes_per_batch: usize) -> Self {
         let config = &parser.config;
+        let max_value_bytes = config.parser_options.max_value_bytes.unwrap_or(usize::MAX);
         let mut table_builders = Vec::with_capacity(config.tables.len());
         for (table_config, schema) in config.tables.iter().zip(&parser.table_schemas) {
-            table_builders.push(TableBuilder::new(table_config, schema.clone()));
+            table_builders.push(TableBuilder::new(
+                table_config,
+                schema.clone(),
+                max_value_bytes,
+            ));
         }
 
         let mut converter = Self {
@@ -666,6 +731,7 @@ impl<'a> XmlToArrowConverter<'a> {
             registry: &parser.registry,
             parent_indices_buffer: Vec::new(),
             validate_attributes: config.parser_options.validate_attributes,
+            error_on_unmatched_fields: config.parser_options.error_on_unmatched_fields,
             strip_namespaces: config.parser_options.strip_namespaces,
             allow_truncated_input: config.parser_options.allow_truncated_input,
             max_rows_per_batch: max_rows_per_batch.max(1),
@@ -758,12 +824,19 @@ impl<'a> XmlToArrowConverter<'a> {
     #[cold]
     #[inline(never)]
     fn duplicate_value_error(&self, table_idx: usize, field_idx: usize) -> Error {
-        let field_builder = &self.table_builders[table_idx].field_builders[field_idx];
+        let table_builder = &self.table_builders[table_idx];
+        let field_builder = &table_builder.field_builders[field_idx];
         Error::ParseError {
             field: Arc::from(field_builder.meta.name.as_str()),
             path: Arc::from(field_builder.meta.xml_path.as_str()),
             value: String::from_utf8_lossy(&field_builder.current_value).into_owned(),
             kind: ParseKind::DuplicateValue,
+            // Raised mid-row, so `save_row`'s annotation never sees it: the
+            // in-progress row will occupy the table's current counter.
+            location: Box::new(ErrorLocation {
+                row: Some(table_builder.row_index),
+                position: None,
+            }),
         }
     }
 
@@ -772,14 +845,18 @@ impl<'a> XmlToArrowConverter<'a> {
     /// captured. Used by the entity-reference handler to decide whether an
     /// unresolvable reference is an error (it would corrupt a field value)
     /// or ignorable (nothing is listening at this node).
-    fn active_field_meta(&self, node_id: PathNodeId) -> Option<&FieldMeta> {
+    fn active_field_meta(&self, node_id: PathNodeId) -> Option<(&FieldMeta, usize)> {
         let info = self.registry.get_node_info(node_id);
         let current_table_idx = self.builder_stack.last()?.table_idx;
         info.field_indices
             .iter()
             .find(|(table_idx, _)| *table_idx == current_table_idx)
             .map(|&(table_idx, field_idx)| {
-                &self.table_builders[table_idx].field_builders[field_idx].meta
+                let table_builder = &self.table_builders[table_idx];
+                (
+                    &table_builder.field_builders[field_idx].meta,
+                    table_builder.row_index,
+                )
             })
     }
 
@@ -848,7 +925,40 @@ impl<'a> XmlToArrowConverter<'a> {
         self.builder_stack.pop();
     }
 
+    /// Reports every configured field that captured nothing anywhere in the
+    /// document, when `error_on_unmatched_fields` is enabled.
+    ///
+    /// All offenders are collected in one pass so a broken config is fixed in
+    /// one round trip rather than one field per run. Structural tables have no
+    /// field builders and so contribute nothing.
+    fn unmatched_fields_error(&self) -> Option<Error> {
+        if !self.error_on_unmatched_fields {
+            return None;
+        }
+        let fields: Vec<UnmatchedField> = self
+            .table_builders
+            .iter()
+            .flat_map(|table_builder| {
+                table_builder
+                    .field_builders
+                    .iter()
+                    .filter(|field_builder| !field_builder.ever_matched)
+                    .map(|field_builder| UnmatchedField {
+                        table: table_builder.meta.name.clone(),
+                        field: field_builder.meta.name.clone(),
+                        xml_path: field_builder.meta.xml_path.clone(),
+                    })
+            })
+            .collect();
+        (!fields.is_empty()).then_some(Error::UnmatchedFields { fields })
+    }
+
     fn finish(mut self) -> Result<IndexMap<String, arrow::record_batch::RecordBatch>> {
+        // Reporting a broken config beats handing back batches with silently
+        // empty columns, so the sweep runs before anything is assembled.
+        if let Some(error) = self.unmatched_fields_error() {
+            return Err(error);
+        }
         let mut record_batches = IndexMap::new();
         for table_builder in &mut self.table_builders {
             if !table_builder.field_builders.is_empty() {
@@ -1292,12 +1402,12 @@ impl Parser {
     /// without duplicating the surrounding orchestration.
     fn run_parse<R, F>(
         &self,
-        reader: &mut R,
+        reader: &mut Reader<R>,
         run_events: F,
     ) -> Result<IndexMap<String, RecordBatch>>
     where
         F: FnOnce(
-            &mut R,
+            &mut Reader<R>,
             &mut PathTracker,
             &mut XmlToArrowConverter<'_>,
             &[PathNodeId],
@@ -1308,12 +1418,17 @@ impl Parser {
         let mut xml_to_arrow_converter = XmlToArrowConverter::new(self, usize::MAX, usize::MAX);
         let mut path_tracker = PathTracker::new(&self.registry);
 
+        // The event loop aborts on the first error with the reader still
+        // parked at the failing event, so annotating the byte offset *here* —
+        // once per parse, not per event — loses no precision and keeps
+        // position work entirely out of the loop.
         run_events(
             reader,
             &mut path_tracker,
             &mut xml_to_arrow_converter,
             &self.stop_node_ids,
-        )?;
+        )
+        .map_err(|e| e.with_position(reader.buffer_position()))?;
 
         xml_to_arrow_converter.finish()
     }
@@ -1538,12 +1653,17 @@ fn handle_general_ref(
             xml_to_arrow_converter.set_field_value_for_node(node_id, entity_text.as_bytes());
         }
         None => {
-            if let Some(meta) = xml_to_arrow_converter.active_field_meta(node_id) {
+            if let Some((meta, row_index)) = xml_to_arrow_converter.active_field_meta(node_id) {
                 return Err(Error::ParseError {
                     field: Arc::from(meta.name.as_str()),
                     path: Arc::from(meta.xml_path.as_str()),
                     value: String::from_utf8_lossy(&text).into_owned(),
                     kind: ParseKind::UnresolvedEntity,
+                    // Raised mid-row; see `duplicate_value_error`.
+                    location: Box::new(ErrorLocation {
+                        row: Some(row_index),
+                        position: None,
+                    }),
                 });
             }
         }
@@ -1986,6 +2106,8 @@ pub trait EventSource: sealed::Sealed {
     fn read_event(&mut self) -> std::result::Result<Event<'_>, quick_xml::Error>;
     #[doc(hidden)]
     fn decoder(&self) -> Decoder;
+    #[doc(hidden)]
+    fn buffer_position(&self) -> u64;
 }
 
 /// Buffered [`EventSource`] over any `BufRead` (files, sockets,
@@ -2007,6 +2129,10 @@ impl<R: BufRead> EventSource for ReaderSource<R> {
     fn decoder(&self) -> Decoder {
         self.reader.decoder()
     }
+
+    fn buffer_position(&self) -> u64 {
+        self.reader.buffer_position()
+    }
 }
 
 /// Zero-copy [`EventSource`] over an in-memory byte slice; events borrow
@@ -2024,6 +2150,10 @@ impl EventSource for SliceSource<'_> {
 
     fn decoder(&self) -> Decoder {
         self.reader.decoder()
+    }
+
+    fn buffer_position(&self) -> u64 {
+        self.reader.buffer_position()
     }
 }
 
@@ -2132,7 +2262,11 @@ impl<'p, S: EventSource> BatchStream<'p, S> {
             };
         }
         self.state = StreamState::Done;
-        None
+        // Every row has been emitted, so this is the streaming counterpart of
+        // `XmlToArrowConverter::finish`'s sweep. Batches already yielded stay
+        // valid: the error says the *config* did not match the document, not
+        // that the rows are wrong.
+        self.converter.unmatched_fields_error().map(Err)
     }
 }
 
@@ -2180,7 +2314,9 @@ impl<'p, S: EventSource> Iterator for BatchStream<'p, S> {
                         Ok(action) => action,
                         Err(e) => {
                             self.state = StreamState::Done;
-                            return Some(Err(e));
+                            // Same once-per-parse annotation as `run_parse`:
+                            // the source is still parked at the failing event.
+                            return Some(Err(e.with_position(self.source.buffer_position())));
                         }
                     };
                     // Transition on Break *before* emitting a pending flush:

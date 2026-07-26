@@ -1,1 +1,1 @@
-Failed to parse value '30 units' as i32 for field 'v' at path /data/item/v: invalid digit found in string
+Failed to parse value '30 units' as i32 for field 'v' at path /data/item/v: invalid digit found in string (row index 0, near byte offset 37)

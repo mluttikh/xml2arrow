@@ -85,6 +85,35 @@ pub struct ParserOptions {
     /// option.
     #[serde(default)]
     pub allow_truncated_input: bool,
+    /// Whether to fail the parse when a configured field never captured a
+    /// value anywhere in the document. Defaults to `false`.
+    ///
+    /// The usual cause is a misspelled `xml_path`, whose symptom is otherwise
+    /// a silently all-null or all-empty column — the config looks fine and the
+    /// data looks wrong. With this enabled, every offending field is reported
+    /// at once as [`Error::UnmatchedFields`](crate::errors::Error).
+    ///
+    /// Off by default because a field that legitimately appears in only *some*
+    /// documents is a normal configuration, and enabling it would change the
+    /// outcome of parses that work today. A future release makes strictness
+    /// the default and moves the opt-out to the field.
+    #[serde(default)]
+    pub error_on_unmatched_fields: bool,
+    /// Maximum number of bytes a single field value may accumulate, or `None`
+    /// (the default) for no limit.
+    ///
+    /// Element text arrives as a series of events — text, CDATA, resolved
+    /// character references — that append into one value, so an adversarial or
+    /// corrupt document can otherwise grow a single value without bound. Once
+    /// the cap would be crossed the parser stops appending and the row raises
+    /// [`Error::ValueTooLarge`](crate::errors::Error) when it finalizes.
+    ///
+    /// This bounds *our* accumulation, not the XML reader's: quick-xml still
+    /// materializes each individual event before we see it, so one enormous
+    /// text node is still buffered once by the reader. The guard is what keeps
+    /// many such events from adding up.
+    #[serde(default)]
+    pub max_value_bytes: Option<usize>,
 }
 
 impl Default for ParserOptions {
@@ -96,6 +125,8 @@ impl Default for ParserOptions {
             validate_attributes: true,
             strip_namespaces: true,
             allow_truncated_input: false,
+            error_on_unmatched_fields: false,
+            max_value_bytes: None,
         }
     }
 }
@@ -137,7 +168,7 @@ pub(crate) fn path_is_under(descendant: &str, ancestor: &str) -> bool {
 /// Returns true when two paths resolve to the same registry node, i.e. their
 /// normalized segment sequences are identical regardless of spelling
 /// ("/data", "data" and "/data/" are all the same path).
-fn paths_equal(a: &str, b: &str) -> bool {
+pub(crate) fn paths_equal(a: &str, b: &str) -> bool {
     path_segments(a).eq(path_segments(b))
 }
 

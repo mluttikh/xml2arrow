@@ -981,3 +981,120 @@ tables:
         "the lint is advisory: behavior must be unchanged"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Diagnostics (0.20): error coordinates, unmatched fields, value size cap
+// ---------------------------------------------------------------------------
+
+#[test]
+fn value_errors_carry_row_and_byte_coordinates() {
+    use xml2arrow::errors::Error;
+
+    let config: Config = yaml_serde::from_str(
+        r#"
+tables:
+  - name: items
+    xml_path: /data
+    levels: []
+    fields:
+      - {name: v, xml_path: /data/item/v, data_type: Int32}
+"#,
+    )
+    .unwrap();
+    let parser = Parser::new(&config).unwrap();
+
+    // The third row is the bad one: the coordinate must say so, because "which
+    // row" is the question a user asks first when a 10-million-row parse fails.
+    let xml = b"<data><item><v>1</v></item><item><v>2</v></item><item><v>x</v></item></data>";
+    let err = parser.parse_slice(xml).unwrap_err();
+    let Error::ParseError { location, .. } = &err else {
+        panic!("expected ParseError, got: {err}");
+    };
+    assert_eq!(location.row, Some(2));
+    assert!(location.position.is_some(), "byte offset missing: {err}");
+    assert!(err.to_string().contains("row index 2"), "{err}");
+
+    // Every entry point annotates identically — the streaming path reports the
+    // same coordinates even though it has already yielded batches.
+    let streamed = parser
+        .parse_batches_slice(xml, BatchOptions::default().with_max_rows_per_batch(1))
+        .find_map(Result::err)
+        .expect("stream must surface the error");
+    assert_eq!(streamed.to_string(), err.to_string());
+}
+
+#[test]
+fn unmatched_fields_are_reported_together_when_enabled() {
+    use xml2arrow::errors::Error;
+
+    let yaml = r#"
+parser_options:
+  error_on_unmatched_fields: true
+tables:
+  - name: items
+    xml_path: /data
+    levels: []
+    fields:
+      - {name: v, xml_path: /data/item/v, data_type: Int32}
+      - {name: typo, xml_path: /data/item/valeu, data_type: Int32, nullable: true}
+"#;
+    let config: Config = yaml_serde::from_str(yaml).unwrap();
+    let err = Parser::new(&config)
+        .unwrap()
+        .parse_slice(b"<data><item><v>1</v></item></data>")
+        .unwrap_err();
+    let Error::UnmatchedFields { fields } = &err else {
+        panic!("expected UnmatchedFields, got: {err}");
+    };
+    assert_eq!(fields.len(), 1);
+    assert_eq!(fields[0].field, "typo");
+    assert_eq!(fields[0].xml_path, "/data/item/valeu");
+
+    // Off by default: the same config without the flag parses fine, which is
+    // what keeps existing configs working.
+    let lenient: Config =
+        yaml_serde::from_str(&yaml.replace("  error_on_unmatched_fields: true\n", "")).unwrap();
+    assert!(
+        Parser::new(&lenient)
+            .unwrap()
+            .parse_slice(b"<data><item><v>1</v></item></data>")
+            .is_ok()
+    );
+}
+
+#[test]
+fn max_value_bytes_bounds_accumulation_across_events() {
+    use xml2arrow::errors::Error;
+
+    // One value split across text, entity and CDATA events: the cap applies to
+    // the accumulated total, which is the whole point — a single event's size
+    // is not the bound that matters.
+    let config: Config = yaml_serde::from_str(
+        r#"
+parser_options:
+  max_value_bytes: 16
+tables:
+  - name: items
+    xml_path: /data
+    levels: []
+    fields:
+      - {name: s, xml_path: /data/item/s, data_type: Utf8}
+"#,
+    )
+    .unwrap();
+    let parser = Parser::new(&config).unwrap();
+
+    assert!(
+        parser
+            .parse_slice(b"<data><item><s>short</s></item></data>")
+            .is_ok()
+    );
+
+    let split = b"<data><item><s>aaaaaaaa&amp;<![CDATA[bbbbbbbbbbbb]]></s></item></data>";
+    let err = parser.parse_slice(split).unwrap_err();
+    let Error::ValueTooLarge { field, limit, .. } = &err else {
+        panic!("expected ValueTooLarge, got: {err}");
+    };
+    assert_eq!(&**field, "s");
+    assert_eq!(*limit, 16);
+}
