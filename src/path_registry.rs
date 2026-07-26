@@ -208,22 +208,13 @@ impl NodeChildren {
         }
     }
 
-    /// Ids of the children that are *elements* — attribute pseudo-nodes
-    /// excluded. Collected into a `Vec` (setup-time only) so the caller can
-    /// mutate `node_info` while iterating.
-    fn element_child_ids(&self) -> Vec<PathNodeId> {
-        let is_element = |name: &[u8]| !name.starts_with(b"@");
+    /// Iterates `(name, id)` pairs, whichever representation is in use.
+    fn entries(&self) -> Box<dyn Iterator<Item = (&[u8], PathNodeId)> + '_> {
         match self {
-            NodeChildren::Small(entries) => entries
-                .iter()
-                .filter(|(name, _)| is_element(name))
-                .map(|(_, id)| *id)
-                .collect(),
-            NodeChildren::Large(map) => map
-                .iter()
-                .filter(|(name, _)| is_element(name))
-                .map(|(_, id)| *id)
-                .collect(),
+            NodeChildren::Small(entries) => {
+                Box::new(entries.iter().map(|(name, id)| (name.as_ref(), *id)))
+            }
+            NodeChildren::Large(map) => Box::new(map.iter().map(|(name, id)| (name.as_ref(), *id))),
         }
     }
 }
@@ -281,11 +272,21 @@ impl PathRegistry {
         // configured child. Marking before phase 4 would miss those and quietly
         // change row counts for configs that combine the two.
         for node_idx in 0..registry.children.len() {
-            if registry.node_info[node_idx].is_table() {
-                for child_id in registry.children[node_idx].element_child_ids() {
+            if !registry.node_info[node_idx].is_table() {
+                continue;
+            }
+            // Move the child list aside rather than collecting it: marking goes
+            // through `registry`, which would otherwise stay borrowed for the
+            // whole loop. `NodeChildren::new()` is an empty `Vec`, so the swap
+            // costs no allocation — and this runs in `Parser::new`, whose fixed
+            // cost is the whole parse for anyone handling small documents.
+            let children = std::mem::replace(&mut registry.children[node_idx], NodeChildren::new());
+            for (name, child_id) in children.entries() {
+                if !name.starts_with(b"@") {
                     registry.node_info[child_id.index()].ends_row = true;
                 }
             }
+            registry.children[node_idx] = children;
         }
 
         registry
