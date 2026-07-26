@@ -1,0 +1,11 @@
+# frozen snapshot — see tests/frozen_corpus.rs
+table: books
+rows: 2
+columns:
+  1. id: Int32 (not null)
+  2. lang: Utf8 (not null)
+  3. title: Utf8 (not null)
+  4. pages: Int32 (nullable)
+data:
+  "1" | "en" | "Dune" | "300"
+  "2" | "de" | "Faust" | null

@@ -1,0 +1,13 @@
+<doc>
+  <section>
+    <blocks>
+      <block><name>a</name><rows><row><v>1</v></row><row><v>2</v></row></rows></block>
+      <block><name>b</name><rows><row><v>3</v></row></rows></block>
+    </blocks>
+  </section>
+  <section>
+    <blocks>
+      <block><name>c</name><rows><row><v>4</v></row></rows></block>
+    </blocks>
+  </section>
+</doc>

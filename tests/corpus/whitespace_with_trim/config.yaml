@@ -1,0 +1,9 @@
+parser_options:
+  trim_text: true
+tables:
+  - name: items
+    xml_path: /data
+    levels: []
+    fields:
+      - {name: s, xml_path: /data/item/s, data_type: Utf8}
+      - {name: n, xml_path: /data/item/n, data_type: Int32}

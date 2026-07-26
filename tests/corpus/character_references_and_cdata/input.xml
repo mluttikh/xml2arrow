@@ -1,0 +1,4 @@
+<data>
+  <item a="x&#66;y"><s>A&#66;C &amp; D</s></item>
+  <item a="tab&#9;here"><s><![CDATA[raw <not markup> &amp;]]></s></item>
+</data>

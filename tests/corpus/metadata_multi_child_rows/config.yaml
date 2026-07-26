@@ -1,0 +1,7 @@
+tables:
+  - name: header
+    xml_path: /report/header
+    levels: []
+    fields:
+      - {name: title, xml_path: /report/header/title, data_type: Utf8, nullable: true}
+      - {name: created, xml_path: /report/header/created, data_type: Utf8, nullable: true}

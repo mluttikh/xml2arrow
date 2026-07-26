@@ -1,0 +1,9 @@
+tables:
+  - name: books
+    xml_path: /library
+    levels: []
+    fields:
+      - {name: id, xml_path: /library/book/@id, data_type: Int32}
+      - {name: lang, xml_path: /library/book/@lang, data_type: Utf8}
+      - {name: title, xml_path: /library/book/title, data_type: Utf8}
+      - {name: pages, xml_path: /library/book/title/@pages, data_type: Int32, nullable: true}

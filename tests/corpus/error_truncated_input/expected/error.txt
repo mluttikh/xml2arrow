@@ -1,0 +1,1 @@
+Truncated document: input ended with 2 element(s) still open; the rows parsed so far are incomplete and were discarded (set parser_options.allow_truncated_input to accept them)

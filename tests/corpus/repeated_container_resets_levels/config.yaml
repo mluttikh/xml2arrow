@@ -1,0 +1,11 @@
+tables:
+  - name: blocks
+    xml_path: /doc/section/blocks
+    levels: []
+    fields:
+      - {name: name, xml_path: /doc/section/blocks/block/name, data_type: Utf8}
+  - name: rows
+    xml_path: /doc/section/blocks/block/rows
+    levels: [block]
+    fields:
+      - {name: v, xml_path: /doc/section/blocks/block/rows/row/v, data_type: Int32}

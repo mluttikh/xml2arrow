@@ -1,0 +1,10 @@
+# frozen snapshot — see tests/frozen_corpus.rs
+table: items
+rows: 3
+columns:
+  1. id: Int32 (not null)
+  2. label: Utf8 (not null)
+data:
+  "1" | "first"
+  "2" | "second"
+  "3" | "third"

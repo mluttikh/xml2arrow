@@ -1,0 +1,8 @@
+# frozen snapshot — see tests/frozen_corpus.rs
+table: stations
+rows: 2
+columns:
+  1. name: Utf8 (not null)
+data:
+  "alpha"
+  "beta"
