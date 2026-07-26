@@ -1,0 +1,5 @@
+# The frozen corpus is byte-exact. Its expected errors carry byte offsets into
+# `input.xml`, so a checkout that rewrites LF to CRLF shifts every offset by the
+# number of preceding lines, and the recorded snapshots stop matching what the
+# harness generates. Pin these files to LF on every platform.
+tests/corpus/** text eol=lf

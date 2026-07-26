@@ -53,6 +53,13 @@ XML2ARROW_FREEZE=1 cargo test --test frozen_corpus
 Keep documents small — the snapshot is meant to be read in a diff. Name the case
 after the behavior it pins, not the feature it uses.
 
+**Line endings are part of the fixture.** Expected errors carry byte offsets
+into `input.xml`, so CRLF would shift every one of them by the number of
+preceding lines. `.gitattributes` pins everything under `tests/corpus/` to LF on
+every platform, and the harness normalizes on read as a second line of defence —
+but an editor that rewrites a fixture to CRLF is still changing the test's input,
+so keep them LF.
+
 ## When a case fails
 
 Output changed. Read the diff and decide which it is:

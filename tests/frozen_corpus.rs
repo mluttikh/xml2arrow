@@ -286,7 +286,7 @@ fn compare_or_record(path: &Path, actual: &str, freezing: bool) -> Result<(), St
         }
         return fs::write(path, actual).map_err(|e| format!("cannot write {path:?}: {e}"));
     }
-    let expected = fs::read_to_string(path).map_err(|_| {
+    let expected = read(path).map_err(|_| {
         format!(
             "no snapshot at {}\n{actual}\nRecord it with `{FREEZE_ENV}=1 cargo test --test frozen_corpus`",
             path.display()
@@ -306,15 +306,40 @@ fn diff(expected: &str, actual: &str, path: &str) -> Result<(), String> {
         .zip(actual.lines())
         .enumerate()
         .find(|(_, (e, a))| e != a);
+    let (expected_lines, actual_lines) = (expected.lines().count(), actual.lines().count());
     let detail = match mismatch {
         Some((line, (e, a))) => format!("line {}:\n  expected: {e}\n  actual:   {a}", line + 1),
-        None => format!(
-            "line count differs: expected {} line(s), got {}",
-            expected.lines().count(),
-            actual.lines().count()
-        ),
+        None if expected_lines != actual_lines => {
+            format!("line count differs: expected {expected_lines} line(s), got {actual_lines}")
+        }
+        // Every line compares equal and there are as many of them, yet the
+        // texts differ: the difference is in bytes `str::lines` discards — a
+        // trailing `\r`, or a missing final newline. Reporting "line count
+        // differs: 21 vs 21" here (the first version of this code) sends the
+        // reader looking in exactly the wrong place.
+        None => {
+            let at = expected
+                .chars()
+                .zip(actual.chars())
+                .position(|(e, a)| e != a)
+                .unwrap_or_else(|| expected.chars().count().min(actual.chars().count()));
+            format!(
+                "identical lines but differing raw text at character {at} — line endings or a \
+                 trailing newline:\n  expected: {}\n  actual:   {}",
+                context(expected, at),
+                context(actual, at)
+            )
+        }
     };
     Err(format!("{path} output changed — {detail}"))
+}
+
+/// A short window around `at`, escaped so control characters — the whole point
+/// when the difference is a stray `\r` — are visible.
+fn context(text: &str, at: usize) -> String {
+    let start = at.saturating_sub(12);
+    let window: String = text.chars().skip(start).take(28).collect();
+    format!("…{}…", window.escape_debug())
 }
 
 /// A case that must fail may not carry table snapshots: a stale one would be a
@@ -365,6 +390,16 @@ fn list_snapshots(dir: &Path) -> Result<BTreeSet<String>, String> {
         .collect()
 }
 
+/// Reads a corpus file with line endings normalized to LF.
+///
+/// The corpus is byte-exact — the expected errors carry byte offsets into
+/// `input.xml`, so on a checkout that rewrote LF to CRLF every offset shifts by
+/// the number of preceding lines, and every snapshot differs from what the
+/// harness generates. `.gitattributes` pins these files to LF, and normalizing
+/// here as well means an already-converted working tree, or an editor that
+/// saved CRLF, still passes rather than failing 20 cases at once.
 fn read(path: &Path) -> Result<String, String> {
-    fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+    fs::read_to_string(path)
+        .map(|text| text.replace("\r\n", "\n"))
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))
 }
