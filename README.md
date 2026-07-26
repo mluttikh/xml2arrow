@@ -40,6 +40,7 @@ xml2arrow = "0.20.0"
 - ⏹️ **Early termination** via `stop_at_paths` for efficiently reading only part of a file
 - 🌊 **Bounded-memory streaming** for documents larger than RAM — batched output via `parse_batches`, with a `RecordBatchReader` adapter for single-table configs
 - 🔒 **Safe on untrusted input** — no external entity resolution, no entity expansion, no silent truncation ([details](#-security--trust-model))
+- 🔎 **Config lints** via `parser.warnings()` — advisory warnings about configs that are valid but behave surprisingly ([details](#checking-a-config-for-surprises))
 
 ## Usage
 
@@ -137,14 +138,15 @@ the `measurements` table back to the `stations` table on `<station>`.
 ```rust
 use std::fs::File;
 use std::io::BufReader;
-use xml2arrow::{Config, parse_xml};
+use xml2arrow::{Config, Parser};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_yaml_file("config.yaml")?;
+    let parser = Parser::new(&config)?;   // compile once, parse many
 
     let file = File::open("data.xml")?;
     let reader = BufReader::new(file);
-    let record_batches = parse_xml(reader, &config)?;
+    let record_batches = parser.parse(reader)?;
 
     for (name, batch) in &record_batches {
         println!("Table '{}': {} rows, {} columns", name, batch.num_rows(), batch.num_columns());
@@ -159,8 +161,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`parse_xml` returns an `IndexMap<String, RecordBatch>` whose keys are the table
-names defined in your config. The `RecordBatch` type is the standard Arrow
+`Parser::parse` returns an `IndexMap<String, RecordBatch>` whose keys are the
+table names defined in your config. The `RecordBatch` type is the standard Arrow
 in-memory columnar representation and can be passed directly to libraries such as
 [DataFusion](https://github.com/apache/datafusion),
 [Polars](https://github.com/pola-rs/polars), or written to Parquet via
@@ -168,28 +170,27 @@ in-memory columnar representation and can be passed directly to libraries such a
 
 #### Zero-copy parsing for in-memory data
 
-When the XML data is already in memory as a byte slice, use `parse_xml_slice` for
-better performance. It avoids per-event buffer copies by having quick-xml return
-events that borrow directly from the input:
+When the XML data is already in memory as a byte slice, use `parser.parse_slice`
+for better performance. It avoids per-event buffer copies by having quick-xml
+return events that borrow directly from the input:
 
 ```rust
-use xml2arrow::{Config, parse_xml_slice};
+use xml2arrow::{Config, Parser};
 
 let xml = std::fs::read("data.xml")?;
 let config = Config::from_yaml_file("config.yaml")?;
-let record_batches = parse_xml_slice(&xml, &config)?;
+let record_batches = Parser::new(&config)?.parse_slice(&xml)?;
 ```
 
-Use `parse_xml` for streaming sources (files, network) and `parse_xml_slice` when
-the full XML is already loaded into memory.
+Use `parser.parse` for streaming sources (files, network) and
+`parser.parse_slice` when the full XML is already loaded into memory.
 
 #### Reusing a parser across many documents
 
-`parse_xml` and `parse_xml_slice` are convenience wrappers that validate the
-config and compile its path trie on every call. When you parse many documents
-with the same config, build a `Parser` once and reuse it — the validation and
-trie construction (the fixed per-document setup cost) are then paid a single
-time instead of on every parse:
+Constructing a `Parser` validates the config and compiles its path trie — a
+fixed cost, independent of document size, that can dominate the parse of a small
+document. Build the parser once and reuse it across every document that shares
+the config:
 
 ```rust
 use xml2arrow::{Config, Parser};
@@ -204,15 +205,35 @@ for path in xml_files {
 }
 ```
 
-`Parser` exposes the same two parsing modes: `parser.parse(reader)` for streaming
-readers and `parser.parse_slice(&xml)` for in-memory byte slices. Each call
-allocates fresh Arrow builders, so batches from one document never leak into the
-next. The amortization matters most for small documents, where setup would
-otherwise dominate; for a single large file the win is negligible.
+Each call allocates fresh Arrow builders, so batches from one document never
+leak into the next. A `Parser` can also serve several streams concurrently.
+
+> **Deprecated since 0.20:** the free functions `parse_xml` and
+> `parse_xml_slice` do exactly `Parser::new(&config)?.parse(..)` /
+> `.parse_slice(..)`, paying the compilation cost on *every* call. They still
+> work, and will be removed in 1.0.
+
+#### Checking a config for surprises
+
+`Config::validate` (run by `Parser::new`) rejects configs that cannot work.
+`parser.warnings()` reports the next tier: configs that are valid but whose
+behavior commonly surprises — most importantly, tables whose **row boundaries
+are inferred** from several different child elements, which yield one
+partially-filled row per child element rather than one row per container.
+
+```rust
+let parser = Parser::new(&config)?;
+for lint in parser.warnings() {
+    eprintln!("xml2arrow config warning: {lint}");
+}
+```
+
+Lints are data, never printed by the library, and purely advisory: they never
+change how a document parses.
 
 #### Streaming documents too large for memory
 
-`parse_xml` and `parser.parse` read the input incrementally, but they
+`parser.parse` and `parser.parse_slice` read the input incrementally, but they
 accumulate *all* rows into one `RecordBatch` per table — peak memory grows
 with the dataset. For documents that don't fit in memory (multi-GB exports,
 archives, log or catalogue extracts), use `parser.parse_batches`: it yields each
@@ -518,8 +539,8 @@ misconfigured. They are pinned by `tests/adversarial_tests.rs`.
 is a trie-based path registry that replaces string comparisons in the hot loop with
 direct integer indexing.
 
-Two parsing functions are available: `parse_xml` (buffered, for streaming readers)
-and `parse_xml_slice` (zero-copy, for in-memory byte slices). The zero-copy path
+Two parsing modes are available: `parser.parse` (buffered, for streaming readers)
+and `parser.parse_slice` (zero-copy, for in-memory byte slices). The zero-copy path
 avoids per-event buffer copies, yielding ~7-9% higher throughput when the XML is
 already in memory.
 
@@ -529,7 +550,7 @@ to amortize config validation and path-trie construction across calls.
 
 Benchmarks were measured on an Apple M1 Pro using [Criterion.rs](https://github.com/bheisler/criterion.rs):
 
-| Benchmark                             | File size | `parse_xml`  | `parse_xml_slice` |
+| Benchmark                             | File size | `parse`      | `parse_slice`     |
 | :------------------------------------ | --------: | :----------- | :---------------- |
 | 1K measurements, 2 sensors (small)    |   413 KB  | ~381 MiB/s   | ~415 MiB/s        |
 | 10K measurements, 5 sensors (medium)  |    10 MB  | ~394 MiB/s   | ~423 MiB/s        |
