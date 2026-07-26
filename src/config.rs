@@ -108,7 +108,7 @@ fn default_true() -> bool {
 /// registry: the leading `/` is ignored and empty segments (double or
 /// trailing slashes) are skipped. Validation and runtime matching must agree
 /// on what a "path" is, so this mirrors `PathRegistry::get_or_create_path`.
-fn path_segments(path: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn path_segments(path: &str) -> impl DoubleEndedIterator<Item = &str> {
     path.trim_start_matches('/')
         .split('/')
         .filter(|s| !s.is_empty())
@@ -118,7 +118,7 @@ fn path_segments(path: &str) -> impl Iterator<Item = &str> {
 /// compared segment-wise. A plain string prefix test is not enough:
 /// `/root/items_other` starts with `/root/item` as a string but is not under
 /// it as a path. The root path `/` has no segments, so everything is under it.
-fn path_is_under(descendant: &str, ancestor: &str) -> bool {
+pub(crate) fn path_is_under(descendant: &str, ancestor: &str) -> bool {
     // Fast path for canonical spellings: a character-level prefix whose cut
     // lands on a segment boundary is exactly the segment-wise relation.
     // Validation runs once per `Parser::new`, but that fixed cost dominates
@@ -145,7 +145,25 @@ fn paths_equal(a: &str, b: &str) -> bool {
 ///
 /// This struct holds a collection of `TableConfig` structs, each defining how a specific
 /// part of the XML document should be parsed into an Arrow table.
+///
+/// Marked `#[non_exhaustive]`: build one with [`Config::builder`] (or load it
+/// from YAML), so that adding a configuration key in a future release stays a
+/// non-breaking change. The fields remain public for reading and mutation.
+///
+/// ```rust
+/// use xml2arrow::config::{Config, DType, FieldConfigBuilder, TableConfig};
+///
+/// let config = Config::builder()
+///     .table(
+///         TableConfig::builder("items", "/data")
+///             .field(FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build()?)
+///             .build(),
+///     )
+///     .build()?;
+/// # Ok::<(), xml2arrow::Error>(())
+/// ```
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[non_exhaustive]
 pub struct Config {
     /// A vector of `TableConfig` structs, each defining a table to be extracted from the XML.
     pub tables: Vec<TableConfig>,
@@ -155,6 +173,16 @@ pub struct Config {
 }
 
 impl Config {
+    /// Starts building a configuration programmatically.
+    ///
+    /// See [`ConfigBuilder`] for the full example; [`ConfigBuilder::build`]
+    /// runs [`Config::validate`], so a config obtained this way is always
+    /// structurally valid.
+    #[must_use]
+    pub fn builder() -> ConfigBuilder {
+        ConfigBuilder::default()
+    }
+
     /// Validates the configuration for structural correctness and field constraints.
     ///
     /// Checks performed:
@@ -348,7 +376,12 @@ impl Config {
 /// the path to the element whose configured direct children delimit rows, the
 /// index columns linking nested tables (`levels`), and the configuration of
 /// the fields (columns) within the table.
+///
+/// Marked `#[non_exhaustive]`: build one with [`TableConfig::builder`] or
+/// [`TableConfig::new`], so that adding a key in a future release stays a
+/// non-breaking change.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[non_exhaustive]
 pub struct TableConfig {
     /// The name of the table.
     pub name: String,
@@ -372,13 +405,134 @@ impl TableConfig {
             fields,
         }
     }
+
+    /// Starts building a table configuration, adding levels and fields one at
+    /// a time.
+    ///
+    /// Prefer this over [`TableConfig::new`] when the levels or fields are
+    /// assembled incrementally; both are forward-compatible with future keys.
+    #[must_use]
+    pub fn builder(name: &str, xml_path: &str) -> TableConfigBuilder {
+        TableConfigBuilder {
+            name: name.to_string(),
+            xml_path: xml_path.to_string(),
+            levels: Vec::new(),
+            fields: Vec::new(),
+        }
+    }
+}
+
+/// A builder for [`Config`], created by [`Config::builder`].
+///
+/// [`ConfigBuilder::build`] validates the assembled configuration, so a
+/// `Config` produced here is guaranteed to satisfy [`Config::validate`].
+#[derive(Debug, Default)]
+pub struct ConfigBuilder {
+    tables: Vec<TableConfig>,
+    parser_options: ParserOptions,
+}
+
+impl ConfigBuilder {
+    /// Appends one table.
+    #[must_use]
+    pub fn table(mut self, table: TableConfig) -> Self {
+        self.tables.push(table);
+        self
+    }
+
+    /// Appends several tables.
+    #[must_use]
+    pub fn tables(mut self, tables: impl IntoIterator<Item = TableConfig>) -> Self {
+        self.tables.extend(tables);
+        self
+    }
+
+    /// Replaces the parser options (defaults to [`ParserOptions::default`]).
+    #[must_use]
+    pub fn parser_options(mut self, parser_options: ParserOptions) -> Self {
+        self.parser_options = parser_options;
+        self
+    }
+
+    /// Validates and returns the configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfig`] (or [`Error::UnsupportedConversion`])
+    /// for any violation listed on [`Config::validate`].
+    pub fn build(self) -> Result<Config> {
+        let config = Config {
+            tables: self.tables,
+            parser_options: self.parser_options,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+}
+
+/// A builder for [`TableConfig`], created by [`TableConfig::builder`].
+#[derive(Debug)]
+pub struct TableConfigBuilder {
+    name: String,
+    xml_path: String,
+    levels: Vec<String>,
+    fields: Vec<FieldConfig>,
+}
+
+impl TableConfigBuilder {
+    /// Appends one parent-link level. See [`TableConfig::levels`].
+    #[must_use]
+    pub fn level(mut self, level: impl Into<String>) -> Self {
+        self.levels.push(level.into());
+        self
+    }
+
+    /// Appends several parent-link levels.
+    #[must_use]
+    pub fn levels(mut self, levels: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.levels.extend(levels.into_iter().map(Into::into));
+        self
+    }
+
+    /// Appends one field (column).
+    #[must_use]
+    pub fn field(mut self, field: FieldConfig) -> Self {
+        self.fields.push(field);
+        self
+    }
+
+    /// Appends several fields (columns).
+    #[must_use]
+    pub fn fields(mut self, fields: impl IntoIterator<Item = FieldConfig>) -> Self {
+        self.fields.extend(fields);
+        self
+    }
+
+    /// Returns the assembled table configuration.
+    ///
+    /// Infallible by design: the checks that could fail here (unique names,
+    /// paths aligned across tables) need the *whole* configuration, and run in
+    /// [`ConfigBuilder::build`] / [`Config::validate`].
+    #[must_use]
+    pub fn build(self) -> TableConfig {
+        TableConfig {
+            name: self.name,
+            xml_path: self.xml_path,
+            levels: self.levels,
+            fields: self.fields,
+        }
+    }
 }
 
 /// Configuration for a single field within an XML table.
 ///
 /// This struct defines how a specific XML element or attribute should be extracted and
 /// converted into an Arrow column.
+///
+/// Marked `#[non_exhaustive]`: build one with [`FieldConfigBuilder`], so that
+/// adding a per-field key in a future release stays a non-breaking change.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[non_exhaustive]
 pub struct FieldConfig {
     /// The name of the field (and the name of the resulting Arrow column).
     pub name: String,

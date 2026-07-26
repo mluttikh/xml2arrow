@@ -15,9 +15,7 @@ use std::io::Write;
 use arrow::array::Array;
 use rstest::rstest;
 use tempfile::NamedTempFile;
-use xml2arrow::{
-    BatchOptions, Config, Error, Parser, errors::ParseKind, parse_xml, parse_xml_slice,
-};
+use xml2arrow::{BatchOptions, Config, Error, Parser, errors::ParseKind};
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -62,7 +60,7 @@ impl Entry {
     fn run(self, xml: &str, config: &Config) -> Result<Vec<String>, Error> {
         match self {
             Entry::Slice => {
-                let batches = parse_xml_slice(xml.as_bytes(), config)?;
+                let batches = Parser::new(config)?.parse_slice(xml.as_bytes())?;
                 Ok(collect_values(batches.get("rows")))
             }
             Entry::Buffered => {
@@ -72,7 +70,7 @@ impl Entry {
                 file.write_all(xml.as_bytes()).expect("write");
                 file.flush().expect("flush");
                 let handle = std::fs::File::open(file.path()).expect("open");
-                let batches = parse_xml(std::io::BufReader::new(handle), config)?;
+                let batches = Parser::new(config)?.parse(std::io::BufReader::new(handle))?;
                 Ok(collect_values(batches.get("rows")))
             }
             Entry::Batches => {

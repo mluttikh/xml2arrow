@@ -19,7 +19,7 @@ use arrow::array::{
 use arrow::compute::concat_batches;
 use indexmap::IndexMap;
 use tempfile::NamedTempFile;
-use xml2arrow::{BatchOptions, Config, Parser, TableBatch, parse_xml};
+use xml2arrow::{BatchOptions, Config, Parser, TableBatch};
 
 use common::{parse_xml_file, write_xml_tempfile};
 
@@ -150,7 +150,7 @@ tables:
 
     let file = File::open(xml_file.path()).unwrap();
     let reader = BufReader::new(file);
-    let batches = parse_xml(reader, &config).unwrap();
+    let batches = Parser::new(&config).unwrap().parse(reader).unwrap();
     let batch = batches.get("items").unwrap();
 
     assert_eq!(batch.num_rows(), 1);
@@ -199,14 +199,20 @@ fn test_config_reused_across_multiple_files() {
 
     // Parse first file
     let file_a = File::open(xml_a.path()).unwrap();
-    let batches_a = parse_xml(BufReader::new(file_a), &config).unwrap();
+    let batches_a = Parser::new(&config)
+        .unwrap()
+        .parse(BufReader::new(file_a))
+        .unwrap();
     let batch_a = batches_a.get("items").unwrap();
     assert_eq!(batch_a.num_rows(), 1);
     assert_array_values!(batch_a, "value", &[1], Int32Array);
 
     // Parse second file with the same config
     let file_b = File::open(xml_b.path()).unwrap();
-    let batches_b = parse_xml(BufReader::new(file_b), &config).unwrap();
+    let batches_b = Parser::new(&config)
+        .unwrap()
+        .parse(BufReader::new(file_b))
+        .unwrap();
     let batch_b = batches_b.get("items").unwrap();
     assert_eq!(batch_b.num_rows(), 2);
     assert_array_values!(batch_b, "value", &[10, 20], Int32Array);
@@ -307,7 +313,7 @@ fn test_utf8_bom_file_parsed_correctly() {
 
     let file = File::open(xml_file.path()).unwrap();
     let reader = BufReader::new(file);
-    let batches = parse_xml(reader, &config).unwrap();
+    let batches = Parser::new(&config).unwrap().parse(reader).unwrap();
     let batch = batches.get("items").unwrap();
 
     assert_eq!(batch.num_rows(), 1);
@@ -339,7 +345,7 @@ fn test_empty_file_returns_empty_batch() {
 
     let file = File::open(xml_file.path()).unwrap();
     let reader = BufReader::new(file);
-    let result = parse_xml(reader, &config);
+    let result = Parser::new(&config).unwrap().parse(reader);
 
     assert!(result.is_ok());
     let batches = result.unwrap();
@@ -367,7 +373,7 @@ fn test_whitespace_only_file_returns_empty_batch() {
 
     let file = File::open(xml_file.path()).unwrap();
     let reader = BufReader::new(file);
-    let result = parse_xml(reader, &config);
+    let result = Parser::new(&config).unwrap().parse(reader);
 
     assert!(result.is_ok());
 }
@@ -798,7 +804,10 @@ fn test_truncated_file_is_rejected_rather_than_silently_short() {
     .unwrap();
 
     let file = File::open(xml_file.path()).unwrap();
-    let err = parse_xml(BufReader::new(file), &config).unwrap_err();
+    let err = Parser::new(&config)
+        .unwrap()
+        .parse(BufReader::new(file))
+        .unwrap_err();
     assert!(
         matches!(err, xml2arrow::Error::TruncatedInput { .. }),
         "expected TruncatedInput, got: {err}"
@@ -808,8 +817,167 @@ fn test_truncated_file_is_rejected_rather_than_silently_short() {
     let mut lenient = config.clone();
     lenient.parser_options.allow_truncated_input = true;
     let file = File::open(xml_file.path()).unwrap();
-    let batches = parse_xml(BufReader::new(file), &lenient).unwrap();
+    let batches = Parser::new(&lenient)
+        .unwrap()
+        .parse(BufReader::new(file))
+        .unwrap();
     let items = batches.get("items").unwrap();
     assert_eq!(items.num_rows(), 2);
     assert_array_values!(items, "id", &[1, 2], Int32Array);
+}
+
+// ---------------------------------------------------------------------------
+// Forward compatibility (0.20): builders, deprecated API, config lints
+// ---------------------------------------------------------------------------
+//
+// `Config`, `TableConfig` and `FieldConfig` are `#[non_exhaustive]`, so this
+// file — an external crate, like any user's — can only build them through the
+// builders or YAML. These tests pin that the builders cover every shape the
+// struct literals did, that the deprecated entry points still behave
+// identically until 1.0 removes them, and that lints report what the
+// transition plan says they report.
+
+#[test]
+fn builders_produce_the_same_config_as_yaml() {
+    use xml2arrow::config::{DType, FieldConfigBuilder, TableConfig};
+
+    let built = Config::builder()
+        .table(
+            TableConfig::builder("stations", "/report/stations")
+                .field(
+                    FieldConfigBuilder::new("id", "/report/stations/station/@id", DType::Int32)
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .table(
+            TableConfig::builder("measurements", "/report/stations/station/measurements")
+                .level("stations")
+                .fields([FieldConfigBuilder::new(
+                    "value",
+                    "/report/stations/station/measurements/measurement/value",
+                    DType::Float64,
+                )
+                .nullable(true)
+                .scale(0.001)
+                .build()
+                .unwrap()])
+                .build(),
+        )
+        .build()
+        .unwrap();
+
+    let from_yaml: Config = yaml_serde::from_str(
+        r#"
+tables:
+  - name: stations
+    xml_path: /report/stations
+    levels: []
+    fields:
+      - {name: id, xml_path: /report/stations/station/@id, data_type: Int32}
+  - name: measurements
+    xml_path: /report/stations/station/measurements
+    levels: [stations]
+    fields:
+      - name: value
+        xml_path: /report/stations/station/measurements/measurement/value
+        data_type: Float64
+        nullable: true
+        scale: 0.001
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(built, from_yaml);
+}
+
+#[test]
+fn config_builder_validates_on_build() {
+    use xml2arrow::config::TableConfig;
+
+    // Two tables sharing an xml_path: rejected by `Config::validate`, which
+    // `ConfigBuilder::build` runs, so an invalid config is unrepresentable.
+    let err = Config::builder()
+        .table(TableConfig::builder("a", "/data").build())
+        .table(TableConfig::builder("b", "/data").build())
+        .build()
+        .unwrap_err();
+    assert!(
+        matches!(err, xml2arrow::Error::InvalidConfig { .. }),
+        "expected InvalidConfig, got: {err}"
+    );
+}
+
+#[test]
+#[allow(deprecated)]
+fn deprecated_entry_points_still_produce_identical_output() {
+    let yaml = r#"
+tables:
+  - name: items
+    xml_path: /data
+    levels: []
+    fields:
+      - {name: value, xml_path: /data/item/value, data_type: Int32}
+"#;
+    let xml = b"<data><item><value>1</value></item><item><value>2</value></item></data>";
+    let config: Config = yaml_serde::from_str(yaml).unwrap();
+    let parser = Parser::new(&config).unwrap();
+
+    let expected = parser.parse_slice(xml).unwrap();
+    assert_eq!(xml2arrow::parse_xml(&xml[..], &config).unwrap(), expected);
+    assert_eq!(xml2arrow::parse_xml_slice(xml, &config).unwrap(), expected);
+
+    // The callback wrapper still drives the stream to completion.
+    let mut seen = 0;
+    parser
+        .parse_streaming(&xml[..], BatchOptions::default(), |table, batch| {
+            assert_eq!(table, "items");
+            seen += batch.num_rows();
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(seen, 2);
+}
+
+#[test]
+fn lints_flag_inferred_row_boundaries_without_changing_behavior() {
+    use xml2arrow::Lint;
+
+    // A metadata table whose fields sit under two different child elements:
+    // each closing child finalizes a row, so this yields two half-filled rows
+    // per <header> rather than one row. The lint says so; the parse is
+    // unchanged.
+    let config: Config = yaml_serde::from_str(
+        r#"
+tables:
+  - name: header
+    xml_path: /report/header
+    levels: []
+    fields:
+      - {name: title, xml_path: /report/header/title, data_type: Utf8, nullable: true}
+      - {name: created, xml_path: /report/header/created, data_type: Utf8, nullable: true}
+"#,
+    )
+    .unwrap();
+    let parser = Parser::new(&config).unwrap();
+
+    let warnings = parser.warnings();
+    assert!(
+        warnings.iter().any(|lint| matches!(
+            lint,
+            Lint::InferredRowBoundary { table, child_elements, .. }
+                if table == "header" && child_elements.len() == 2
+        )),
+        "expected an InferredRowBoundary lint, got: {warnings:?}"
+    );
+
+    let batches = parser
+        .parse_slice(b"<report><header><title>T</title><created>C</created></header></report>")
+        .unwrap();
+    assert_eq!(
+        batches.get("header").unwrap().num_rows(),
+        2,
+        "the lint is advisory: behavior must be unchanged"
+    );
 }

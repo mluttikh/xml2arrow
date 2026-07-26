@@ -34,6 +34,7 @@ use crate::errors::ConfigIssue;
 use crate::errors::Error;
 use crate::errors::ParseKind;
 use crate::errors::Result;
+use crate::lint::Lint;
 use crate::path_registry::{PathNodeId, PathNodeInfo, PathRegistry, PathTracker};
 
 // === Field-level accumulation ===
@@ -879,8 +880,10 @@ impl<'a> XmlToArrowConverter<'a> {
 /// use xml2arrow::{Parser, config::{Config, TableConfig, FieldConfigBuilder, DType}};
 ///
 /// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build().unwrap()];
-/// let tables = vec![TableConfig::new("items", "/data", vec![], fields)];
-/// let config = Config { tables, parser_options: Default::default() };
+/// let config = Config::builder()
+///     .table(TableConfig::builder("items", "/data").fields(fields).build())
+///     .build()
+///     .unwrap();
 ///
 /// // Compile once...
 /// let parser = Parser::new(&config).unwrap();
@@ -974,6 +977,38 @@ impl Parser {
             table_schemas,
             table_names,
         })
+    }
+
+    /// Returns advisory findings about this parser's configuration — configs
+    /// that are valid but whose row semantics or value handling commonly
+    /// surprise. See [`Lint`] for what is checked.
+    ///
+    /// Hosts are expected to log these; the library never prints. Lints are
+    /// advisory in every release they appear in and never change parsing
+    /// behavior.
+    ///
+    /// Computed on demand rather than cached in [`Parser::new`]: `Parser::new`'s
+    /// fixed cost dominates parses of small documents, and callers typically
+    /// want this exactly once, at startup.
+    ///
+    /// ```rust
+    /// # use xml2arrow::{Parser, config_from_yaml};
+    /// # let config = config_from_yaml!(r#"
+    /// # tables:
+    /// #   - name: items
+    /// #     xml_path: /data
+    /// #     levels: []
+    /// #     fields: [{name: v, xml_path: /data/item/v, data_type: Int32}]
+    /// # "#);
+    /// let parser = Parser::new(&config)?;
+    /// for lint in parser.warnings() {
+    ///     eprintln!("xml2arrow config warning: {lint}");
+    /// }
+    /// # Ok::<(), xml2arrow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn warnings(&self) -> Vec<Lint> {
+        self.config.lint()
     }
 
     /// Returns the output schema of `table` without parsing any document.
@@ -1092,8 +1127,10 @@ impl Parser {
     /// use xml2arrow::{BatchOptions, Parser, config::{Config, TableConfig, FieldConfigBuilder, DType}};
     ///
     /// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build().unwrap()];
-    /// let tables = vec![TableConfig::new("items", "/data", vec![], fields)];
-    /// let config = Config { tables, parser_options: Default::default() };
+    /// let config = Config::builder()
+    ///     .table(TableConfig::builder("items", "/data").fields(fields).build())
+    ///     .build()
+    ///     .unwrap();
     /// let parser = Parser::new(&config).unwrap();
     ///
     /// let xml: &[u8] = b"<data><item><value>1</value></item><item><value>2</value></item></data>";
@@ -1145,6 +1182,10 @@ impl Parser {
     /// Returns the first error the underlying stream yields (XML parsing,
     /// value conversion, or `RecordBatch` creation), or the first error
     /// returned by `sink` — whichever occurs first aborts the parse.
+    #[deprecated(
+        since = "0.20.0",
+        note = "iterate `parse_batches` directly — `for item in parser.parse_batches(reader, options) { let TableBatch { table, batch } = item?; }` is the same code without a second entry point"
+    )]
     pub fn parse_streaming<R, F>(&self, reader: R, options: BatchOptions, mut sink: F) -> Result<()>
     where
         R: BufRead,
@@ -1310,17 +1351,21 @@ impl Parser {
 /// # Example
 ///
 /// ```rust
-/// use xml2arrow::{parse_xml, config::{Config, TableConfig, FieldConfigBuilder, DType}};
-/// use std::fs::File;
-/// use std::io::BufReader;
+/// use xml2arrow::{Parser, config::{Config, TableConfig, FieldConfigBuilder, DType}};
 ///
 /// let xml_content = r#"<data><item><value>123</value></item></data>"#;
-/// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build().unwrap()];
-/// let tables = vec![TableConfig::new("items", "/data", vec![], fields)];
-/// let config = Config { tables, parser_options: Default::default() };
-/// let record_batches = parse_xml(xml_content.as_bytes(), &config).unwrap();
+/// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build()?];
+/// let config = Config::builder()
+///     .table(TableConfig::builder("items", "/data").fields(fields).build())
+///     .build()?;
+/// let record_batches = Parser::new(&config)?.parse(xml_content.as_bytes())?;
 /// // ... use record_batches
+/// # Ok::<(), xml2arrow::Error>(())
 /// ```
+#[deprecated(
+    since = "0.20.0",
+    note = "construct a `Parser` and reuse it: `Parser::new(&config)?.parse(reader)`. The free function hides the one-time path-compilation cost, which it pays on every call"
+)]
 pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<String, RecordBatch>> {
     Parser::new(config)?.parse(reader)
 }
@@ -1352,14 +1397,20 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
 /// # Example
 ///
 /// ```rust
-/// use xml2arrow::{parse_xml_slice, config::{Config, TableConfig, FieldConfigBuilder, DType}};
+/// use xml2arrow::{Parser, config::{Config, TableConfig, FieldConfigBuilder, DType}};
 ///
 /// let xml = b"<data><item><value>123</value></item></data>";
-/// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build().unwrap()];
-/// let tables = vec![TableConfig::new("items", "/data", vec![], fields)];
-/// let config = Config { tables, parser_options: Default::default() };
-/// let record_batches = parse_xml_slice(xml, &config).unwrap();
+/// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build()?];
+/// let config = Config::builder()
+///     .table(TableConfig::builder("items", "/data").fields(fields).build())
+///     .build()?;
+/// let record_batches = Parser::new(&config)?.parse_slice(xml)?;
+/// # Ok::<(), xml2arrow::Error>(())
 /// ```
+#[deprecated(
+    since = "0.20.0",
+    note = "construct a `Parser` and reuse it: `Parser::new(&config)?.parse_slice(xml)`. The free function hides the one-time path-compilation cost, which it pays on every call"
+)]
 pub fn parse_xml_slice(xml: &[u8], config: &Config) -> Result<IndexMap<String, RecordBatch>> {
     Parser::new(config)?.parse_slice(xml)
 }
@@ -2232,11 +2283,29 @@ mod tests {
     };
     use rstest::rstest;
 
+    /// `Parser::new(config)?.parse(reader)` in a single call.
+    ///
+    /// The deprecated `parse_xml` free function did exactly this. The unit
+    /// tests do hundreds of one-shot parses, so they keep the terse shape
+    /// locally while the public API stays `Parser`-first.
+    fn parse_document(
+        reader: impl BufRead,
+        config: &Config,
+    ) -> Result<IndexMap<String, RecordBatch>> {
+        Parser::new(config)?.parse(reader)
+    }
+
+    /// Zero-copy counterpart of [`parse_document`].
+    #[allow(dead_code)]
+    fn parse_document_slice(xml: &[u8], config: &Config) -> Result<IndexMap<String, RecordBatch>> {
+        Parser::new(config)?.parse_slice(xml)
+    }
+
     /// Parse XML from a string using an inline YAML config.
     /// Panics on error -- intended for tests with known-good inputs.
     fn parse(xml: &str, yaml_config: &str) -> IndexMap<String, RecordBatch> {
         let config = config_from_yaml!(yaml_config);
-        parse_xml(xml.as_bytes(), &config).unwrap()
+        parse_document(xml.as_bytes(), &config).unwrap()
     }
 
     macro_rules! assert_array_values {
@@ -3137,7 +3206,7 @@ mod tests {
             "#
         );
 
-        let result = parse_xml(xml_content.as_bytes(), &config);
+        let result = parse_document(xml_content.as_bytes(), &config);
         assert!(result.is_err());
         let err = result.unwrap_err();
         match &err {
@@ -3179,7 +3248,7 @@ mod tests {
             "#
         );
 
-        let result = parse_xml(xml_content.as_bytes(), &config);
+        let result = parse_document(xml_content.as_bytes(), &config);
         assert!(result.is_err());
 
         // Nullable should succeed with nulls
@@ -3197,7 +3266,7 @@ mod tests {
             "#
         );
 
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let record_batches = parse_document(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("bools").unwrap();
         assert_array_values_option!(
             batch,
@@ -3313,7 +3382,7 @@ mod tests {
         );
 
         // Invalid value for Int32 should error
-        let result = parse_xml(
+        let result = parse_document(
             "<data><row><value>not_a_number</value></row></data>".as_bytes(),
             &config,
         );
@@ -3350,7 +3419,7 @@ mod tests {
             "#
         );
 
-        let record_batches = parse_xml(xml_content.as_bytes(), &config_no_trim)?;
+        let record_batches = parse_document(xml_content.as_bytes(), &config_no_trim)?;
         let batch = record_batches.get("test").unwrap();
         assert_array_values!(batch, "value", vec!["   trimmed   "], StringArray);
 
@@ -3370,7 +3439,7 @@ mod tests {
             "#
         );
 
-        let record_batches = parse_xml(xml_content.as_bytes(), &config_trim)?;
+        let record_batches = parse_document(xml_content.as_bytes(), &config_trim)?;
         let batch = record_batches.get("test").unwrap();
         assert_array_values!(batch, "value", vec!["trimmed"], StringArray);
 
@@ -3401,7 +3470,7 @@ mod tests {
             "#
         );
         let config: Config = yaml_serde::from_str(&yaml_config).unwrap();
-        let result = parse_xml(xml_content.as_bytes(), &config);
+        let result = parse_document(xml_content.as_bytes(), &config);
         assert!(
             result.is_err(),
             "Expected overflow error for {value} as {dtype}"
@@ -3425,7 +3494,7 @@ mod tests {
             "#
         );
 
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let record_batches = parse_document(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("test").unwrap();
         assert_array_values!(batch, "value", vec![i64::MAX], Int64Array);
 
@@ -3938,7 +4007,7 @@ mod tests {
             "#
         );
 
-        let result = parse_xml(xml_content.as_bytes(), &config);
+        let result = parse_document(xml_content.as_bytes(), &config);
         assert!(result.is_err());
         match result.unwrap_err() {
             e @ Error::MissingRequiredField { .. } => {
@@ -3967,7 +4036,7 @@ mod tests {
             "#
         );
 
-        let result = parse_xml(xml_content.as_bytes(), &config);
+        let result = parse_document(xml_content.as_bytes(), &config);
         assert!(result.is_err());
     }
 
@@ -4008,7 +4077,7 @@ mod tests {
             "#
         );
 
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let record_batches = parse_document(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("boundaries").unwrap();
         assert_eq!(batch.num_rows(), 1);
         assert_array_values!(batch, "int8_min", vec![i8::MIN], Int8Array);
@@ -4920,7 +4989,7 @@ mod tests {
             "#
         );
 
-        let result = parse_xml(
+        let result = parse_document(
             "<data><row><value>not_a_float</value></row></data>".as_bytes(),
             &config,
         );
@@ -4947,7 +5016,7 @@ mod tests {
             "#
         );
 
-        let result = parse_xml(
+        let result = parse_document(
             "<data><row><value>abc</value></row></data>".as_bytes(),
             &config,
         );
@@ -5005,7 +5074,7 @@ mod tests {
             "#
         );
 
-        let result = parse_xml("<data><row></row></data>".as_bytes(), &config);
+        let result = parse_document("<data><row></row></data>".as_bytes(), &config);
         assert!(result.is_err());
         match result.unwrap_err() {
             e @ Error::MissingRequiredField { .. } => {
@@ -5186,7 +5255,7 @@ mod tests {
         );
 
         // Empty element <value></value> with has_value=false for non-nullable Int32
-        let result = parse_xml(
+        let result = parse_document(
             "<data><row><value></value></row></data>".as_bytes(),
             &config,
         );
@@ -5307,7 +5376,7 @@ mod tests {
             "#
         );
 
-        let result = parse_xml(
+        let result = parse_document(
             "<data><row><flag>   </flag></row></data>".as_bytes(),
             &config,
         );
@@ -5623,7 +5692,7 @@ mod tests {
             "#
         );
         let config: Config = yaml_serde::from_str(&yaml_config).unwrap();
-        let result = parse_xml(
+        let result = parse_document(
             "<data><row><other>x</other></row></data>".as_bytes(),
             &config,
         );
@@ -5653,7 +5722,7 @@ mod tests {
         );
 
         // Mismatched closing tag should produce an error
-        let result = parse_xml(
+        let result = parse_document(
             "<data><row><value>42</wrong></row></data>".as_bytes(),
             &config,
         );
@@ -5676,7 +5745,7 @@ mod tests {
         );
 
         let garbage: &[u8] = &[0xFF, 0xFE, 0x00, 0x01, 0x80, 0x90, 0xAB];
-        let result = parse_xml(garbage, &config);
+        let result = parse_document(garbage, &config);
         // Binary input should either error or produce an empty batch
         // (quick_xml may treat it as text with no matching elements)
         if let Ok(batches) = &result {
@@ -5941,7 +6010,7 @@ mod tests {
         );
 
         // Duplicate attribute "id" is invalid XML
-        let result = parse_xml(
+        let result = parse_document(
             r#"<data><item id="1" id="2">text</item></data>"#.as_bytes(),
             &config,
         );
@@ -6267,7 +6336,7 @@ mod tests {
                       data_type: Utf8
             "#
         );
-        let result = parse_xml(
+        let result = parse_document(
             r#"<data><row><v>a&nbsp;b</v></row></data>"#.as_bytes(),
             &config,
         );
@@ -6315,7 +6384,7 @@ mod tests {
                       data_type: Utf8
             "#
         );
-        let result = parse_xml(
+        let result = parse_document(
             r#"<data><row><v>&#xZZ;</v></row></data>"#.as_bytes(),
             &config,
         );
@@ -6422,7 +6491,7 @@ mod tests {
                       data_type: Int32
             "#
         );
-        let result = parse_xml(
+        let result = parse_document(
             r#"<data><row><v>1</v><v>2</v></row></data>"#.as_bytes(),
             &config,
         );
@@ -6474,7 +6543,7 @@ mod tests {
                       data_type: Int32
             "#
         );
-        let result = parse_xml(
+        let result = parse_document(
             r#"<data><row><v>1</v><v/></row></data>"#.as_bytes(),
             &config,
         );
@@ -6868,7 +6937,11 @@ mod tests {
             assert!(stream.next().is_none());
         }
 
+        // `parse_streaming` is deprecated but still supported until 1.0, so its
+        // behavior stays pinned. The opt-out is per test, not module-wide, so a
+        // new use of a deprecated item elsewhere in the tests still warns.
         #[test]
+        #[allow(deprecated)]
         fn parse_streaming_callback_receives_all_batches() {
             let config = config_from_yaml!(NESTED_YAML);
             let parser = Parser::new(&config).unwrap();
@@ -6892,6 +6965,7 @@ mod tests {
         }
 
         #[test]
+        #[allow(deprecated)]
         fn parse_streaming_sink_error_aborts() {
             let config = config_from_yaml!(NESTED_YAML);
             let parser = Parser::new(&config).unwrap();
@@ -7330,8 +7404,8 @@ mod tests {
                       data_type: Int32
             "#
         );
-        let err =
-            parse_xml(r#"<data><row><v>   </v></row></data>"#.as_bytes(), &config).unwrap_err();
+        let err = parse_document(r#"<data><row><v>   </v></row></data>"#.as_bytes(), &config)
+            .unwrap_err();
         assert!(
             matches!(err, Error::MissingRequiredField { .. }),
             "got: {err}"
@@ -7360,7 +7434,7 @@ mod tests {
             "#
         );
         let xml = format!("<data><row><v>{value}</v></row></data>");
-        let err = parse_xml(xml.as_bytes(), &config).unwrap_err();
+        let err = parse_document(xml.as_bytes(), &config).unwrap_err();
         assert!(
             matches!(err, Error::ParseError { .. }),
             "value {value:?} must error, got: {err}"
@@ -7403,7 +7477,7 @@ mod tests {
                       data_type: Int32
             "#
         );
-        let err = parse_xml(
+        let err = parse_document(
             b"<data><row><v>99999999999</v></row></data>".as_slice(),
             &config,
         )
@@ -7428,8 +7502,8 @@ mod tests {
                       data_type: Int32
             "#
         );
-        let err =
-            parse_xml(r#"<data><row><v> 3x </v></row></data>"#.as_bytes(), &config).unwrap_err();
+        let err = parse_document(r#"<data><row><v> 3x </v></row></data>"#.as_bytes(), &config)
+            .unwrap_err();
         assert!(matches!(err, Error::ParseError { .. }), "got: {err}");
         assert!(err.to_string().contains("' 3x '"), "got: {err}");
     }
@@ -7457,7 +7531,7 @@ mod tests {
                       data_type: Utf8
             "#
         );
-        let err = parse_xml_slice(
+        let err = parse_document_slice(
             b"<data><row><v>a</v></row><row><v>b</v></row><row><v>c",
             &config,
         )
@@ -7488,7 +7562,7 @@ mod tests {
             "#
         );
         config.parser_options.allow_truncated_input = true;
-        let batches = parse_xml_slice(
+        let batches = parse_document_slice(
             b"<data><row><v>a</v></row><row><v>b</v></row><row><v>c",
             &config,
         )

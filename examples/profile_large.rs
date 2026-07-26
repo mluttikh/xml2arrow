@@ -1,4 +1,4 @@
-use xml2arrow::{Config, parse_xml};
+use xml2arrow::{Config, Parser};
 
 fn generate_xml(num_measurements: usize, num_sensors: usize) -> String {
     let mut xml = String::with_capacity(num_measurements * 200 + 10000);
@@ -157,7 +157,7 @@ tables:
     eprintln!("Parsing (5 iterations)...");
     for i in 0..5 {
         let start = std::time::Instant::now();
-        let result = parse_xml(xml.as_bytes(), &config).unwrap();
+        let result = Parser::new(&config).unwrap().parse(xml.as_bytes()).unwrap();
         let elapsed = start.elapsed();
         let throughput = xml.len() as f64 / (1024.0 * 1024.0) / elapsed.as_secs_f64();
         eprintln!(

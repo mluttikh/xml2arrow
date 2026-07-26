@@ -9,7 +9,7 @@ use std::io::{BufReader, Write};
 use arrow::record_batch::RecordBatch;
 use indexmap::IndexMap;
 use tempfile::NamedTempFile;
-use xml2arrow::{Config, parse_xml};
+use xml2arrow::{Config, Parser};
 
 /// Assert that an Arrow array column contains the expected values.
 ///
@@ -193,7 +193,9 @@ macro_rules! assert_array_approx_values_option {
 pub fn parse_xml_str(xml: &str, yaml_config: &str) -> IndexMap<String, RecordBatch> {
     let config: Config =
         yaml_serde::from_str(yaml_config).unwrap_or_else(|e| panic!("Invalid YAML config: {e}"));
-    parse_xml(xml.as_bytes(), &config).unwrap_or_else(|e| panic!("XML parsing failed: {e:?}"))
+    Parser::new(&config)
+        .and_then(|parser| parser.parse(xml.as_bytes()))
+        .unwrap_or_else(|e| panic!("XML parsing failed: {e:?}"))
 }
 
 /// Parse XML content by writing it to a temporary file first, simulating
@@ -211,7 +213,9 @@ pub fn parse_xml_file(xml: &str, yaml_config: &str) -> IndexMap<String, RecordBa
 
     let file = File::open(xml_file.path()).expect("Failed to open temp file");
     let reader = BufReader::new(file);
-    parse_xml(reader, &config).unwrap_or_else(|e| panic!("XML parsing failed: {e:?}"))
+    Parser::new(&config)
+        .and_then(|parser| parser.parse(reader))
+        .unwrap_or_else(|e| panic!("XML parsing failed: {e:?}"))
 }
 
 /// Write XML content to a temporary file and return the file handle.

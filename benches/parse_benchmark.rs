@@ -2,7 +2,7 @@ use codspeed_criterion_compat::{
     BenchmarkId, Criterion, Throughput, criterion_group, criterion_main,
 };
 use std::time::Duration;
-use xml2arrow::{Config, Parser, parse_xml, parse_xml_slice};
+use xml2arrow::{Config, Parser};
 
 /// Generate realistic XML matching industrial use case
 fn generate_realistic_xml(num_measurements: usize, num_sensors: usize) -> String {
@@ -271,7 +271,7 @@ fn bench_parse_tiny(c: &mut Criterion) {
         &xml,
         |b, xml| {
             b.iter(|| {
-                let result = parse_xml(xml.as_bytes(), &config);
+                let result = Parser::new(&config).unwrap().parse(xml.as_bytes());
                 result.unwrap()
             });
         },
@@ -285,7 +285,7 @@ fn bench_parse_tiny(c: &mut Criterion) {
         &xml,
         |b, xml| {
             b.iter(|| {
-                let result = parse_xml_slice(xml.as_bytes(), &config);
+                let result = Parser::new(&config).unwrap().parse_slice(xml.as_bytes());
                 result.unwrap()
             });
         },
@@ -347,7 +347,7 @@ fn bench_parse_small(c: &mut Criterion) {
         &xml,
         |b, xml| {
             b.iter(|| {
-                let result = parse_xml(xml.as_bytes(), &config);
+                let result = Parser::new(&config).unwrap().parse(xml.as_bytes());
                 result.unwrap()
             });
         },
@@ -361,7 +361,7 @@ fn bench_parse_small(c: &mut Criterion) {
         &xml,
         |b, xml| {
             b.iter(|| {
-                let result = parse_xml_slice(xml.as_bytes(), &config);
+                let result = Parser::new(&config).unwrap().parse_slice(xml.as_bytes());
                 result.unwrap()
             });
         },
@@ -389,7 +389,7 @@ fn bench_parse_medium(c: &mut Criterion) {
         &xml,
         |b, xml| {
             b.iter(|| {
-                let result = parse_xml(xml.as_bytes(), &config);
+                let result = Parser::new(&config).unwrap().parse(xml.as_bytes());
                 result.unwrap()
             });
         },
@@ -403,7 +403,7 @@ fn bench_parse_medium(c: &mut Criterion) {
         &xml,
         |b, xml| {
             b.iter(|| {
-                let result = parse_xml_slice(xml.as_bytes(), &config);
+                let result = Parser::new(&config).unwrap().parse_slice(xml.as_bytes());
                 result.unwrap()
             });
         },
@@ -431,7 +431,7 @@ fn bench_parse_large(c: &mut Criterion) {
         &xml,
         |b, xml| {
             b.iter(|| {
-                let result = parse_xml(xml.as_bytes(), &config);
+                let result = Parser::new(&config).unwrap().parse(xml.as_bytes());
                 result.unwrap()
             });
         },
@@ -445,7 +445,7 @@ fn bench_parse_large(c: &mut Criterion) {
         &xml,
         |b, xml| {
             b.iter(|| {
-                let result = parse_xml_slice(xml.as_bytes(), &config);
+                let result = Parser::new(&config).unwrap().parse_slice(xml.as_bytes());
                 result.unwrap()
             });
         },
@@ -473,7 +473,7 @@ fn bench_parse_xlarge(c: &mut Criterion) {
         &xml,
         |b, xml| {
             b.iter(|| {
-                let result = parse_xml(xml.as_bytes(), &config);
+                let result = Parser::new(&config).unwrap().parse(xml.as_bytes());
                 result.unwrap()
             });
         },
@@ -487,7 +487,7 @@ fn bench_parse_xlarge(c: &mut Criterion) {
         &xml,
         |b, xml| {
             b.iter(|| {
-                let result = parse_xml_slice(xml.as_bytes(), &config);
+                let result = Parser::new(&config).unwrap().parse_slice(xml.as_bytes());
                 result.unwrap()
             });
         },
@@ -561,7 +561,7 @@ fn bench_parse_wide_fanout(c: &mut Criterion) {
         &xml,
         |b, xml| {
             b.iter(|| {
-                let result = parse_xml(xml.as_bytes(), &config);
+                let result = Parser::new(&config).unwrap().parse(xml.as_bytes());
                 result.unwrap()
             });
         },
@@ -575,7 +575,7 @@ fn bench_parse_wide_fanout(c: &mut Criterion) {
         &xml,
         |b, xml| {
             b.iter(|| {
-                let result = parse_xml_slice(xml.as_bytes(), &config);
+                let result = Parser::new(&config).unwrap().parse_slice(xml.as_bytes());
                 result.unwrap()
             });
         },
