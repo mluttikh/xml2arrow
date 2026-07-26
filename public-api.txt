@@ -462,6 +462,8 @@ impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::FieldConfigB
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::FieldConfigBuilder
 pub struct xml2arrow::Parser
 impl xml2arrow::Parser
+pub fn xml2arrow::Parser::into_batches<R: alloc::io::buf_read::BufRead>(self, R, xml2arrow::BatchOptions) -> xml2arrow::BatchStream<'static, xml2arrow::ReaderSource<R>>
+pub fn xml2arrow::Parser::into_single_table<R: alloc::io::buf_read::BufRead>(self, R, xml2arrow::BatchOptions) -> xml2arrow::errors::Result<xml2arrow::SingleTableReader<'static, xml2arrow::ReaderSource<R>>>
 pub fn xml2arrow::Parser::new(&xml2arrow::config::Config) -> xml2arrow::errors::Result<Self>
 pub fn xml2arrow::Parser::parse(&self, impl alloc::io::buf_read::BufRead) -> xml2arrow::errors::Result<indexmap::map::IndexMap<alloc::string::String, arrow_array::record_batch::RecordBatch>>
 pub fn xml2arrow::Parser::parse_batches<R: alloc::io::buf_read::BufRead>(&self, R, xml2arrow::BatchOptions) -> xml2arrow::BatchStream<'_, xml2arrow::ReaderSource<R>>
@@ -472,6 +474,8 @@ pub fn xml2arrow::Parser::parse_slice(&self, &[u8]) -> xml2arrow::errors::Result
 pub fn xml2arrow::Parser::parse_streaming<R, F>(&self, R, xml2arrow::BatchOptions, F) -> xml2arrow::errors::Result<()> where R: alloc::io::buf_read::BufRead, F: core::ops::function::FnMut(&str, arrow_array::record_batch::RecordBatch) -> xml2arrow::errors::Result<()>
 pub fn xml2arrow::Parser::schema(&self, &str) -> core::option::Option<arrow_schema::schema::SchemaRef>
 pub fn xml2arrow::Parser::single_table_schema(&self) -> xml2arrow::errors::Result<arrow_schema::schema::SchemaRef>
+impl core::clone::Clone for xml2arrow::Parser
+pub fn xml2arrow::Parser::clone(&self) -> Self
 impl core::marker::Freeze for xml2arrow::Parser
 impl core::marker::Send for xml2arrow::Parser
 impl core::marker::Sync for xml2arrow::Parser
