@@ -1744,7 +1744,20 @@ fn handle_general_ref(
 /// `is_table` flag — needed when this element later closes — was cached onto
 /// the path-tracker frame by `enter()`, so we never re-read `node_info[]` at
 /// `Event::End` time.
-#[inline]
+///
+/// `inline(always)`, not `inline`: this function exists to be written once and
+/// shared by the event pumps, not to be *called* by them. It sits astride every
+/// XML event, so a call here costs argument setup, a return, and the loss of
+/// cross-function optimization on the hottest path in the crate — measured at
+/// around 6% more instructions when the inliner declined it after unrelated
+/// growth in the value-append helpers. Its size is deliberately kept low for
+/// the same reason: rare arms and error construction live in `#[cold]` /
+/// `#[inline(never)]` helpers so that what lands here stays small.
+///
+/// Whether it is inlined is checkable without a benchmark: if
+/// `nm target/release/deps/parse_benchmark-* | grep handle_event` prints
+/// anything, it is not.
+#[inline(always)]
 fn handle_event<const PARSE_ATTRIBUTES: bool>(
     event: Event<'_>,
     decoder: Decoder,
