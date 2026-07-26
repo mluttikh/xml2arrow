@@ -2,7 +2,7 @@ use codspeed_criterion_compat::{
     BenchmarkId, Criterion, Throughput, criterion_group, criterion_main,
 };
 use std::time::Duration;
-use xml2arrow::{Config, Parser};
+use xml2arrow::{BatchOptions, Config, Parser};
 
 /// Generate realistic XML matching industrial use case
 fn generate_realistic_xml(num_measurements: usize, num_sensors: usize) -> String {
@@ -584,6 +584,49 @@ fn bench_parse_wide_fanout(c: &mut Criterion) {
     group.finish();
 }
 
+/// The streaming entry point, which the collect-everything benchmarks never
+/// reach: it flushes a batch every `max_rows_per_batch` rows, so it exercises
+/// per-batch costs — builder teardown and regrowth, `RecordBatch` assembly —
+/// that a single-batch parse pays exactly once.
+///
+/// Two batch sizes, because they stress different things. 8192 is the default
+/// and represents ordinary use; 256 flushes 40x more often on the same
+/// document, which is where per-flush overhead shows up if it exists.
+fn bench_parse_streaming(c: &mut Criterion) {
+    let xml = generate_realistic_xml(10_000, 5);
+    let config = get_config();
+    let size_bytes = xml.len();
+    let parser = Parser::new(&config).unwrap();
+
+    let mut group = c.benchmark_group("parse_streaming");
+    group.sample_size(50);
+    group.measurement_time(Duration::from_secs(10));
+    group.warm_up_time(Duration::from_secs(3));
+    group.throughput(Throughput::Bytes(size_bytes as u64));
+
+    for rows in [8192usize, 256] {
+        group.bench_with_input(
+            BenchmarkId::new(
+                format!("zero_copy_10K_measurements_5_sensors_{rows}_rows_per_batch"),
+                format!("{}KB", size_bytes / 1024),
+            ),
+            &xml,
+            |b, xml| {
+                b.iter(|| {
+                    let options = BatchOptions::default().with_max_rows_per_batch(rows);
+                    let mut batches = 0usize;
+                    for item in parser.parse_batches_slice(xml.as_bytes(), options) {
+                        batches += item.unwrap().batch.num_rows();
+                    }
+                    batches
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_parse_tiny,
@@ -591,6 +634,7 @@ criterion_group!(
     bench_parse_medium,
     bench_parse_large,
     bench_parse_xlarge,
-    bench_parse_wide_fanout
+    bench_parse_wide_fanout,
+    bench_parse_streaming
 );
 criterion_main!(benches);
