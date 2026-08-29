@@ -415,7 +415,7 @@ impl Config {
                                     },
                                 });
                             };
-                            // R15: the parent's rows must *contain* this
+                            // The parent's rows must *contain* this
                             // table's, checked by name. This is the whole
                             // advantage over `levels`, which took its values
                             // from whatever happened to enclose the table and
@@ -463,8 +463,8 @@ impl Config {
                         }
                     }
 
-                    // R20: a link column that shadowed a field would be a
-                    // silently wrong column, so collisions are rejected.
+                    // A link column that shadowed a field would be a silently
+                    // wrong column, so collisions are rejected.
                     if let Some(column) = link.column_name()
                         && !column_names.insert(column.clone())
                     {
@@ -690,8 +690,9 @@ pub struct Link {
 }
 
 impl Link {
-    /// The column name this link produces: the override, or the R20 default —
-    /// `_<parent>_id` for a parent link, `<element>_idx` for an ordinal.
+    /// The column name this link produces: the override when `name` is set,
+    /// otherwise `_<parent>_id` for a parent link and `<element>_idx` for an
+    /// ordinal.
     #[must_use]
     pub fn column_name(&self) -> Option<String> {
         if let Some(name) = &self.name {
@@ -2239,9 +2240,9 @@ mod tests {
         ));
     }
 
-    /// R15: a parent must *enclose* the child. This is the whole advantage
-    /// over `levels`, which took values from whatever happened to enclose the
-    /// table and so could silently mis-align.
+    /// A parent must *enclose* the child. This is the whole advantage over
+    /// `levels`, which took values from whatever happened to enclose the table
+    /// and so could silently mis-align.
     #[test]
     fn a_parent_that_does_not_enclose_the_child_is_rejected() {
         let sibling = TableConfig::builder("sibling", "/a/other").row("x").build();

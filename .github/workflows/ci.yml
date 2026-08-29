@@ -39,11 +39,11 @@ jobs:
       - name: Run tests
         run: cargo test
 
-  # --- API compatibility gates (TRANSITION_PLAN.md contract C2) ---
+  # --- API compatibility gates ---
   #
-  # C2 promises that after 0.20, no release removes or changes a public item
-  # without a deprecation period. Review cannot enforce that across five phases
-  # of additive work; these two jobs can.
+  # The crate promises that no release removes or changes a public item without
+  # a deprecation period first. Review cannot enforce that across a long run of
+  # additive releases; these two jobs can.
 
   semver:
     name: Semver
@@ -92,6 +92,7 @@ jobs:
             echo "If the change is intentional, re-record it and commit the diff:"
             echo "    cargo public-api --simplified > public-api.txt"
             echo "Removing or changing a public item also needs a deprecation"
-            echo "period first — see TRANSITION_PLAN.md contract C2."
+            echo "period first: deprecate it for at least two minor releases"
+            echo "before deleting it."
             exit 1
           fi

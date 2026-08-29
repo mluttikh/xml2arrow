@@ -1,6 +1,6 @@
 //! `config_diff` — show what changing a config does to a real document.
 //!
-//! Adoption tooling for declared row boundaries (`TRANSITION_PLAN.md` Phase C).
+//! Adoption tooling for declared row boundaries (`row:`).
 //! Adding `row:` to a table is safe in the sense that it touches nothing else,
 //! but it *can* change that table's row count — which is the whole point when
 //! the inferred rule was producing half-filled rows. The question a user
