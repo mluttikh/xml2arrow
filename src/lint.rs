@@ -25,7 +25,9 @@
 
 use std::fmt;
 
-use crate::config::{Config, DType, path_is_under, path_segments, paths_equal};
+use std::borrow::Cow;
+
+use crate::config::{Config, DType, path_is_under, path_segments, paths_equal, resolve_field_path};
 
 /// An advisory finding about a configuration.
 ///
@@ -209,11 +211,18 @@ impl Config {
             match table.row_path() {
                 Some(row_path) => {
                     for field in &table.fields {
-                        if !path_is_under(&field.xml_path, &row_path) {
+                        // A relative `path` resolves *into* the row subtree by
+                        // construction, so only an absolute spelling can fall
+                        // outside it. An unresolvable field is a validation
+                        // error, not a lint, so skip it here.
+                        let Some(field_path) = resolve_field_path(table, field) else {
+                            continue;
+                        };
+                        if !path_is_under(&field_path, &row_path) {
                             lints.push(Lint::FieldOutsideRow {
                                 table: table.name.clone(),
                                 field: field.name.clone(),
-                                field_path: field.xml_path.clone(),
+                                field_path: field_path.into_owned(),
                                 row_path: row_path.clone(),
                             });
                         }
@@ -298,11 +307,13 @@ impl Config {
     fn row_delimiting_children(&self, table_path: &str) -> Vec<String> {
         let depth = path_segments(table_path).count();
         let all_paths = self.tables.iter().flat_map(|t| {
-            std::iter::once(t.xml_path.as_str()).chain(t.fields.iter().map(|f| f.xml_path.as_str()))
+            std::iter::once(Cow::Borrowed(t.xml_path.as_str()))
+                .chain(t.fields.iter().filter_map(|f| resolve_field_path(t, f)))
         });
 
         let mut children: Vec<String> = Vec::new();
         for path in all_paths {
+            let path = path.as_ref();
             if !path_is_under(path, table_path) {
                 continue;
             }

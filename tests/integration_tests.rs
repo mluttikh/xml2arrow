@@ -875,13 +875,13 @@ tables:
     xml_path: /report/stations
     levels: []
     fields:
-      - {name: id, xml_path: /report/stations/station/@id, data_type: Int32}
+      - {name: id, path: /report/stations/station/@id, data_type: Int32}
   - name: measurements
     xml_path: /report/stations/station/measurements
     levels: [stations]
     fields:
       - name: value
-        xml_path: /report/stations/station/measurements/measurement/value
+        path: /report/stations/station/measurements/measurement/value
         data_type: Float64
         nullable: true
         scale: 0.001
@@ -889,6 +889,11 @@ tables:
     )
     .unwrap();
 
+    // The YAML uses `path:`, because `FieldConfigBuilder` writes that key.
+    // A config spelled with the legacy `xml_path:` parses to an equivalent
+    // configuration but not an *equal* one — the two keys are preserved as
+    // written, and only path resolution unifies them. `legacy_and_relative_
+    // field_paths_agree` covers that equivalence where it matters: the output.
     assert_eq!(built, from_yaml);
 }
 

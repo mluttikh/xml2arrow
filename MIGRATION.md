@@ -9,9 +9,13 @@ Everything here falls into three buckets, and only the first is mandatory:
    and both have an opt-out.
 3. **[Optional](#3-optional-declare-your-row-boundaries)** — `row:`, the opt-in
    that fixes inferred row boundaries. Nothing changes until you add the line.
+4. **[Optional](#4-optional-write-field-paths-relative-to-the-row)** — `path:`,
+   which lets a field be written relative to the row. Pure ergonomics: both
+   spellings compile to the same node.
 
 If you construct configs with `TableConfig::new` / `FieldConfigBuilder` and
-parse with `Parser`, the required work is **nothing** — skip to §2.
+parse with `Parser`, the required work is **nothing** unless you *read*
+`FieldConfig::xml_path` — skip to §2.
 
 ---
 
@@ -57,6 +61,34 @@ let options = ParserOptions { trim_text: true, ..Default::default() };
 let mut options = ParserOptions::default();
 options.trim_text = true;
 ```
+
+### FieldConfig::xml_path is now an Option
+
+`FieldConfig` gained `path`, and the two are alternative spellings of one
+location, so `xml_path` became optional:
+
+```rust
+pub xml_path: Option<String>,   // was String
+pub path:     Option<String>,   // new
+```
+
+**Nothing changes for YAML configs**, and nothing changes for code that builds
+fields with `FieldConfigBuilder`. Only code that *reads* the field is affected:
+
+```rust
+// before
+println!("{}", field.xml_path);
+
+// after — either handle both spellings...
+println!("{}", field.path.as_deref().or(field.xml_path.as_deref()).unwrap_or(""));
+// ...or, if you only ever wrote absolute paths, the one you set:
+println!("{}", field.path.as_deref().unwrap_or_default());
+```
+
+Note that `FieldConfigBuilder::new(name, path, dtype)` now populates `path`
+rather than `xml_path`. Its behavior is unchanged for absolute values — an
+absolute path means the same under either key — but a `FieldConfig` built this
+way has `xml_path == None`.
 
 ### DType
 
@@ -229,7 +261,68 @@ It exits non-zero when anything differs, so a migration can be gated in CI.
 
 ---
 
-## 4. Deprecated, still working
+## 4. Optional: write field paths relative to the row
+
+Once a table declares `row:`, its fields can be written relative to that row
+element instead of repeating the full path on every column. Purely ergonomic:
+both spellings compile to the same node, so the output is identical.
+
+```yaml
+# before — every column repeats the full path
+  - name: readings
+    xml_path: /report/stations/station/readings
+    row: reading
+    fields:
+      - {name: seq,   xml_path: /report/stations/station/readings/reading/@seq,        data_type: Int32}
+      - {name: value, xml_path: /report/stations/station/readings/reading/value,       data_type: Int32}
+      - {name: unit,  xml_path: /report/stations/station/readings/reading/sensor/@unit, data_type: Utf8}
+
+# after
+  - name: readings
+    xml_path: /report/stations/station/readings
+    row: reading
+    fields:
+      - {name: seq,   path: "@seq",       data_type: Int32}
+      - {name: value, path: value,        data_type: Int32}
+      - {name: unit,  path: sensor/@unit, data_type: Utf8}
+```
+
+`path` follows **the same rule as `row:`** — there is one path rule in the whole
+configuration:
+
+| `path:` value | Resolves to |
+|---|---|
+| `/report/data/item/v` | as written (**leading slash = absolute**) |
+| `v` | `<row>/v` |
+| `sensor/@unit` | `<row>/sensor/@unit` |
+| `@seq` | `<row>/@seq` — an attribute of the row element |
+
+Rules:
+
+- Set **exactly one** of `path` and `xml_path` per field. Setting both is an
+  error rather than a silent winner; setting neither names no location.
+- A **relative** `path` requires the table to declare `row:` — it is relative to
+  the row element, so without one there is nothing to resolve against. An
+  absolute `path` needs no row.
+- Error messages quote the **resolved** path (`/report/data/item/v`), not the
+  abbreviation, since that is what you need to find the value in the document.
+
+### Renaming `xml_path` to `path`
+
+For an absolute path this is a pure key rename with no output change, because an
+absolute value means the same under either key:
+
+```yaml
+- {name: v, xml_path: /report/data/item/v, data_type: Int32}
+- {name: v, path:     /report/data/item/v, data_type: Int32}   # identical
+```
+
+`xml_path` keeps working until 1.0, which removes it. Shortening to the relative
+form afterwards is a second, independent step.
+
+---
+
+## 5. Deprecated, still working
 
 All three keep working until 1.0.
 
@@ -238,6 +331,7 @@ All three keep working until 1.0.
 | `parse_xml(reader, &config)` | `Parser::new(&config)?.parse(reader)` |
 | `parse_xml_slice(xml, &config)` | `Parser::new(&config)?.parse_slice(xml)` |
 | `parser.parse_streaming(reader, opts, sink)` | `for item in parser.parse_batches(reader, opts)` |
+| `xml_path:` on a **field** | `path:` — a key rename for absolute values (§4) |
 
 The free functions hide the one-time path-compilation cost and pay it on *every*
 call. Constructing a `Parser` once and reusing it is the whole "compile once,
@@ -245,7 +339,7 @@ parse many" design — measurably faster for anything beyond a single document.
 
 ---
 
-## 5. New, purely additive
+## 6. New, purely additive
 
 Nothing below requires action.
 

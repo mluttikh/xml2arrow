@@ -1,0 +1,12 @@
+# frozen snapshot — see tests/frozen_corpus.rs
+table: readings
+rows: 2
+columns:
+  1. <stations>: UInt32 (not null)
+  2. seq: Int32 (nullable)
+  3. value: Int32 (nullable)
+  4. sensor: Utf8 (nullable)
+  5. unit: Utf8 (nullable)
+data:
+  "0" | "1" | "12" | "t1" | "C"
+  "0" | "2" | "15" | "t1" | "C"

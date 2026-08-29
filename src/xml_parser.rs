@@ -30,7 +30,9 @@ use quick_xml::events::attributes::Attributes;
 use quick_xml::events::{BytesRef, Event};
 
 use crate::Config;
-use crate::config::{DType, FieldConfig, TableConfig, paths_equal, resolve_row_path};
+use crate::config::{
+    DType, FieldConfig, TableConfig, paths_equal, resolve_field_path, resolve_row_path,
+};
 use crate::errors::ConfigIssue;
 use crate::errors::Error;
 use crate::errors::ErrorLocation;
@@ -137,10 +139,15 @@ struct FieldMeta {
 }
 
 impl FieldMeta {
-    fn from_config(fc: &FieldConfig) -> Self {
+    /// `xml_path` holds the *resolved* absolute path, not the spelling the
+    /// config used. Error messages quote it, and someone chasing an error
+    /// wants the location in the document, not `v`.
+    fn from_config(table: &TableConfig, fc: &FieldConfig) -> Self {
         Self {
             name: fc.name.clone(),
-            xml_path: fc.xml_path.clone(),
+            xml_path: resolve_field_path(table, fc)
+                .unwrap_or_default()
+                .into_owned(),
             nullable: fc.nullable,
             scale: fc.scale,
             offset: fc.offset,
@@ -342,11 +349,11 @@ macro_rules! append_float {
 }
 
 impl FieldBuilder {
-    fn new(field_config: &FieldConfig, max_value_bytes: usize) -> Self {
+    fn new(table_config: &TableConfig, field_config: &FieldConfig, max_value_bytes: usize) -> Self {
         let array_builder = TypedArrayBuilder::from_dtype(field_config.data_type);
         let has_transform = field_config.scale.is_some() || field_config.offset.is_some();
         Self {
-            meta: FieldMeta::from_config(field_config),
+            meta: FieldMeta::from_config(table_config, field_config),
             array_builder,
             has_value: false,
             has_transform,
@@ -555,7 +562,11 @@ impl TableBuilder {
         index_builders.resize_with(table_config.levels.len(), UInt32Builder::default);
         let mut field_builders = Vec::with_capacity(table_config.fields.len());
         for field_config in &table_config.fields {
-            field_builders.push(FieldBuilder::new(field_config, max_value_bytes));
+            field_builders.push(FieldBuilder::new(
+                table_config,
+                field_config,
+                max_value_bytes,
+            ));
         }
         Self {
             meta: TableMeta::from_config(table_config),
@@ -8152,5 +8163,123 @@ mod tests {
         assert_eq!(batch.num_rows(), 2);
         assert_array_values!(batch, "id", &["a", "b"], StringArray);
         assert_array_values!(batch, "<station>", vec![0u32, 1], UInt32Array);
+    }
+
+    // --- Relative field paths (`path:`) ---------------------------------------
+    //
+    // `path` and `xml_path` are two spellings of one location, resolved to the
+    // same trie node. These tests prove that "same node" claim on the output
+    // rather than trusting it, since the whole phase is ergonomics with no
+    // semantic content.
+
+    /// Dual-form equivalence (`TRANSITION_PLAN.md` §7): the same mapping
+    /// written three ways must produce identical batches.
+    ///
+    /// Fields are given as a YAML flow sequence so the case string never
+    /// carries a newline into the interpolation — indentation is what makes
+    /// these configs valid, and a multi-line splice silently breaks it.
+    #[rstest]
+    #[case::legacy_absolute(
+        r#"[{name: v, xml_path: /report/data/item/v, data_type: Int32}, {name: id, xml_path: "/report/data/item/@id", data_type: Utf8}]"#
+    )]
+    #[case::new_key_absolute(
+        r#"[{name: v, path: /report/data/item/v, data_type: Int32}, {name: id, path: "/report/data/item/@id", data_type: Utf8}]"#
+    )]
+    #[case::relative(
+        r#"[{name: v, path: v, data_type: Int32}, {name: id, path: "@id", data_type: Utf8}]"#
+    )]
+    fn field_path_spellings_are_equivalent(#[case] fields: &str) {
+        const LEGACY: &str = r#"[{name: v, xml_path: /report/data/item/v, data_type: Int32}, {name: id, xml_path: "/report/data/item/@id", data_type: Utf8}]"#;
+        let xml = r#"<report><data>
+             <item id="a"><v>1</v></item>
+             <item id="b"><v>2</v></item>
+           </data></report>"#;
+        let config = |fields: &str| {
+            format!(
+                r#"
+                tables:
+                  - name: items
+                    xml_path: /report/data
+                    row: item
+                    levels: []
+                    fields: {fields}
+                "#
+            )
+        };
+        assert_eq!(parse(xml, &config(fields)), parse(xml, &config(LEGACY)));
+    }
+
+    /// A relative path may be more than one segment deep.
+    #[test]
+    fn relative_paths_may_be_nested() {
+        let batches = parse(
+            r#"<report><data>
+                 <item><sensor id="s1"><reading>7</reading></sensor></item>
+               </data></report>"#,
+            r#"
+            tables:
+              - name: items
+                xml_path: /report/data
+                row: item
+                levels: []
+                fields:
+                  - {name: reading, path: sensor/reading, data_type: Int32}
+                  - {name: sensor_id, path: sensor/@id, data_type: Utf8}
+            "#,
+        );
+        let batch = batches.get("items").unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert_array_values!(batch, "reading", vec![7i32], Int32Array);
+        assert_array_values!(batch, "sensor_id", &["s1"], StringArray);
+    }
+
+    /// Relative resolution is against the **row**, not `xml_path`. The two
+    /// differ here, and picking the wrong base would silently capture nothing.
+    #[test]
+    fn relative_paths_resolve_against_the_row_not_the_table() {
+        let batches = parse(
+            r#"<report><data><items>
+                 <item><v>1</v></item><item><v>2</v></item>
+               </items></data></report>"#,
+            r#"
+            tables:
+              - name: items
+                xml_path: /report/data
+                row: items/item
+                levels: []
+                fields:
+                  - {name: v, path: v, data_type: Int32}
+            "#,
+        );
+        let batch = batches.get("items").unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        assert_array_values!(batch, "v", vec![1i32, 2], Int32Array);
+    }
+
+    /// Error messages quote the *resolved* location: someone chasing a failure
+    /// wants the path in the document, not the abbreviation in the config.
+    #[test]
+    fn errors_report_the_resolved_path() {
+        let config = config_from_yaml!(
+            r#"
+            tables:
+              - name: items
+                xml_path: /report/data
+                row: item
+                levels: []
+                fields:
+                  - {name: v, path: v, data_type: Int32}
+            "#
+        );
+        let err = parse_document(
+            r#"<report><data><item><v>not a number</v></item></data></report>"#.as_bytes(),
+            &config,
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("/report/data/item/v"),
+            "expected the resolved path in: {message}"
+        );
     }
 }

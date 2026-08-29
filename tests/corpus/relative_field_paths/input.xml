@@ -1,0 +1,10 @@
+<report>
+  <stations>
+    <station id="s1">
+      <readings>
+        <reading seq="1"><value>12</value><sensor unit="C">t1</sensor></reading>
+        <reading seq="2"><value>15</value><sensor unit="C">t1</sensor></reading>
+      </readings>
+    </station>
+  </stations>
+</report>
