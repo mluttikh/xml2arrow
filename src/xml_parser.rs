@@ -31,7 +31,8 @@ use quick_xml::events::{BytesRef, Event};
 
 use crate::Config;
 use crate::config::{
-    DType, FieldConfig, RowId, TableConfig, paths_equal, resolve_field_path, resolve_row_path,
+    DType, FieldConfig, OnInvalid, OnMissing, OnRepeat, RowId, TableConfig, ValuePolicies,
+    paths_equal, resolve_field_path, resolve_row_path,
 };
 use crate::errors::ConfigIssue;
 use crate::errors::Error;
@@ -133,24 +134,96 @@ impl TypedArrayBuilder {
 struct FieldMeta {
     name: String,
     xml_path: String,
-    nullable: bool,
     scale: Option<f64>,
     offset: Option<f64>,
+    /// Value handling, resolved once at build time.
+    policy: ResolvedPolicy,
+}
+
+/// A field's value policies with every question already answered.
+///
+/// The configuration expresses these as `Option`s layered over a `defaults`
+/// block over a type-dependent default, and `nullable` participates in the
+/// answer too. Collapsing all of that here means the value path — which runs
+/// once per field per row — matches a plain enum instead of walking that chain
+/// on every value.
+#[derive(Debug, Clone)]
+struct ResolvedPolicy {
+    /// Strip surrounding whitespace before use. Defaults to true for numeric
+    /// and boolean fields, false for `Utf8`, which is the existing split.
+    trim: bool,
+    on_missing: OnMissing,
+    on_invalid: OnInvalid,
+    on_repeat: OnRepeat,
+    /// Literal values that count as missing. Empty in almost every config, and
+    /// checked with `is_empty()` first so those configs pay one length read.
+    null_values: Vec<String>,
+}
+
+impl ResolvedPolicy {
+    /// Layers a field's policies over the config-wide defaults over the
+    /// behavior this crate had before policies existed.
+    fn resolve(fc: &FieldConfig, defaults: Option<&ValuePolicies>) -> Self {
+        let empty = ValuePolicies::default();
+        let policies = fc.policies.over(defaults.unwrap_or(&empty));
+        let is_utf8 = fc.data_type == DType::Utf8;
+        Self {
+            // Numeric and boolean parsing has always trimmed; `Utf8` has always
+            // taken the document's bytes as written.
+            trim: policies.trim.unwrap_or(!is_utf8),
+            // The historical asymmetry, stated once and then never re-derived:
+            // nullable yields null, a non-nullable `Utf8` yields "", anything
+            // else non-nullable is an error.
+            on_missing: policies.on_missing.unwrap_or({
+                if fc.nullable {
+                    OnMissing::Null
+                } else if is_utf8 {
+                    OnMissing::Empty
+                } else {
+                    OnMissing::Error
+                }
+            }),
+            on_invalid: policies.on_invalid.unwrap_or(OnInvalid::Error),
+            on_repeat: policies.on_repeat.unwrap_or(OnRepeat::Error),
+            null_values: policies.null_values.unwrap_or_default(),
+        }
+    }
+
+    /// Applies `trim` and `null_values`, returning `None` when the value counts
+    /// as missing.
+    #[inline]
+    fn prepare<'v>(&self, value: &'v [u8]) -> Option<&'v [u8]> {
+        let value = if self.trim { value.trim_ascii() } else { value };
+        if value.is_empty() {
+            return None;
+        }
+        if !self.null_values.is_empty()
+            && let Ok(text) = std::str::from_utf8(value)
+            && self.null_values.iter().any(|nv| nv == text)
+        {
+            return None;
+        }
+        Some(value)
+    }
 }
 
 impl FieldMeta {
     /// `xml_path` holds the *resolved* absolute path, not the spelling the
     /// config used. Error messages quote it, and someone chasing an error
     /// wants the location in the document, not `v`.
-    fn from_config(table: &TableConfig, fc: &FieldConfig) -> Self {
+    fn from_config(
+        table: &TableConfig,
+        fc: &FieldConfig,
+        defaults: Option<&ValuePolicies>,
+    ) -> Self {
         Self {
             name: fc.name.clone(),
             xml_path: resolve_field_path(table, fc)
                 .unwrap_or_default()
                 .into_owned(),
-            nullable: fc.nullable,
             scale: fc.scale,
             offset: fc.offset,
+            policy: ResolvedPolicy::resolve(fc, defaults),
         }
     }
 }
@@ -194,6 +267,10 @@ struct FieldBuilder {
     /// store into a cache line the same append is already dirtying, which is
     /// cheaper than the branch that would guard it.
     ever_matched: bool,
+    /// Latched by `on_repeat: first` when a second value-bearing occurrence
+    /// opens: every further append in this row is dropped. Cleared per row
+    /// alongside `has_value`.
+    skip_rest_of_row: bool,
     /// Largest value this field may accumulate, or `usize::MAX` when
     /// unconfigured — so the per-append comparison is an always-false,
     /// perfectly predicted branch on the common path.
@@ -251,10 +328,49 @@ fn parse_boolean_token(value: &[u8]) -> std::result::Result<Option<bool>, ()> {
 /// when nullable, `MissingRequiredField` otherwise), exactly like boolean.
 /// The `ParseError` for genuinely bad text keeps the raw untrimmed value so
 /// diagnostics show what the document actually contained.
+/// Handles a value the policy classified as missing.
+///
+/// The three outcomes are the historical asymmetry made explicit: null for a
+/// nullable field, `""` for a non-nullable `Utf8`, an error otherwise —
+/// resolved once at build time, so this is a match on a decided enum rather
+/// than a re-derivation per value. `Empty` reaches only `Utf8`; validation
+/// rejects it elsewhere.
+macro_rules! append_missing {
+    ($builder:expr, $fc:expr) => {{
+        match $fc.policy.on_missing {
+            OnMissing::Null => $builder.append_null(),
+            OnMissing::Empty | OnMissing::Error => {
+                return Err(Error::MissingRequiredField {
+                    field: Arc::from($fc.name.as_str()),
+                    path: Arc::from($fc.xml_path.as_str()),
+                    location: Box::default(),
+                });
+            }
+        }
+    }};
+}
+
+/// Handles a value that could not be parsed as its declared type.
+macro_rules! append_invalid {
+    ($builder:expr, $fc:expr, $err:expr) => {{
+        match $fc.policy.on_invalid {
+            OnInvalid::Null => $builder.append_null(),
+            OnInvalid::Error => return Err($err),
+        }
+    }};
+}
+
 macro_rules! append_int {
     ($builder:expr, $value:expr, $has_value:expr, $field_config:expr, $ty:ty, $type_name:expr) => {{
-        let trimmed = $value.trim_ascii();
-        if $has_value && !trimmed.is_empty() {
+        // `prepare` applies this field's `trim` and `null_values` and reports
+        // "nothing usable here" as `None`, so absent, blank and null-literal
+        // values all converge on one path.
+        let prepared = if $has_value {
+            $field_config.policy.prepare($value)
+        } else {
+            None
+        };
+        if let Some(trimmed) = prepared {
             // NOT `atoi::atoi`: that parses the longest digit *prefix* and
             // silently discards the rest — "3x" became 3 and "1.5" became 1.
             // The checked radix-10 primitive reports how many bytes it
@@ -268,8 +384,10 @@ macro_rules! append_int {
                     let as_str = std::str::from_utf8(trimmed).unwrap_or("");
                     match as_str.parse::<$ty>() {
                         Ok(val) => $builder.append_value(val),
-                        Err(e) => {
-                            return Err(Error::ParseError {
+                        Err(e) => append_invalid!(
+                            $builder,
+                            $field_config,
+                            Error::ParseError {
                                 field: Arc::from($field_config.name.as_str()),
                                 path: Arc::from($field_config.xml_path.as_str()),
                                 value: String::from_utf8_lossy($value).into_owned(),
@@ -278,19 +396,13 @@ macro_rules! append_int {
                                     reason: e.to_string(),
                                 },
                                 location: Box::default(),
-                            });
-                        }
+                            }
+                        ),
                     }
                 }
             }
-        } else if $field_config.nullable {
-            $builder.append_null();
         } else {
-            return Err(Error::MissingRequiredField {
-                field: Arc::from($field_config.name.as_str()),
-                path: Arc::from($field_config.xml_path.as_str()),
-                location: Box::default(),
-            });
+            append_missing!($builder, $field_config);
         }
     }};
 }
@@ -307,8 +419,15 @@ macro_rules! append_int {
 /// whitespace is ignored, whitespace-only counts as missing.
 macro_rules! append_float {
     ($builder:expr, $value:expr, $has_value:expr, $field_config:expr, $has_transform:expr, $ty:ty, $type_name:expr) => {{
-        let trimmed = $value.trim_ascii();
-        if $has_value && !trimmed.is_empty() {
+        // `prepare` applies this field's `trim` and `null_values` and reports
+        // "nothing usable here" as `None`, so absent, blank and null-literal
+        // values all converge on one path.
+        let prepared = if $has_value {
+            $field_config.policy.prepare($value)
+        } else {
+            None
+        };
+        if let Some(trimmed) = prepared {
             match fast_float2::parse::<$ty, _>(trimmed) {
                 Ok(mut val) => {
                     if $has_transform {
@@ -323,8 +442,10 @@ macro_rules! append_float {
                     }
                     $builder.append_value(val);
                 }
-                Err(e) => {
-                    return Err(Error::ParseError {
+                Err(e) => append_invalid!(
+                    $builder,
+                    $field_config,
+                    Error::ParseError {
                         field: Arc::from($field_config.name.as_str()),
                         path: Arc::from($field_config.xml_path.as_str()),
                         value: String::from_utf8_lossy($value).into_owned(),
@@ -333,29 +454,29 @@ macro_rules! append_float {
                             reason: e.to_string(),
                         },
                         location: Box::default(),
-                    });
-                }
+                    }
+                ),
             }
-        } else if $field_config.nullable {
-            $builder.append_null();
         } else {
-            return Err(Error::MissingRequiredField {
-                field: Arc::from($field_config.name.as_str()),
-                path: Arc::from($field_config.xml_path.as_str()),
-                location: Box::default(),
-            });
+            append_missing!($builder, $field_config);
         }
     }};
 }
 
 impl FieldBuilder {
-    fn new(table_config: &TableConfig, field_config: &FieldConfig, max_value_bytes: usize) -> Self {
+    fn new(
+        table_config: &TableConfig,
+        field_config: &FieldConfig,
+        defaults: Option<&ValuePolicies>,
+        max_value_bytes: usize,
+    ) -> Self {
         let array_builder = TypedArrayBuilder::from_dtype(field_config.data_type);
         let has_transform = field_config.scale.is_some() || field_config.offset.is_some();
         Self {
-            meta: FieldMeta::from_config(table_config, field_config),
+            meta: FieldMeta::from_config(table_config, field_config, defaults),
             array_builder,
             has_value: false,
+            skip_rest_of_row: false,
             has_transform,
             current_value: Vec::with_capacity(128),
             ever_matched: false,
@@ -366,6 +487,10 @@ impl FieldBuilder {
 
     #[inline]
     fn set_current_value(&mut self, value: &[u8]) {
+        // `on_repeat: first` latched this when a second occurrence opened.
+        if self.skip_rest_of_row {
+            return;
+        }
         self.has_value = true;
         self.ever_matched = true;
         // Refuse the append rather than truncating into it: a value that stops
@@ -392,16 +517,36 @@ impl FieldBuilder {
 
         match &mut self.array_builder {
             TypedArrayBuilder::Utf8(b) => {
-                if has_value {
-                    // UTF-8 is validated exactly once per row per Utf8 field
-                    // (here), rather than once per text event in the hot loop.
-                    // Numeric/boolean fields never pay this cost.
-                    let s = std::str::from_utf8(value)?;
-                    b.append_value(s);
-                } else if fc.nullable {
-                    b.append_null();
+                // A `Utf8` field takes the document's bytes as written, so
+                // `prepare` is a no-op unless the config asked for `trim` or
+                // `null_values`. An empty capture is *not* missing here: the
+                // historical behavior distinguishes "no value" from "" only by
+                // `has_value`, and `on_missing: empty` is how a config asks to
+                // keep that for a non-nullable field.
+                let prepared = if has_value {
+                    fc.policy.prepare(value).or(Some(&[][..]))
                 } else {
-                    b.append_value("");
+                    None
+                };
+                match prepared {
+                    Some(bytes) => {
+                        // UTF-8 is validated exactly once per row per Utf8
+                        // field (here), rather than once per text event in the
+                        // hot loop. Numeric/boolean fields never pay this cost.
+                        let s = std::str::from_utf8(bytes)?;
+                        b.append_value(s);
+                    }
+                    None => match fc.policy.on_missing {
+                        OnMissing::Null => b.append_null(),
+                        OnMissing::Empty => b.append_value(""),
+                        OnMissing::Error => {
+                            return Err(Error::MissingRequiredField {
+                                field: Arc::from(fc.name.as_str()),
+                                path: Arc::from(fc.xml_path.as_str()),
+                                location: Box::default(),
+                            });
+                        }
+                    },
                 }
             }
             TypedArrayBuilder::Int8(b) => append_int!(b, value, has_value, fc, i8, "i8"),
@@ -419,35 +564,29 @@ impl FieldBuilder {
                 append_float!(b, value, has_value, fc, has_transform, f64, "f64")
             }
             TypedArrayBuilder::Boolean(b) => {
-                if has_value {
-                    match parse_boolean_token(value) {
+                let prepared = if has_value {
+                    fc.policy.prepare(value)
+                } else {
+                    None
+                };
+                if let Some(bytes) = prepared {
+                    match parse_boolean_token(bytes) {
                         Ok(Some(val)) => b.append_value(val),
-                        Ok(None) if fc.nullable => b.append_null(),
-                        Ok(None) => {
-                            return Err(Error::MissingRequiredField {
-                                field: Arc::from(fc.name.as_str()),
-                                path: Arc::from(fc.xml_path.as_str()),
-                                location: Box::default(),
-                            });
-                        }
-                        Err(()) => {
-                            return Err(Error::ParseError {
+                        Ok(None) => append_missing!(b, fc),
+                        Err(()) => append_invalid!(
+                            b,
+                            fc,
+                            Error::ParseError {
                                 field: Arc::from(fc.name.as_str()),
                                 path: Arc::from(fc.xml_path.as_str()),
                                 value: String::from_utf8_lossy(value).into_owned(),
                                 kind: ParseKind::InvalidBoolean,
                                 location: Box::default(),
-                            });
-                        }
+                            }
+                        ),
                     }
-                } else if fc.nullable {
-                    b.append_null();
                 } else {
-                    return Err(Error::MissingRequiredField {
-                        field: Arc::from(fc.name.as_str()),
-                        path: Arc::from(fc.xml_path.as_str()),
-                        location: Box::default(),
-                    });
+                    append_missing!(b, fc);
                 }
             }
         }
@@ -578,6 +717,7 @@ impl TableBuilder {
         table_config: &TableConfig,
         plan: &TableLinkPlan,
         schema: Arc<Schema>,
+        defaults: Option<&ValuePolicies>,
         max_value_bytes: usize,
     ) -> Self {
         let mut index_builders = Vec::with_capacity(table_config.levels.len());
@@ -592,6 +732,7 @@ impl TableBuilder {
             field_builders.push(FieldBuilder::new(
                 table_config,
                 field_config,
+                defaults,
                 max_value_bytes,
             ));
         }
@@ -641,6 +782,7 @@ impl TableBuilder {
         self.save_row(indices)?;
         for field_builder in &mut self.field_builders {
             field_builder.has_value = false;
+            field_builder.skip_rest_of_row = false;
             field_builder.current_value.clear();
             // Per-row, like the two above. Exceeding the value cap is fatal
             // today, so the parse never reaches another row and leaving this
@@ -940,6 +1082,7 @@ impl XmlToArrowConverter {
                 table_config,
                 link_plan(&parser.inner.link_plans, table_idx),
                 schema.clone(),
+                config.defaults.as_ref(),
                 max_value_bytes,
             ));
         }
@@ -994,38 +1137,83 @@ impl XmlToArrowConverter {
             }
         }
     }
+}
 
-    /// Rejects a repeated occurrence of a field's element within one row.
-    ///
-    /// Called from the `Start`/`Empty` arms when the *entered* node carries
-    /// field mappings (`info` is the `PathNodeInfo` those arms already hold,
-    /// so this adds no registry lookup). If a matching field of the current
-    /// table already accumulated a value in this row, the element is
-    /// appearing a second time — historically the raw bytes were silently
-    /// concatenated ("1" + "2" → 12 for an Int32), fabricating values that
-    /// never appeared in the document; now it is a `ParseError`.
-    ///
-    /// Value-less occurrences (`<v/><v>2</v>`) pass: nothing was captured, so
-    /// the rule is "at most one value-bearing occurrence per row". Duplicate
-    /// *attributes* (reachable with `validate_attributes: false`) are
-    /// intentionally exempt — attribute pseudo-nodes are entered inside
-    /// `parse_attributes`, which does not run this check, preserving the
-    /// documented concatenation behavior for trusted input.
-    #[inline]
-    fn check_element_not_repeated(&self, info: &PathNodeInfo) -> Result<()> {
-        if let Some(current_entry) = self.builder_stack.last() {
-            let current_table_idx = current_entry.table_idx;
-            for &(table_idx, field_idx) in &info.field_indices {
-                if table_idx == current_table_idx
-                    && self.table_builders[table_idx].field_builders[field_idx].has_value
-                {
-                    return Err(self.duplicate_value_error(table_idx, field_idx));
+/// Decides what happens when a field's element occurs a second time in one row.
+///
+/// Called from the `Start`/`Empty` arms when the *entered* node carries field
+/// mappings (`info` is the `PathNodeInfo` those arms already hold, so this adds
+/// no registry lookup). If a matching field of the current table already
+/// accumulated a value in this row, the element is appearing again —
+/// historically the raw bytes were silently concatenated ("1" + "2" → 12 for an
+/// Int32), fabricating values that never appeared in the document. The field's
+/// `on_repeat` now decides: error (the default), keep the first, or keep the
+/// last.
+///
+/// Value-less occurrences (`<v/><v>2</v>`) pass: nothing was captured, so the
+/// rule is "at most one value-bearing occurrence per row". Duplicate
+/// *attributes* (reachable with `validate_attributes: false`) are intentionally
+/// exempt — attribute pseudo-nodes are entered inside `parse_attributes`, which
+/// does not run this check, preserving the documented concatenation behavior
+/// for trusted input.
+///
+/// A free function over the two fields it touches, not a method: `info` is
+/// borrowed from the compiled registry, which lives behind the same `&self`
+/// this needs mutably, and taking the fields directly is what lets the borrow
+/// checker see they are disjoint.
+#[inline]
+fn check_element_not_repeated(
+    table_builders: &mut [TableBuilder],
+    builder_stack: &[TableStackEntry],
+    info: &PathNodeInfo,
+) -> Result<()> {
+    {
+        let Some(current_entry) = builder_stack.last() else {
+            return Ok(());
+        };
+        let current_table_idx = current_entry.table_idx;
+        for &(table_idx, field_idx) in &info.field_indices {
+            if table_idx != current_table_idx
+                || !table_builders[table_idx].field_builders[field_idx].has_value
+            {
+                continue;
+            }
+            // A repeat, and the policy decides. Reading it here rather than in
+            // `set_current_value` is what keeps the common path free: this
+            // branch is only reached when a field already holds a value, and
+            // the value-append path stays a plain extend.
+            //
+            // The distinction has to be made *here*, at element open, because
+            // one occurrence's text can arrive as several events — `has_value`
+            // alone cannot tell a continuation from a repeat.
+            match table_builders[table_idx].field_builders[field_idx]
+                .meta
+                .policy
+                .on_repeat
+            {
+                OnRepeat::Error => {
+                    return Err(duplicate_value_error(table_builders, table_idx, field_idx));
+                }
+                OnRepeat::First => {
+                    // Keep what is already there and ignore the rest of the
+                    // row: every later occurrence, not just this one.
+                    table_builders[table_idx].field_builders[field_idx].skip_rest_of_row = true;
+                }
+                OnRepeat::Last => {
+                    // Start this occurrence from scratch; whichever ends up
+                    // last wins by simply being the one left standing.
+                    let fb = &mut table_builders[table_idx].field_builders[field_idx];
+                    fb.current_value.clear();
+                    fb.has_value = false;
+                    fb.value_too_large = false;
                 }
             }
         }
         Ok(())
     }
+}
 
+impl XmlToArrowConverter {
     /// Builds the `RowIndexOverflow` error for `end_current_row`. Out of
     /// line and cold, like `duplicate_value_error`, so the checked cast in
     /// the per-row path stays a bare compare.
@@ -1036,15 +1224,19 @@ impl XmlToArrowConverter {
             table: Arc::from(self.table_builders[table_idx].meta.name.as_str()),
         }
     }
+}
 
-    /// Builds the `DuplicateValue` error for `check_element_not_repeated`.
-    /// Out of line and cold so the check above stays a bare `has_value`
-    /// branch in the per-element hot path; the allocations here only run
-    /// when the parse is already failing.
-    #[cold]
-    #[inline(never)]
-    fn duplicate_value_error(&self, table_idx: usize, field_idx: usize) -> Error {
-        let table_builder = &self.table_builders[table_idx];
+/// Builds the `DuplicateValue` error. Free, cold and out of line for the same
+/// borrow reason as `check_element_not_repeated`.
+#[cold]
+#[inline(never)]
+fn duplicate_value_error(
+    table_builders: &[TableBuilder],
+    table_idx: usize,
+    field_idx: usize,
+) -> Error {
+    {
+        let table_builder = &table_builders[table_idx];
         let field_builder = &table_builder.field_builders[field_idx];
         Error::ParseError {
             field: Arc::from(field_builder.meta.name.as_str()),
@@ -1059,7 +1251,9 @@ impl XmlToArrowConverter {
             }),
         }
     }
+}
 
+impl XmlToArrowConverter {
     /// Returns the metadata of the first field of the *current* table mapped
     /// to `node_id`, or `None` when a value at this node would not be
     /// captured. Used by the entity-reference handler to decide whether an
@@ -2246,7 +2440,11 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
                         // rejected while `info` is in hand (no extra
                         // registry read; see check_element_not_repeated).
                         if !info.field_indices.is_empty() {
-                            xml_to_arrow_converter.check_element_not_repeated(info)?;
+                            check_element_not_repeated(
+                                &mut xml_to_arrow_converter.table_builders,
+                                &xml_to_arrow_converter.builder_stack,
+                                info,
+                            )?;
                         }
                         (Some(id), info.table_index, info.has_attribute_children)
                     }
@@ -2284,7 +2482,11 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
                     Some((id, info)) => {
                         // Same repeated-element guard as Event::Start.
                         if !info.field_indices.is_empty() {
-                            xml_to_arrow_converter.check_element_not_repeated(info)?;
+                            check_element_not_repeated(
+                                &mut xml_to_arrow_converter.table_builders,
+                                &xml_to_arrow_converter.builder_stack,
+                                info,
+                            )?;
                         }
                         (Some(id), info.table_index, info.has_attribute_children)
                     }
@@ -8895,5 +9097,229 @@ mod tests {
         let schema = build_table_schema(&config.tables[0], &EMPTY_LINK_PLAN);
         // 2 levels + 2 fields, no key column.
         assert_eq!(schema.fields().len(), 4);
+    }
+
+    // --- Per-field value policies -------------------------------------------
+    //
+    // Every policy defaults to the behavior this crate already had, so these
+    // tests are all of the form "the quirk, then the opt-out beside it".
+
+    /// The long-standing asymmetry: a missing non-nullable `Utf8` yields `""`
+    /// while a missing non-nullable number is an error. `on_missing` is how a
+    /// config stops relying on which type a column happens to be.
+    #[test]
+    fn on_missing_overrides_the_type_dependent_default() {
+        let xml = "<r><item><other>x</other></item></r>";
+        // Default: the Utf8 field silently becomes "".
+        let batches = parse(
+            xml,
+            r#"
+            tables:
+              - name: t
+                xml_path: /r
+                row: item
+                fields:
+                  - {name: s, path: s, data_type: Utf8}
+                  - {name: other, path: other, data_type: Utf8}
+            "#,
+        );
+        assert_array_values!(batches.get("t").unwrap(), "s", &[""], StringArray);
+
+        // Opted out: the same absence is now an error.
+        let config = config_from_yaml!(
+            r#"
+            tables:
+              - name: t
+                xml_path: /r
+                row: item
+                fields:
+                  - {name: s, path: s, data_type: Utf8, on_missing: error}
+                  - {name: other, path: other, data_type: Utf8}
+            "#
+        );
+        let err = parse_document(xml.as_bytes(), &config).unwrap_err();
+        assert!(
+            matches!(err, Error::MissingRequiredField { .. }),
+            "got {err:?}"
+        );
+    }
+
+    /// A nullable numeric can be asked to report absence as an error too.
+    #[test]
+    fn on_missing_error_applies_to_nullable_fields() {
+        let config = config_from_yaml!(
+            r#"
+            tables:
+              - name: t
+                xml_path: /r
+                row: item
+                fields:
+                  - {name: n, path: n, data_type: Int32, nullable: true, on_missing: error}
+                  - {name: other, path: other, data_type: Utf8, nullable: true}
+            "#
+        );
+        let err =
+            parse_document(&b"<r><item><other>x</other></item></r>"[..], &config).unwrap_err();
+        assert!(
+            matches!(err, Error::MissingRequiredField { .. }),
+            "got {err:?}"
+        );
+    }
+
+    /// `on_invalid: null` turns a parse failure into a null instead of ending
+    /// the parse — the difference between losing a document and losing a cell.
+    #[test]
+    fn on_invalid_null_keeps_parsing() {
+        let batches = parse(
+            "<r><item><n>12</n></item><item><n>oops</n></item><item><n>34</n></item></r>",
+            r#"
+            tables:
+              - name: t
+                xml_path: /r
+                row: item
+                fields:
+                  - {name: n, path: n, data_type: Int32, nullable: true, on_invalid: null}
+            "#,
+        );
+        let batch = batches.get("t").unwrap();
+        assert_eq!(batch.num_rows(), 3);
+        assert_array_values_option!(batch, "n", vec![Some(12i32), None, Some(34)], Int32Array);
+    }
+
+    /// Repeats are an error by default; `first` and `last` say which one wins.
+    #[rstest]
+    #[case::first("on_repeat: first", "a")]
+    #[case::last("on_repeat: last", "c")]
+    fn on_repeat_selects_an_occurrence(#[case] policy: &str, #[case] expected: &str) {
+        let batches = parse(
+            "<r><item><v>a</v><v>b</v><v>c</v></item></r>",
+            &format!(
+                r#"
+                tables:
+                  - name: t
+                    xml_path: /r
+                    row: item
+                    fields:
+                      - {{name: v, path: v, data_type: Utf8, {policy}}}
+                "#
+            ),
+        );
+        assert_array_values!(batches.get("t").unwrap(), "v", &[expected], StringArray);
+    }
+
+    /// Still the default, and still an error — the opt-in must not have
+    /// loosened the rule for configs that say nothing.
+    #[test]
+    fn repeats_remain_an_error_by_default() {
+        let config = config_from_yaml!(
+            r#"
+            tables:
+              - name: t
+                xml_path: /r
+                row: item
+                fields:
+                  - {name: v, path: v, data_type: Utf8}
+            "#
+        );
+        let err =
+            parse_document(&b"<r><item><v>a</v><v>b</v></item></r>"[..], &config).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::ParseError {
+                    kind: ParseKind::DuplicateValue,
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /// `first` keeps the whole first value even when its text arrives in
+    /// several events — the reason the decision is made at element open rather
+    /// than on `has_value`.
+    #[test]
+    fn on_repeat_first_keeps_a_chunked_first_value() {
+        let batches = parse(
+            "<r><item><v>a&amp;b</v><v>second</v></item></r>",
+            r#"
+            tables:
+              - name: t
+                xml_path: /r
+                row: item
+                fields:
+                  - {name: v, path: v, data_type: Utf8, on_repeat: first}
+            "#,
+        );
+        assert_array_values!(batches.get("t").unwrap(), "v", &["a&b"], StringArray);
+    }
+
+    /// `Utf8` keeps surrounding whitespace by default; `trim` opts out.
+    #[test]
+    fn trim_applies_to_utf8_when_asked() {
+        let xml = "<r><item><s> hi </s></item></r>";
+        let config = |policy: &str| {
+            format!(
+                r#"
+                tables:
+                  - name: t
+                    xml_path: /r
+                    row: item
+                    parser_options: {{}}
+                    fields:
+                      - {{name: s, path: s, data_type: Utf8{policy}}}
+                "#
+            )
+        };
+        let untrimmed = parse(xml, &config(""));
+        assert_array_values!(untrimmed.get("t").unwrap(), "s", &[" hi "], StringArray);
+        let trimmed = parse(xml, &config(", trim: true"));
+        assert_array_values!(trimmed.get("t").unwrap(), "s", &["hi"], StringArray);
+    }
+
+    /// `null_values` turns sentinel strings into missing, which then goes
+    /// through `on_missing` like any other absence.
+    #[test]
+    fn null_values_are_treated_as_missing() {
+        let batches = parse(
+            "<r><item><n>1</n></item><item><n>N/A</n></item><item><n>-</n></item></r>",
+            r#"
+            tables:
+              - name: t
+                xml_path: /r
+                row: item
+                fields:
+                  - name: n
+                    path: n
+                    data_type: Int32
+                    nullable: true
+                    null_values: ["N/A", "-"]
+            "#,
+        );
+        let batch = batches.get("t").unwrap();
+        assert_array_values_option!(batch, "n", vec![Some(1i32), None, None], Int32Array);
+    }
+
+    /// A `defaults:` block applies to every field, and a field's own setting
+    /// wins over it.
+    #[test]
+    fn config_defaults_apply_unless_a_field_overrides() {
+        let batches = parse(
+            "<r><item><a> x </a><b> y </b></item></r>",
+            r#"
+            defaults:
+              trim: true
+            tables:
+              - name: t
+                xml_path: /r
+                row: item
+                fields:
+                  - {name: a, path: a, data_type: Utf8}
+                  - {name: b, path: b, data_type: Utf8, trim: false}
+            "#,
+        );
+        let batch = batches.get("t").unwrap();
+        assert_array_values!(batch, "a", &["x"], StringArray);
+        assert_array_values!(batch, "b", &[" y "], StringArray);
     }
 }

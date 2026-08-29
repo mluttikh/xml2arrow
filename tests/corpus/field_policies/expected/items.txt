@@ -1,0 +1,11 @@
+# frozen snapshot — see tests/frozen_corpus.rs
+table: items
+rows: 3
+columns:
+  1. n: Int32 (nullable)
+  2. s: Utf8 (nullable)
+  3. v: Utf8 (nullable)
+data:
+  "1" | "kept" | "b"
+  null | "kept" | "only"
+  null | null | "x"

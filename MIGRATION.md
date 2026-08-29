@@ -14,6 +14,9 @@ Everything here falls into three buckets, and only the first is mandatory:
    spellings compile to the same node.
 5. **[Optional](#5-optional-declare-links-instead-of-levels)** — `links:`,
    replacing `levels` with declared relationships and a real join key.
+6. **[Optional](#6-optional-per-field-value-policies)** — `trim`, `on_missing`,
+   `on_invalid`, `on_repeat`, `null_values`, for opting out of the
+   type-dependent value quirks.
 
 If you construct configs with `TableConfig::new` / `FieldConfigBuilder` and
 parse with `Parser`, the required work is **nothing** unless you *read*
@@ -407,7 +410,58 @@ are unaffected.
 
 ---
 
-## 6. Deprecated, still working
+## 6. Optional: per-field value policies
+
+Five keys, all optional, all defaulting to **exactly what the parser did
+before** — including the type-dependent quirks. Setting one opts out of a
+specific quirk; it does not switch engines.
+
+| Key | Values | Default |
+|---|---|---|
+| `trim` | `true` / `false` | numeric and boolean trim, `Utf8` does not |
+| `on_missing` | `error` / `null` / `empty` | nullable → `null`, non-nullable `Utf8` → `""`, otherwise `error` |
+| `on_invalid` | `error` / `null` | `error` |
+| `on_repeat` | `error` / `first` / `last` | `error` |
+| `null_values` | list of strings | none |
+
+A `defaults:` block at the top of the config applies them to every field that
+sets none; a field's own key wins.
+
+```yaml
+defaults:
+  trim: true
+tables:
+  - name: items
+    xml_path: /report
+    row: item
+    fields:
+      - {name: n, path: n, data_type: Int32, nullable: true, on_invalid: null, null_values: ["N/A"]}
+      - {name: v, path: v, data_type: Utf8, nullable: true, on_repeat: last}
+```
+
+### The quirk worth knowing about
+
+A missing non-nullable `Utf8` field yields `""`, while a missing non-nullable
+number is an error. Whether an absent element ends your parse therefore depends
+on which type the column happens to be. `on_missing: error` (or `null`) makes a
+column behave the same either way — this is the single most useful policy here.
+
+### Notes
+
+- **`on_missing: null` needs no quotes.** In YAML a bare `null` is the null
+  literal, which would normally read as "key absent" and silently leave the
+  field on its default. That case is handled: written out, it selects the
+  policy.
+- A policy that cannot apply is **rejected**, not ignored — `null` on a
+  non-nullable column, or `empty` on a type that has no empty value.
+- `on_repeat: first` keeps the whole first value even when its text arrives in
+  several parser events; `last` keeps the final occurrence.
+- `null_values` is compared after trimming, case-sensitively, and the resulting
+  missing value is then handled by `on_missing`.
+
+---
+
+## 7. Deprecated, still working
 
 All three keep working until 1.0.
 
@@ -424,7 +478,7 @@ parse many" design — measurably faster for anything beyond a single document.
 
 ---
 
-## 7. New, purely additive
+## 8. New, purely additive
 
 Nothing below requires action.
 
