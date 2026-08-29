@@ -1730,6 +1730,15 @@ fn close_element(
         return Ok(LoopAction::Continue);
     };
 
+    // Order is load-bearing. A row finalizes against the innermost open table,
+    // so `row: "."` — where the row element *is* the table element — must
+    // finalize before its own scope is popped, and the inferred rule must
+    // finalize after, against the enclosing table. A node can carry both bits:
+    // a `row: "."` table that is also a configured child of an outer table
+    // closes its own row here and delimits the outer table's below.
+    if frame.ends_own_row {
+        xml_to_arrow_converter.end_current_row()?;
+    }
     if frame.is_table {
         xml_to_arrow_converter.end_table();
     }
@@ -2553,6 +2562,7 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::config_from_yaml;
+    use crate::lint::Lint;
     use approx::abs_diff_eq;
     use arrow::array::{
         BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
@@ -7851,5 +7861,270 @@ mod tests {
         let batch = batches.get("t").unwrap();
         assert_eq!(batch.num_rows(), 2);
         assert_array_values!(batch, "v", &["a", "b"], StringArray);
+    }
+
+    // --- Declared row boundaries (`row:`) -------------------------------------
+    //
+    // The inferred rule finalizes a row whenever any configured direct child of
+    // a table's `xml_path` closes. `row:` names the element instead. These tests
+    // pin three things: that declaring a row fixes the half-filled-metadata
+    // shape, that all three spellings land on the same node, and — the part
+    // that makes the phase opt-in rather than a change — that a table which
+    // declares nothing keeps the inferred behavior even when a sibling opts in.
+
+    const METADATA_XML: &str = r#"
+        <report>
+            <header>
+                <title>Q3</title>
+                <created>2026-08-29</created>
+                <version>7</version>
+            </header>
+        </report>"#;
+
+    /// Config for [`METADATA_XML`], with `row_key` spliced in as the table's
+    /// row declaration (empty string = leave boundaries inferred).
+    fn metadata_config(row_key: &str) -> String {
+        format!(
+            r#"
+            tables:
+              - name: header
+                xml_path: /report/header
+                {row_key}
+                levels: []
+                fields:
+                  - {{name: title, xml_path: /report/header/title, data_type: Utf8}}
+                  - {{name: created, xml_path: /report/header/created, data_type: Utf8}}
+                  - {{name: version, xml_path: /report/header/version, data_type: Utf8}}
+            "#
+        )
+    }
+
+    /// The bug `row:` exists to fix: three configured children, so the inferred
+    /// rule finalizes three rows, each holding one of the three values.
+    #[test]
+    fn inferred_boundaries_still_split_metadata_into_partial_rows() {
+        let batches = parse(METADATA_XML, &metadata_config(""));
+        assert_eq!(batches.get("header").unwrap().num_rows(), 3);
+    }
+
+    /// `row: "."` selects the `xml_path` element itself — one row per
+    /// occurrence, which is what a metadata table always meant.
+    #[test]
+    fn row_dot_yields_one_row_per_table_element() {
+        let batches = parse(METADATA_XML, &metadata_config(r#"row: ".""#));
+        let batch = batches.get("header").unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        // One row holding all three values, rather than three holding one each.
+        assert_array_values!(batch, "title", &["Q3"], StringArray);
+        assert_array_values!(batch, "created", &["2026-08-29"], StringArray);
+        assert_array_values!(batch, "version", &["7"], StringArray);
+    }
+
+    /// `row: "."` repeats per occurrence of the table element, not once overall.
+    #[test]
+    fn row_dot_repeats_with_the_table_element() {
+        let batches = parse(
+            r#"<report>
+                 <header><title>a</title><version>1</version></header>
+                 <header><title>b</title><version>2</version></header>
+               </report>"#,
+            r#"
+            tables:
+              - name: header
+                xml_path: /report/header
+                row: "."
+                levels: []
+                fields:
+                  - {name: title, xml_path: /report/header/title, data_type: Utf8}
+                  - {name: version, xml_path: /report/header/version, data_type: Utf8}
+            "#,
+        );
+        let batch = batches.get("header").unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        assert_array_values!(batch, "title", &["a", "b"], StringArray);
+        assert_array_values!(batch, "version", &["1", "2"], StringArray);
+    }
+
+    /// A declared row may name an element deeper than a direct child. The row
+    /// still finalizes against the table that declared it.
+    #[test]
+    fn declared_row_may_be_deeper_than_a_direct_child() {
+        let batches = parse(
+            r#"<report>
+                 <data>
+                   <items><item><v>1</v></item><item><v>2</v></item></items>
+                 </data>
+               </report>"#,
+            r#"
+            tables:
+              - name: items
+                xml_path: /report/data
+                row: items/item
+                levels: []
+                fields:
+                  - {name: v, xml_path: /report/data/items/item/v, data_type: Int32}
+            "#,
+        );
+        let batch = batches.get("items").unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        assert_array_values!(batch, "v", vec![1i32, 2], Int32Array);
+    }
+
+    /// Dual-form equivalence (`TRANSITION_PLAN.md` §7): the three spellings are
+    /// config ergonomics, not semantics, so they must compile to the same node
+    /// and produce byte-identical batches.
+    #[rstest]
+    #[case::relative("row: item")]
+    #[case::absolute("row: /report/data/item")]
+    fn row_spellings_are_equivalent(#[case] row_key: &str) {
+        let xml = r#"<report><data><item><v>1</v></item><item><v>2</v></item></data></report>"#;
+        let config = |row: &str| {
+            format!(
+                r#"
+                tables:
+                  - name: items
+                    xml_path: /report/data
+                    {row}
+                    levels: []
+                    fields:
+                      - {{name: v, xml_path: /report/data/item/v, data_type: Int32}}
+                "#
+            )
+        };
+        assert_eq!(
+            parse(xml, &config(row_key)),
+            parse(xml, &config("row: item")),
+        );
+    }
+
+    /// The leading slash is the whole disambiguator, and it has to be, because
+    /// a bare `measurement` and a full `/report/…/measurement` are both natural
+    /// things to write. Note this is *stricter* than the crate's other paths,
+    /// where a leading slash is insignificant (`paths_equal("/a", "a")`): here
+    /// it decides the meaning, so a slash-less multi-segment path is relative
+    /// and stacks onto `xml_path` rather than replacing it.
+    ///
+    /// Getting it wrong is not silent — every field lands outside the resolved
+    /// row subtree, which is exactly what `FieldOutsideRow` reports.
+    #[test]
+    fn a_leading_slash_is_what_makes_a_row_path_absolute() {
+        let relative_but_looks_absolute = config_from_yaml!(
+            r#"
+            tables:
+              - name: items
+                xml_path: /report/data
+                row: report/data/item
+                levels: []
+                fields:
+                  - {name: v, xml_path: /report/data/item/v, data_type: Int32}
+            "#
+        );
+        // Resolved relative: /report/data + report/data/item.
+        assert!(matches!(
+            relative_but_looks_absolute.lint().as_slice(),
+            [Lint::FieldOutsideRow { row_path, .. }]
+                if row_path == "/report/data/report/data/item"
+        ));
+    }
+
+    /// The plan's promise for the unambiguous case: naming the one element the
+    /// inferred rule was already using changes nothing at all. This is what
+    /// makes adopting `row:` on a well-behaved table a no-op.
+    #[test]
+    fn declaring_the_inferred_element_changes_no_output() {
+        let xml = r#"<report><data><item><v>1</v></item><item><v>2</v></item></data></report>"#;
+        let with_row = r#"
+            tables:
+              - name: items
+                xml_path: /report/data
+                row: item
+                levels: []
+                fields:
+                  - {name: v, xml_path: /report/data/item/v, data_type: Int32}
+            "#;
+        let without_row = r#"
+            tables:
+              - name: items
+                xml_path: /report/data
+                levels: []
+                fields:
+                  - {name: v, xml_path: /report/data/item/v, data_type: Int32}
+            "#;
+        assert_eq!(parse(xml, with_row), parse(xml, without_row));
+    }
+
+    /// C3, the granularity contract: opting one table in must not move another.
+    /// This also exercises a node carrying **both** row bits — `<header>` ends
+    /// its own declared row before its scope is popped, then delimits the outer
+    /// table's row on the way out, exactly as it did before it declared one.
+    #[test]
+    fn declaring_a_row_on_one_table_leaves_its_parent_alone() {
+        let xml = r#"<report>
+                       <name>R1</name>
+                       <header><title>T</title><created>C</created></header>
+                     </report>"#;
+        let config = |header_row: &str| {
+            format!(
+                r#"
+                tables:
+                  - name: report
+                    xml_path: /report
+                    levels: []
+                    fields:
+                      - {{name: name, xml_path: /report/name, data_type: Utf8}}
+                  - name: header
+                    xml_path: /report/header
+                    {header_row}
+                    levels: []
+                    fields:
+                      - {{name: title, xml_path: /report/header/title, data_type: Utf8}}
+                      - {{name: created, xml_path: /report/header/created, data_type: Utf8}}
+                "#
+            )
+        };
+
+        let inferred = parse(xml, &config(""));
+        let declared = parse(xml, &config(r#"row: ".""#));
+
+        // The inner table is the only thing that moved: 2 half-filled rows -> 1.
+        assert_eq!(inferred.get("header").unwrap().num_rows(), 2);
+        assert_eq!(declared.get("header").unwrap().num_rows(), 1);
+        // The outer table is untouched — <name> and <header> both still
+        // delimit its rows, because it declared nothing.
+        assert_eq!(
+            inferred.get("report").unwrap(),
+            declared.get("report").unwrap()
+        );
+    }
+
+    /// A row declared on a table nested inside another still receives its
+    /// parent-link index columns, because `row:` changes only which element
+    /// finalizes the row, never how `levels` are collected.
+    #[test]
+    fn declared_rows_keep_their_level_indices() {
+        let batches = parse(
+            r#"<report>
+                 <station><meta><id>a</id><kind>x</kind></meta></station>
+                 <station><meta><id>b</id><kind>y</kind></meta></station>
+               </report>"#,
+            r#"
+            tables:
+              - name: stations
+                xml_path: /report
+                levels: []
+                fields: []
+              - name: meta
+                xml_path: /report/station/meta
+                row: "."
+                levels: [station]
+                fields:
+                  - {name: id, xml_path: /report/station/meta/id, data_type: Utf8}
+                  - {name: kind, xml_path: /report/station/meta/kind, data_type: Utf8}
+            "#,
+        );
+        let batch = batches.get("meta").unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        assert_array_values!(batch, "id", &["a", "b"], StringArray);
+        assert_array_values!(batch, "<station>", vec![0u32, 1], UInt32Array);
     }
 }

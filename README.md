@@ -74,6 +74,16 @@ tables:
   - name: <table_name>         # Name of the resulting Arrow RecordBatch
     xml_path: <xml_path>       # Path to the element whose children are rows.
                                # Use "/" to treat the whole document as one row.
+    row: <element>             # Which element finalizes a row (optional).
+                               # Omitted: inferred — a row ends whenever ANY
+                               #   configured direct child of xml_path closes,
+                               #   so two configured children yield two
+                               #   half-filled rows per container.
+                               # ".": one row per xml_path element itself —
+                               #   what metadata tables usually mean.
+                               # "name" / "a/b": relative to xml_path.
+                               # "/a/b/c": absolute (a LEADING SLASH is what
+                               #   makes it absolute; "a/b" is still relative).
     levels: [<level>, ...]     # Parent-link index columns — see "Nested tables"
     fields:
       - name: <field_name>     # Arrow column name
@@ -88,6 +98,25 @@ tables:
         offset: <number>       # Add this value to float values after scaling (optional)
                                # value = (value * scale) + offset
 ```
+
+**Declaring rows (`row:`).** Without it, row boundaries are *inferred* from
+whichever fields happen to be configured — so adding a field can change a
+table's row count, and a metadata table with three fields produces three
+one-third-filled rows instead of one. `row:` states the boundary instead:
+
+```yaml
+tables:
+  - name: header
+    xml_path: /report/header
+    row: "."                   # one row per <header>, holding all three fields
+    fields: [title, created, version]   # (abbreviated)
+```
+
+It is opt-in per table, and it changes nothing else: `levels`, absolute field
+paths and scoping all behave as before, and a table that omits `row:` keeps the
+inferred rule even when a sibling table declares one. `Config::lint()` reports
+tables whose boundaries are inferred from more than one child element, with the
+suggested `row:` line in the message — see [Checking a config for surprises](#checking-a-config-for-surprises).
 
 **Supported data types:** `Boolean`, `Int8`, `UInt8`, `Int16`, `UInt16`, `Int32`,
 `UInt32`, `Int64`, `UInt64`, `Float32`, `Float64`, `Utf8`
@@ -237,7 +266,8 @@ for lint in parser.warnings() {
 ```
 
 Lints are data, never printed by the library, and purely advisory: they never
-change how a document parses.
+change how a document parses. The inferred-boundary lint carries its own fix —
+the `row:` line to add — and goes quiet once you add it.
 
 For the runtime counterpart — "this field's `xml_path` matched nothing in *this
 document*" — set `parser_options.error_on_unmatched_fields`, which reports every

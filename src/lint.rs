@@ -50,6 +50,19 @@ pub enum Lint {
         /// order. Each one finalizes a row of this table when it closes.
         child_elements: Vec<String>,
     },
+    /// A table declares `row:`, but one of its fields sits outside that row's
+    /// subtree, so the field cannot be part of the row it is configured on.
+    ///
+    /// Advisory rather than an error because the field still behaves exactly
+    /// as it did before the `row:` line was added — its value attaches to
+    /// whichever row finalizes next. That is rarely what the author meant, but
+    /// it is not a new failure, and Phase C does not break working configs.
+    FieldOutsideRow {
+        table: String,
+        field: String,
+        field_path: String,
+        row_path: String,
+    },
     /// A table has fields but **no** configured child element, so no element
     /// close can ever finalize one of its rows: the table silently produces
     /// zero rows.
@@ -96,14 +109,27 @@ impl fmt::Display for Lint {
                 child_elements,
             } => write!(
                 f,
-                "Table '{table}' (xml_path {xml_path}) has {} configured child elements ({}): \
-                 each one finalizes a row when it closes, so this table yields one \
-                 partially-filled row per child element rather than one row per <{}>. \
-                 If you expected a single row, split the table or configure fields under a \
-                 single child element",
+                "Table '{table}' (xml_path {xml_path}) has {} distinct configured child \
+                 elements ({}); row boundaries are inferred, so this table produces {} \
+                 partially-filled rows per <{}> rather than one. Declare `row:` to fix it: \
+                 `row: \".\"` for one row per <{}>, or `row: <element>` to name the \
+                 repeating element",
                 child_elements.len(),
                 child_elements.join(", "),
+                child_elements.len(),
                 path_segments(xml_path).next_back().unwrap_or("/"),
+                path_segments(xml_path).next_back().unwrap_or("/"),
+            ),
+            Lint::FieldOutsideRow {
+                table,
+                field,
+                field_path,
+                row_path,
+            } => write!(
+                f,
+                "Table '{table}' declares its row at '{row_path}', but field '{field}' \
+                 (xml_path '{field_path}') is outside that subtree, so its value attaches to \
+                 whichever row finalizes next rather than to a row of its own element"
             ),
             Lint::NeverFinalizesRows { table, xml_path } => write!(
                 f,
@@ -177,18 +203,37 @@ impl Config {
                 continue;
             }
 
-            let children = self.row_delimiting_children(&table.xml_path);
-            match children.len() {
-                0 => lints.push(Lint::NeverFinalizesRows {
-                    table: table.name.clone(),
-                    xml_path: table.xml_path.clone(),
-                }),
-                1 => {} // Unambiguous: exactly the element a `row:` would name.
-                _ => lints.push(Lint::InferredRowBoundary {
-                    table: table.name.clone(),
-                    xml_path: table.xml_path.clone(),
-                    child_elements: children,
-                }),
+            // The row-boundary lints describe the *inferred* rule. A table that
+            // declares `row:` has opted out of it, so reporting inference
+            // there would be advice to do what it already did.
+            match table.row_path() {
+                Some(row_path) => {
+                    for field in &table.fields {
+                        if !path_is_under(&field.xml_path, &row_path) {
+                            lints.push(Lint::FieldOutsideRow {
+                                table: table.name.clone(),
+                                field: field.name.clone(),
+                                field_path: field.xml_path.clone(),
+                                row_path: row_path.clone(),
+                            });
+                        }
+                    }
+                }
+                None => {
+                    let children = self.row_delimiting_children(&table.xml_path);
+                    match children.len() {
+                        0 => lints.push(Lint::NeverFinalizesRows {
+                            table: table.name.clone(),
+                            xml_path: table.xml_path.clone(),
+                        }),
+                        1 => {} // Unambiguous: exactly the element a `row:` would name.
+                        _ => lints.push(Lint::InferredRowBoundary {
+                            table: table.name.clone(),
+                            xml_path: table.xml_path.clone(),
+                            child_elements: children,
+                        }),
+                    }
+                }
             }
 
             let available = self.enclosing_table_scopes(&table.xml_path);
@@ -582,5 +627,130 @@ tables:
         assert!(message.contains("'header'"));
         assert!(message.contains("title, created"));
         assert!(message.contains("<header>"));
+        // The lint's job in Phase C is to carry the fix, not just the diagnosis.
+        assert!(message.contains("row:"));
+    }
+
+    // --- Declared rows silence the inferred-boundary lints --------------------
+
+    /// The lint describes a rule the table no longer uses. Reporting it after a
+    /// user has taken the lint's own advice would be the worst kind of noise.
+    #[test]
+    fn declaring_a_row_silences_the_inferred_boundary_lint() {
+        let inferred = config_from_yaml!(
+            r#"
+            tables:
+              - name: header
+                xml_path: /report/header
+                levels: []
+                fields:
+                  - {name: title, xml_path: /report/header/title, data_type: Utf8}
+                  - {name: created, xml_path: /report/header/created, data_type: Utf8}
+            "#
+        );
+        assert!(
+            inferred
+                .lint()
+                .iter()
+                .any(|l| matches!(l, Lint::InferredRowBoundary { .. }))
+        );
+
+        let declared = config_from_yaml!(
+            r#"
+            tables:
+              - name: header
+                xml_path: /report/header
+                row: "."
+                levels: []
+                fields:
+                  - {name: title, xml_path: /report/header/title, data_type: Utf8}
+                  - {name: created, xml_path: /report/header/created, data_type: Utf8}
+            "#
+        );
+        assert!(
+            !declared
+                .lint()
+                .iter()
+                .any(|l| matches!(l, Lint::InferredRowBoundary { .. }))
+        );
+    }
+
+    /// `NeverFinalizesRows` is likewise a statement about inference. A declared
+    /// row is the fix for it, so it must not survive the fix.
+    #[test]
+    fn declaring_a_row_silences_the_never_finalizes_lint() {
+        let config = config_from_yaml!(
+            r#"
+            tables:
+              - name: t
+                xml_path: /a
+                row: "."
+                levels: []
+                fields:
+                  - {name: id, xml_path: /a/@id, data_type: Utf8}
+            "#
+        );
+        assert!(
+            !config
+                .lint()
+                .iter()
+                .any(|l| matches!(l, Lint::NeverFinalizesRows { .. }))
+        );
+    }
+
+    #[test]
+    fn a_field_outside_the_declared_row_is_reported() {
+        let config = config_from_yaml!(
+            r#"
+            tables:
+              - name: t
+                xml_path: /report/data
+                row: item
+                levels: []
+                fields:
+                  - {name: v, xml_path: /report/data/item/v, data_type: Int32}
+                  - {name: stray, xml_path: /report/data/summary, data_type: Utf8}
+            "#
+        );
+        let lints = config.lint();
+        let outside: Vec<&Lint> = lints
+            .iter()
+            .filter(|l| matches!(l, Lint::FieldOutsideRow { .. }))
+            .collect();
+        assert_eq!(outside.len(), 1, "got {lints:?}");
+        let Lint::FieldOutsideRow {
+            field, row_path, ..
+        } = outside[0]
+        else {
+            unreachable!()
+        };
+        assert_eq!(field, "stray");
+        assert_eq!(row_path, "/report/data/item");
+        assert!(outside[0].to_string().contains("'stray'"));
+    }
+
+    /// An attribute of the row element is inside the row subtree, so declaring
+    /// a row must not flag it.
+    #[test]
+    fn an_attribute_of_the_row_element_is_inside_the_row() {
+        let config = config_from_yaml!(
+            r#"
+            tables:
+              - name: t
+                xml_path: /report/data
+                row: item
+                levels: []
+                fields:
+                  - {name: id, xml_path: /report/data/item/@id, data_type: Utf8}
+            "#
+        );
+        assert!(
+            !config
+                .lint()
+                .iter()
+                .any(|l| matches!(l, Lint::FieldOutsideRow { .. })),
+            "got {:?}",
+            config.lint()
+        );
     }
 }

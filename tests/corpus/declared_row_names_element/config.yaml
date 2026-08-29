@@ -1,0 +1,13 @@
+# `row:` naming the repeating element, with a field deliberately left outside
+# the row subtree (`label`). The inferred rule would finalize a row per <label>
+# *and* per <item>; the declaration confines rows to <item>. `label` keeps its
+# pre-declaration behavior — it attaches to whichever row finalizes next — which
+# is what Lint::FieldOutsideRow reports rather than rejects.
+tables:
+  - name: items
+    xml_path: /report/data
+    row: item
+    levels: []
+    fields:
+      - {name: label, xml_path: /report/data/label, data_type: Utf8, nullable: true}
+      - {name: v, xml_path: /report/data/item/v, data_type: Int32, nullable: true}

@@ -301,6 +301,29 @@ pub enum ConfigIssue {
     SingleTableRequired {
         output_tables: usize,
     },
+    /// A table declared `row:` as an empty (or whitespace-only) string. Use
+    /// `row: "."` for one row per table element, or omit the key entirely to
+    /// keep inferred boundaries.
+    EmptyRowPath {
+        table: String,
+    },
+    /// A table's declared `row:` resolves outside its own `xml_path`. A row
+    /// element has to sit inside the table it delimits.
+    RowPathNotUnderTable {
+        table: String,
+        table_path: String,
+        row: String,
+        row_path: String,
+    },
+    /// Another table sits strictly between a table and its declared `row:`
+    /// element. Rows are finalized against the innermost open table, so the
+    /// inner table would silently absorb them.
+    RowPathCrossesTable {
+        table: String,
+        row_path: String,
+        nested_table: String,
+        nested_table_path: String,
+    },
 }
 
 // --- Display -----------------------------------------------------------------
@@ -476,6 +499,28 @@ impl fmt::Display for ConfigIssue {
             ConfigIssue::SingleTableRequired { output_tables } => write!(
                 f,
                 "This operation requires a config with exactly one table with fields, but found {output_tables}"
+            ),
+            ConfigIssue::EmptyRowPath { table } => write!(
+                f,
+                "Table '{table}' declares an empty 'row'. Use row: \".\" for one row per table element, or remove the key to keep inferred row boundaries"
+            ),
+            ConfigIssue::RowPathNotUnderTable {
+                table,
+                table_path,
+                row,
+                row_path,
+            } => write!(
+                f,
+                "Table '{table}' declares row '{row}' which resolves to '{row_path}', not under its xml_path '{table_path}'"
+            ),
+            ConfigIssue::RowPathCrossesTable {
+                table,
+                row_path,
+                nested_table,
+                nested_table_path,
+            } => write!(
+                f,
+                "Table '{table}' declares a row element at '{row_path}', but table '{nested_table}' (xml_path '{nested_table_path}') lies between them; rows finalize against the innermost open table, so '{nested_table}' would receive them"
             ),
         }
     }

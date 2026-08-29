@@ -172,6 +172,22 @@ pub(crate) fn path_is_under(descendant: &str, ancestor: &str) -> bool {
     path_segments(ancestor).all(|segment| descendant_segments.next() == Some(segment))
 }
 
+/// Resolves a declared `row` against its table's `xml_path`.
+///
+/// `"."` names the table element itself, a leading `/` means the path is
+/// already absolute, and anything else is relative to `xml_path`. All three
+/// land on a single trie node, which is what makes `version: 2`'s eventual
+/// switch to absolute-only a pure key rename rather than a semantic change.
+pub(crate) fn resolve_row_path(xml_path: &str, row: &str) -> String {
+    if row == "." {
+        return xml_path.to_string();
+    }
+    if row.starts_with('/') {
+        return row.to_string();
+    }
+    format!("{}/{}", xml_path.trim_end_matches('/'), row)
+}
+
 /// Returns true when two paths resolve to the same registry node, i.e. their
 /// normalized segment sequences are identical regardless of spelling
 /// ("/data", "data" and "/data/" are all the same path).
@@ -274,6 +290,51 @@ impl Config {
                             xml_path: table.xml_path.clone(),
                         },
                     });
+                }
+            }
+
+            // --- Declared row boundary (`row:`) ---
+            if let Some(row) = &table.row {
+                if row.trim().is_empty() {
+                    return Err(Error::InvalidConfig {
+                        reason: ConfigIssue::EmptyRowPath {
+                            table: table.name.clone(),
+                        },
+                    });
+                }
+                let row_path = resolve_row_path(&table.xml_path, row);
+                if !path_is_under(&row_path, &table.xml_path) {
+                    return Err(Error::InvalidConfig {
+                        reason: ConfigIssue::RowPathNotUnderTable {
+                            table: table.name.clone(),
+                            table_path: table.xml_path.clone(),
+                            row: row.clone(),
+                            row_path,
+                        },
+                    });
+                }
+                // A row is finalized against the *innermost open table*, so a
+                // second table sitting strictly between this one and its row
+                // element would receive the row instead — silently, with a
+                // plausible-looking batch as the only evidence. Reject it.
+                // A table whose path *equals* the row path is fine: its scope
+                // is popped before the row is finalized, so the row still
+                // lands here.
+                for other in &self.tables {
+                    let other_is_strictly_inside = path_is_under(&other.xml_path, &table.xml_path)
+                        && !paths_equal(&other.xml_path, &table.xml_path);
+                    let row_is_strictly_inside_other = path_is_under(&row_path, &other.xml_path)
+                        && !paths_equal(&row_path, &other.xml_path);
+                    if other_is_strictly_inside && row_is_strictly_inside_other {
+                        return Err(Error::InvalidConfig {
+                            reason: ConfigIssue::RowPathCrossesTable {
+                                table: table.name.clone(),
+                                row_path,
+                                nested_table: other.name.clone(),
+                                nested_table_path: other.xml_path.clone(),
+                            },
+                        });
+                    }
                 }
             }
 
@@ -431,6 +492,29 @@ pub struct TableConfig {
     pub levels: Vec<String>,
     /// A vector of `FieldConfig` structs, each defining a field (column) in the table.
     pub fields: Vec<FieldConfig>,
+    /// The element whose closing tag finalizes a row — **declared** instead of
+    /// inferred.
+    ///
+    /// Absent (the default) keeps the historical rule: a row ends whenever any
+    /// configured direct child of `xml_path` closes. That rule is invisible in
+    /// the config and depends on which fields happen to be configured, so a
+    /// table with two distinct configured children silently yields two
+    /// half-filled rows per container, and adding a field can change a table's
+    /// row count. [`Config::lint`] reports that shape.
+    ///
+    /// Three spellings, all resolving to one trie node:
+    ///
+    /// - `"."` — the `xml_path` element itself: **one row per occurrence**,
+    ///   which is what metadata tables almost always mean.
+    /// - a relative name (`"measurement"`, `"items/item"`) — resolved against
+    ///   `xml_path`.
+    /// - an absolute path (`"/report/…"`) — must still resolve to `xml_path`
+    ///   or a descendant of it.
+    ///
+    /// Declaring a row changes nothing else about the table: `levels`,
+    /// absolute field paths and scoping all behave as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row: Option<String>,
 }
 
 impl TableConfig {
@@ -441,7 +525,20 @@ impl TableConfig {
             xml_path: xml_path.to_string(),
             levels,
             fields,
+            row: None,
         }
+    }
+
+    /// Resolves [`TableConfig::row`] to an absolute path, or `None` when this
+    /// table leaves its row boundaries inferred.
+    ///
+    /// Resolution is pure string work and happens twice per table per
+    /// `Parser::new` (validation, then registry marking), never during parsing.
+    #[must_use]
+    pub(crate) fn row_path(&self) -> Option<String> {
+        self.row
+            .as_deref()
+            .map(|row| resolve_row_path(&self.xml_path, row))
     }
 
     /// Starts building a table configuration, adding levels and fields one at
@@ -456,6 +553,7 @@ impl TableConfig {
             xml_path: xml_path.to_string(),
             levels: Vec::new(),
             fields: Vec::new(),
+            row: None,
         }
     }
 }
@@ -515,6 +613,7 @@ pub struct TableConfigBuilder {
     xml_path: String,
     levels: Vec<String>,
     fields: Vec<FieldConfig>,
+    row: Option<String>,
 }
 
 impl TableConfigBuilder {
@@ -529,6 +628,14 @@ impl TableConfigBuilder {
     #[must_use]
     pub fn levels(mut self, levels: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.levels.extend(levels.into_iter().map(Into::into));
+        self
+    }
+
+    /// Declares the element whose closing tag finalizes a row. See
+    /// [`TableConfig::row`] for the accepted spellings.
+    #[must_use]
+    pub fn row(mut self, row: impl Into<String>) -> Self {
+        self.row = Some(row.into());
         self
     }
 
@@ -558,6 +665,7 @@ impl TableConfigBuilder {
             xml_path: self.xml_path,
             levels: self.levels,
             fields: self.fields,
+            row: self.row,
         }
     }
 }
@@ -1426,5 +1534,115 @@ mod tests {
             ],
         };
         assert!(config.validate().is_ok());
+    }
+
+    // --- Declared row boundaries (`row:`) -------------------------------------
+
+    /// Resolution is pure string work, so pin it directly: these three
+    /// spellings are the whole surface `version: 2` will later narrow to
+    /// absolute-only.
+    #[rstest]
+    #[case::dot("/report/header", ".", "/report/header")]
+    #[case::relative_name("/report/data", "item", "/report/data/item")]
+    #[case::relative_path("/report/data", "items/item", "/report/data/items/item")]
+    #[case::absolute("/report/data", "/report/data/item", "/report/data/item")]
+    #[case::root_table("/", "item", "/item")]
+    fn row_paths_resolve(#[case] xml_path: &str, #[case] row: &str, #[case] expected: &str) {
+        assert_eq!(resolve_row_path(xml_path, row), expected);
+    }
+
+    fn table_with_row(xml_path: &str, row: &str) -> TableConfig {
+        TableConfig::builder("t", xml_path)
+            .row(row)
+            .field(
+                FieldConfigBuilder::new("v", &format!("{xml_path}/item/v"), DType::Int32)
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+    }
+
+    #[test]
+    fn empty_row_is_rejected() {
+        let config = Config::builder().table(table_with_row("/a", "  ")).build();
+        assert!(matches!(
+            config,
+            Err(Error::InvalidConfig {
+                reason: ConfigIssue::EmptyRowPath { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn row_outside_the_table_is_rejected() {
+        let config = Config::builder()
+            .table(table_with_row("/a", "/b/item"))
+            .build();
+        assert!(matches!(
+            config,
+            Err(Error::InvalidConfig {
+                reason: ConfigIssue::RowPathNotUnderTable { .. }
+            })
+        ));
+    }
+
+    /// The silent-corruption case the check exists for: rows finalize against
+    /// the innermost open table, so a table between `/a` and its row element
+    /// would quietly collect `t`'s rows.
+    #[test]
+    fn a_table_between_a_table_and_its_row_is_rejected() {
+        let config = Config::builder()
+            .table(table_with_row("/a", "b/item"))
+            .table(TableConfig::new("inner", "/a/b", vec![], vec![]))
+            .build();
+        let Err(Error::InvalidConfig {
+            reason: ConfigIssue::RowPathCrossesTable { nested_table, .. },
+        }) = config
+        else {
+            panic!("expected RowPathCrossesTable, got {config:?}");
+        };
+        assert_eq!(nested_table, "inner");
+    }
+
+    /// A table whose path *equals* the row path is fine: `close_element` pops
+    /// that scope before finalizing, so the row still lands on the declarer.
+    #[test]
+    fn a_table_at_the_row_element_itself_is_accepted() {
+        let config = Config::builder()
+            .table(table_with_row("/a", "b"))
+            .table(TableConfig::new("inner", "/a/b", vec![], vec![]))
+            .build();
+        assert!(config.is_ok(), "got {config:?}");
+    }
+
+    #[test]
+    fn row_survives_a_yaml_round_trip() {
+        let config = Config::builder()
+            .table(table_with_row("/a", "."))
+            .build()
+            .unwrap();
+        let yaml = yaml_serde::to_string(&config).unwrap();
+        let restored: Config = yaml_serde::from_str(&yaml).unwrap();
+        assert_eq!(restored.tables[0].row.as_deref(), Some("."));
+        assert_eq!(restored, config);
+    }
+
+    /// A config that predates `row:` must still deserialize, and must not grow
+    /// a `row: null` key when written back out.
+    #[test]
+    fn configs_without_row_are_unchanged_by_it() {
+        let config: Config = yaml_serde::from_str(
+            r#"
+            tables:
+              - name: t
+                xml_path: /a
+                levels: []
+                fields:
+                  - {name: v, xml_path: /a/item/v, data_type: Int32}
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.tables[0].row, None);
+        assert!(!yaml_serde::to_string(&config).unwrap().contains("row"));
     }
 }

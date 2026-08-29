@@ -1,0 +1,9 @@
+# frozen snapshot — see tests/frozen_corpus.rs
+table: items
+rows: 2
+columns:
+  1. label: Utf8 (nullable)
+  2. v: Int32 (nullable)
+data:
+  "batch-7" | "1"
+  null | "2"

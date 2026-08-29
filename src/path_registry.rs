@@ -82,6 +82,17 @@ pub struct PathNodeInfo {
     /// leaves them directly, without going through the row-finalizing close
     /// path, so an attribute has never delimited a row.
     pub ends_row: bool,
+    /// Whether closing this element finalizes a row of **its own** table,
+    /// rather than of the enclosing one. Set only by `row: "."`, where the
+    /// declared row element *is* the table element.
+    ///
+    /// It needs its own bit because of ordering: `close_element` pops the
+    /// table scope before finalizing a row, so a single flag on a table node
+    /// would hand the row to the parent table. `ends_own_row` fires before the
+    /// pop, `ends_row` after it, and a node may legitimately carry both — a
+    /// `row: "."` table that is itself a configured child of an outer table
+    /// closes its own row *and* delimits the outer table's.
+    pub ends_own_row: bool,
     /// Whether this node is a `stop_at_paths` target, so that closing it ends
     /// the parse. Replaces a linear scan of the configured stop paths on every
     /// element close.
@@ -263,16 +274,46 @@ impl PathRegistry {
             registry.node_info[node_id.index()].is_stop = true;
         }
 
-        // Phase 5: mark the nodes whose closing tag finalizes a row — every
+        // Phase 5a: mark declared row elements (`row:`). A declared row marks
+        // *itself*, where the inferred rule below marks each configured child
+        // of a table — the same bit, on a different node, which is what keeps
+        // v1 and v2 row semantics on one code path rather than two engines.
+        //
+        // Runs before 5b because resolving a row path can create trie nodes,
+        // and 5b's `children` iteration must see the finished trie.
+        for table_config in &config.tables {
+            let Some(row_path) = table_config.row_path() else {
+                continue;
+            };
+            let table_node = registry.get_or_create_path(&table_config.xml_path);
+            let row_node = registry.get_or_create_path(&row_path);
+            if row_node == table_node {
+                // `row: "."` — one row per table element. Finalized before the
+                // table scope is popped; see `PathNodeInfo::ends_own_row`.
+                registry.node_info[row_node.index()].ends_own_row = true;
+            } else {
+                registry.node_info[row_node.index()].ends_row = true;
+            }
+        }
+
+        // Phase 5b: mark the nodes whose closing tag finalizes a row — every
         // element child of a table node. See `PathNodeInfo::ends_row` for why
         // this is exactly the rule the parser used to evaluate per event.
+        //
+        // Skipped for tables that declared a row: for those, phase 5a has
+        // already named the element, and marking the children too would
+        // finalize a row per child *as well*, which is the very behavior
+        // `row:` exists to replace.
         //
         // Must run *after* phase 4: a stop path can introduce nodes, and a node
         // introduced under a table path delimits rows exactly like any other
         // configured child. Marking before phase 4 would miss those and quietly
         // change row counts for configs that combine the two.
         for node_idx in 0..registry.children.len() {
-            if !registry.node_info[node_idx].is_table() {
+            let Some(table_idx) = registry.node_info[node_idx].table_index else {
+                continue;
+            };
+            if config.tables[table_idx].row.is_some() {
                 continue;
             }
             // Move the child list aside rather than collecting it: marking goes
@@ -372,7 +413,7 @@ impl PathRegistry {
 ///
 /// Carries everything the parser needs when the matching close arrives, all
 /// materialized once at `enter()` from `PathNodeInfo`. Closing an element is
-/// therefore a pop plus three bit tests, with no registry lookup and no look
+/// therefore a pop plus four bit tests, with no registry lookup and no look
 /// at the parent frame.
 #[derive(Debug, Clone, Copy)]
 struct StackEntry {
@@ -385,6 +426,9 @@ struct StackEntry {
     /// Whether closing this element finalizes a row. See
     /// [`PathNodeInfo::ends_row`].
     ends_row: bool,
+    /// Whether closing this element finalizes a row of its *own* table. See
+    /// [`PathNodeInfo::ends_own_row`].
+    ends_own_row: bool,
     /// Whether closing this element ends the parse (`stop_at_paths`).
     is_stop: bool,
 }
@@ -398,6 +442,7 @@ struct StackEntry {
 pub struct ClosedFrame {
     pub is_table: bool,
     pub ends_row: bool,
+    pub ends_own_row: bool,
     pub is_stop: bool,
 }
 
@@ -431,6 +476,7 @@ impl StackEntry {
         is_known: false,
         is_table: false,
         ends_row: false,
+        ends_own_row: false,
         is_stop: false,
     };
 }
@@ -450,6 +496,7 @@ impl PathTracker {
                 is_table: root_is_table,
                 // The root frame is never popped, so these are inert.
                 ends_row: false,
+                ends_own_row: false,
                 is_stop: false,
             }],
         }
@@ -485,6 +532,7 @@ impl PathTracker {
                 is_known: true,
                 is_table: info.is_table(),
                 ends_row: info.ends_row,
+                ends_own_row: info.ends_own_row,
                 is_stop: info.is_stop,
             });
             Some((child_id, info))
@@ -506,6 +554,7 @@ impl PathTracker {
             return Some(ClosedFrame {
                 is_table: entry.is_table,
                 ends_row: entry.ends_row,
+                ends_own_row: entry.ends_own_row,
                 is_stop: entry.is_stop,
             });
         }

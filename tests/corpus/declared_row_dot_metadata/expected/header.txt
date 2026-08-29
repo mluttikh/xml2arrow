@@ -1,0 +1,8 @@
+# frozen snapshot — see tests/frozen_corpus.rs
+table: header
+rows: 1
+columns:
+  1. title: Utf8 (nullable)
+  2. created: Utf8 (nullable)
+data:
+  "Q3" | "2026-07-26"

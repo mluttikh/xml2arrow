@@ -1,0 +1,11 @@
+# The `row: "."` counterpart of metadata_multi_child_rows: same document, same
+# fields, one added line. Comparing the two snapshots shows exactly what the
+# opt-in buys — 2 half-filled rows become 1 complete one.
+tables:
+  - name: header
+    xml_path: /report/header
+    row: "."
+    levels: []
+    fields:
+      - {name: title, xml_path: /report/header/title, data_type: Utf8, nullable: true}
+      - {name: created, xml_path: /report/header/created, data_type: Utf8, nullable: true}
