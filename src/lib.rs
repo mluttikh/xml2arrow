@@ -22,6 +22,6 @@ pub use xml_parser::{
 };
 
 pub use config::{
-    Config, ConfigBuilder, DType, FieldConfig, FieldConfigBuilder, ParserOptions, TableConfig,
-    TableConfigBuilder,
+    Config, ConfigBuilder, DType, FieldConfig, FieldConfigBuilder, Link, ParserOptions, RowId,
+    TableConfig, TableConfigBuilder,
 };

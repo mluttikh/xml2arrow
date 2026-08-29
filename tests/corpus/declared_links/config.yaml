@@ -1,0 +1,20 @@
+# `links:` with both kinds, on a document whose container repeats — which is
+# the only shape where the two differ. `_stations_id` is a global ordinal, so
+# it distinguishes station A from station B; `station_idx` is positional and
+# says "0" for both, because each is the first station of its own <group>.
+# Reading the two columns side by side in the snapshot is the argument for
+# preferring `parent:` when you want a join key.
+tables:
+  - name: stations
+    xml_path: /report/group
+    row: station
+    fields:
+      - {name: id, path: id, data_type: Utf8, nullable: true}
+  - name: measurements
+    xml_path: /report/group/station/ms
+    row: m
+    links:
+      - parent: stations
+      - index_of: /report/group/station
+    fields:
+      - {name: v, path: v, data_type: Int32, nullable: true}

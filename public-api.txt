@@ -35,6 +35,28 @@ impl core::marker::Unpin for xml2arrow::config::DType
 impl core::marker::UnsafeUnpin for xml2arrow::config::DType
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::DType
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::DType
+#[non_exhaustive] pub enum xml2arrow::config::RowId
+pub xml2arrow::config::RowId::Enabled(bool)
+pub xml2arrow::config::RowId::Named(alloc::string::String)
+impl core::clone::Clone for xml2arrow::config::RowId
+pub fn xml2arrow::config::RowId::clone(&self) -> xml2arrow::config::RowId
+impl core::cmp::Eq for xml2arrow::config::RowId
+impl core::cmp::PartialEq for xml2arrow::config::RowId
+pub fn xml2arrow::config::RowId::eq(&self, &xml2arrow::config::RowId) -> bool
+impl core::fmt::Debug for xml2arrow::config::RowId
+pub fn xml2arrow::config::RowId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for xml2arrow::config::RowId
+impl serde_core::ser::Serialize for xml2arrow::config::RowId
+pub fn xml2arrow::config::RowId::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for xml2arrow::config::RowId
+pub fn xml2arrow::config::RowId::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for xml2arrow::config::RowId
+impl core::marker::Send for xml2arrow::config::RowId
+impl core::marker::Sync for xml2arrow::config::RowId
+impl core::marker::Unpin for xml2arrow::config::RowId
+impl core::marker::UnsafeUnpin for xml2arrow::config::RowId
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::RowId
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::RowId
 #[non_exhaustive] pub struct xml2arrow::config::Config
 pub xml2arrow::config::Config::parser_options: xml2arrow::config::ParserOptions
 pub xml2arrow::config::Config::tables: alloc::vec::Vec<xml2arrow::config::TableConfig>
@@ -125,6 +147,33 @@ impl core::marker::Unpin for xml2arrow::config::FieldConfigBuilder
 impl core::marker::UnsafeUnpin for xml2arrow::config::FieldConfigBuilder
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::FieldConfigBuilder
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::FieldConfigBuilder
+#[non_exhaustive] pub struct xml2arrow::config::Link
+pub xml2arrow::config::Link::index_of: core::option::Option<alloc::string::String>
+pub xml2arrow::config::Link::name: core::option::Option<alloc::string::String>
+pub xml2arrow::config::Link::parent: core::option::Option<alloc::string::String>
+impl xml2arrow::config::Link
+pub fn xml2arrow::config::Link::column_name(&self) -> core::option::Option<alloc::string::String>
+impl core::clone::Clone for xml2arrow::config::Link
+pub fn xml2arrow::config::Link::clone(&self) -> xml2arrow::config::Link
+impl core::cmp::Eq for xml2arrow::config::Link
+impl core::cmp::PartialEq for xml2arrow::config::Link
+pub fn xml2arrow::config::Link::eq(&self, &xml2arrow::config::Link) -> bool
+impl core::default::Default for xml2arrow::config::Link
+pub fn xml2arrow::config::Link::default() -> xml2arrow::config::Link
+impl core::fmt::Debug for xml2arrow::config::Link
+pub fn xml2arrow::config::Link::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for xml2arrow::config::Link
+impl serde_core::ser::Serialize for xml2arrow::config::Link
+pub fn xml2arrow::config::Link::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for xml2arrow::config::Link
+pub fn xml2arrow::config::Link::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for xml2arrow::config::Link
+impl core::marker::Send for xml2arrow::config::Link
+impl core::marker::Sync for xml2arrow::config::Link
+impl core::marker::Unpin for xml2arrow::config::Link
+impl core::marker::UnsafeUnpin for xml2arrow::config::Link
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::Link
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::Link
 #[non_exhaustive] pub struct xml2arrow::config::ParserOptions
 pub xml2arrow::config::ParserOptions::allow_truncated_input: bool
 pub xml2arrow::config::ParserOptions::error_on_unmatched_fields: bool
@@ -157,8 +206,10 @@ impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::ParserOptions
 #[non_exhaustive] pub struct xml2arrow::config::TableConfig
 pub xml2arrow::config::TableConfig::fields: alloc::vec::Vec<xml2arrow::config::FieldConfig>
 pub xml2arrow::config::TableConfig::levels: alloc::vec::Vec<alloc::string::String>
+pub xml2arrow::config::TableConfig::links: core::option::Option<alloc::vec::Vec<xml2arrow::config::Link>>
 pub xml2arrow::config::TableConfig::name: alloc::string::String
 pub xml2arrow::config::TableConfig::row: core::option::Option<alloc::string::String>
+pub xml2arrow::config::TableConfig::row_id: core::option::Option<xml2arrow::config::RowId>
 pub xml2arrow::config::TableConfig::xml_path: alloc::string::String
 impl xml2arrow::config::TableConfig
 pub fn xml2arrow::config::TableConfig::builder(&str, &str) -> xml2arrow::config::TableConfigBuilder
@@ -188,7 +239,9 @@ pub fn xml2arrow::config::TableConfigBuilder::field(self, xml2arrow::config::Fie
 pub fn xml2arrow::config::TableConfigBuilder::fields(self, impl core::iter::traits::collect::IntoIterator<Item = xml2arrow::config::FieldConfig>) -> Self
 pub fn xml2arrow::config::TableConfigBuilder::level(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn xml2arrow::config::TableConfigBuilder::levels(self, impl core::iter::traits::collect::IntoIterator<Item = impl core::convert::Into<alloc::string::String>>) -> Self
+pub fn xml2arrow::config::TableConfigBuilder::links(self, impl core::iter::traits::collect::IntoIterator<Item = xml2arrow::config::Link>) -> Self
 pub fn xml2arrow::config::TableConfigBuilder::row(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn xml2arrow::config::TableConfigBuilder::row_id(self, xml2arrow::config::RowId) -> Self
 impl core::fmt::Debug for xml2arrow::config::TableConfigBuilder
 pub fn xml2arrow::config::TableConfigBuilder::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Freeze for xml2arrow::config::TableConfigBuilder
@@ -230,6 +283,21 @@ pub xml2arrow::errors::ConfigIssue::FieldPathNotUnderTable::field: alloc::string
 pub xml2arrow::errors::ConfigIssue::FieldPathNotUnderTable::field_path: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::FieldPathNotUnderTable::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::FieldPathNotUnderTable::table_path: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::IndexOfNotAncestorTable
+pub xml2arrow::errors::ConfigIssue::IndexOfNotAncestorTable::index_of: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::IndexOfNotAncestorTable::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::LinkColumnCollision
+pub xml2arrow::errors::ConfigIssue::LinkColumnCollision::column: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::LinkColumnCollision::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::LinkKindAmbiguous
+pub xml2arrow::errors::ConfigIssue::LinkKindAmbiguous::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::LinksAndLevels
+pub xml2arrow::errors::ConfigIssue::LinksAndLevels::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::ParentNotAncestor
+pub xml2arrow::errors::ConfigIssue::ParentNotAncestor::parent: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::ParentNotAncestor::parent_path: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::ParentNotAncestor::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::ParentNotAncestor::table_path: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::RelativeFieldPathWithoutRow
 pub xml2arrow::errors::ConfigIssue::RelativeFieldPathWithoutRow::field: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::RelativeFieldPathWithoutRow::path: alloc::string::String
@@ -248,6 +316,9 @@ pub xml2arrow::errors::ConfigIssue::RowPathNotUnderTable::table: alloc::string::
 pub xml2arrow::errors::ConfigIssue::RowPathNotUnderTable::table_path: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::SingleTableRequired
 pub xml2arrow::errors::ConfigIssue::SingleTableRequired::output_tables: usize
+pub xml2arrow::errors::ConfigIssue::UnknownParentTable
+pub xml2arrow::errors::ConfigIssue::UnknownParentTable::parent: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::UnknownParentTable::table: alloc::string::String
 impl core::fmt::Debug for xml2arrow::errors::ConfigIssue
 pub fn xml2arrow::errors::ConfigIssue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::fmt::Display for xml2arrow::errors::ConfigIssue
@@ -566,6 +637,28 @@ impl core::marker::Unpin for xml2arrow::lint::Lint
 impl core::marker::UnsafeUnpin for xml2arrow::lint::Lint
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::lint::Lint
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::lint::Lint
+#[non_exhaustive] pub enum xml2arrow::RowId
+pub xml2arrow::RowId::Enabled(bool)
+pub xml2arrow::RowId::Named(alloc::string::String)
+impl core::clone::Clone for xml2arrow::config::RowId
+pub fn xml2arrow::config::RowId::clone(&self) -> xml2arrow::config::RowId
+impl core::cmp::Eq for xml2arrow::config::RowId
+impl core::cmp::PartialEq for xml2arrow::config::RowId
+pub fn xml2arrow::config::RowId::eq(&self, &xml2arrow::config::RowId) -> bool
+impl core::fmt::Debug for xml2arrow::config::RowId
+pub fn xml2arrow::config::RowId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for xml2arrow::config::RowId
+impl serde_core::ser::Serialize for xml2arrow::config::RowId
+pub fn xml2arrow::config::RowId::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for xml2arrow::config::RowId
+pub fn xml2arrow::config::RowId::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for xml2arrow::config::RowId
+impl core::marker::Send for xml2arrow::config::RowId
+impl core::marker::Sync for xml2arrow::config::RowId
+impl core::marker::Unpin for xml2arrow::config::RowId
+impl core::marker::UnsafeUnpin for xml2arrow::config::RowId
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::RowId
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::RowId
 #[non_exhaustive] pub struct xml2arrow::BatchOptions
 pub xml2arrow::BatchOptions::max_bytes_per_batch: usize
 pub xml2arrow::BatchOptions::max_rows_per_batch: usize
@@ -690,6 +783,33 @@ impl core::marker::Unpin for xml2arrow::config::FieldConfigBuilder
 impl core::marker::UnsafeUnpin for xml2arrow::config::FieldConfigBuilder
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::FieldConfigBuilder
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::FieldConfigBuilder
+#[non_exhaustive] pub struct xml2arrow::Link
+pub xml2arrow::Link::index_of: core::option::Option<alloc::string::String>
+pub xml2arrow::Link::name: core::option::Option<alloc::string::String>
+pub xml2arrow::Link::parent: core::option::Option<alloc::string::String>
+impl xml2arrow::config::Link
+pub fn xml2arrow::config::Link::column_name(&self) -> core::option::Option<alloc::string::String>
+impl core::clone::Clone for xml2arrow::config::Link
+pub fn xml2arrow::config::Link::clone(&self) -> xml2arrow::config::Link
+impl core::cmp::Eq for xml2arrow::config::Link
+impl core::cmp::PartialEq for xml2arrow::config::Link
+pub fn xml2arrow::config::Link::eq(&self, &xml2arrow::config::Link) -> bool
+impl core::default::Default for xml2arrow::config::Link
+pub fn xml2arrow::config::Link::default() -> xml2arrow::config::Link
+impl core::fmt::Debug for xml2arrow::config::Link
+pub fn xml2arrow::config::Link::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for xml2arrow::config::Link
+impl serde_core::ser::Serialize for xml2arrow::config::Link
+pub fn xml2arrow::config::Link::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for xml2arrow::config::Link
+pub fn xml2arrow::config::Link::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for xml2arrow::config::Link
+impl core::marker::Send for xml2arrow::config::Link
+impl core::marker::Sync for xml2arrow::config::Link
+impl core::marker::Unpin for xml2arrow::config::Link
+impl core::marker::UnsafeUnpin for xml2arrow::config::Link
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::Link
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::Link
 pub struct xml2arrow::Parser
 impl xml2arrow::Parser
 pub fn xml2arrow::Parser::into_batches<R: alloc::io::buf_read::BufRead>(self, R, xml2arrow::BatchOptions) -> xml2arrow::BatchStream<'static, xml2arrow::ReaderSource<R>>
@@ -794,8 +914,10 @@ impl !core::panic::unwind_safe::UnwindSafe for xml2arrow::TableBatch
 #[non_exhaustive] pub struct xml2arrow::TableConfig
 pub xml2arrow::TableConfig::fields: alloc::vec::Vec<xml2arrow::config::FieldConfig>
 pub xml2arrow::TableConfig::levels: alloc::vec::Vec<alloc::string::String>
+pub xml2arrow::TableConfig::links: core::option::Option<alloc::vec::Vec<xml2arrow::config::Link>>
 pub xml2arrow::TableConfig::name: alloc::string::String
 pub xml2arrow::TableConfig::row: core::option::Option<alloc::string::String>
+pub xml2arrow::TableConfig::row_id: core::option::Option<xml2arrow::config::RowId>
 pub xml2arrow::TableConfig::xml_path: alloc::string::String
 impl xml2arrow::config::TableConfig
 pub fn xml2arrow::config::TableConfig::builder(&str, &str) -> xml2arrow::config::TableConfigBuilder
@@ -825,7 +947,9 @@ pub fn xml2arrow::config::TableConfigBuilder::field(self, xml2arrow::config::Fie
 pub fn xml2arrow::config::TableConfigBuilder::fields(self, impl core::iter::traits::collect::IntoIterator<Item = xml2arrow::config::FieldConfig>) -> Self
 pub fn xml2arrow::config::TableConfigBuilder::level(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn xml2arrow::config::TableConfigBuilder::levels(self, impl core::iter::traits::collect::IntoIterator<Item = impl core::convert::Into<alloc::string::String>>) -> Self
+pub fn xml2arrow::config::TableConfigBuilder::links(self, impl core::iter::traits::collect::IntoIterator<Item = xml2arrow::config::Link>) -> Self
 pub fn xml2arrow::config::TableConfigBuilder::row(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn xml2arrow::config::TableConfigBuilder::row_id(self, xml2arrow::config::RowId) -> Self
 impl core::fmt::Debug for xml2arrow::config::TableConfigBuilder
 pub fn xml2arrow::config::TableConfigBuilder::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Freeze for xml2arrow::config::TableConfigBuilder

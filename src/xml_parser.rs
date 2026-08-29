@@ -31,7 +31,7 @@ use quick_xml::events::{BytesRef, Event};
 
 use crate::Config;
 use crate::config::{
-    DType, FieldConfig, TableConfig, paths_equal, resolve_field_path, resolve_row_path,
+    DType, FieldConfig, RowId, TableConfig, paths_equal, resolve_field_path, resolve_row_path,
 };
 use crate::errors::ConfigIssue;
 use crate::errors::Error;
@@ -526,6 +526,10 @@ struct TableBuilder {
     schema: Arc<Schema>,
     // Builders for the parent row indices, used for representing nested tables.
     index_builders: Vec<UInt32Builder>,
+    /// Builder for this table's own key column, when it materializes one.
+    id_builder: Option<UInt64Builder>,
+    /// Builders for declared `links:` columns, aligned with the compiled plan.
+    link_builders: Vec<LinkBuilder>,
     /// Builders for each field in the table, indexed by field position.
     field_builders: Vec<FieldBuilder>,
     /// The current row index for this table.
@@ -538,6 +542,13 @@ struct TableBuilder {
     /// *scope*, not within the current batch. Resetting it on flush would
     /// corrupt the foreign keys of child rows finalized after the flush.
     row_index: usize,
+    /// Rows this table has finalized since the parse began — **never** reset,
+    /// unlike `row_index`, which restarts with every scope.
+    ///
+    /// This is what makes a `parent:` foreign key a real join key: the value a
+    /// child stores identifies one parent row for the whole parse, however
+    /// often container elements repeat and however the output was batched.
+    global_row_index: u64,
     /// Rows finalized into the array builders since the last `flush()`.
     /// Always 0 for structural tables (empty `fields`), which never emit.
     rows_in_batch: usize,
@@ -557,9 +568,19 @@ struct TableBuilder {
 }
 
 impl TableBuilder {
-    fn new(table_config: &TableConfig, schema: Arc<Schema>, max_value_bytes: usize) -> Self {
+    fn new(
+        table_config: &TableConfig,
+        plan: &TableLinkPlan,
+        schema: Arc<Schema>,
+        max_value_bytes: usize,
+    ) -> Self {
         let mut index_builders = Vec::with_capacity(table_config.levels.len());
         index_builders.resize_with(table_config.levels.len(), UInt32Builder::default);
+        let link_builders = plan
+            .links
+            .iter()
+            .map(|spec| LinkBuilder::from_kind(spec.kind))
+            .collect();
         let mut field_builders = Vec::with_capacity(table_config.fields.len());
         for field_config in &table_config.fields {
             field_builders.push(FieldBuilder::new(
@@ -572,6 +593,12 @@ impl TableBuilder {
             meta: TableMeta::from_config(table_config),
             schema,
             index_builders,
+            id_builder: plan
+                .row_id_column
+                .as_ref()
+                .map(|_| UInt64Builder::default()),
+            link_builders,
+            global_row_index: 0,
             field_builders,
             row_index: 0,
             rows_in_batch: 0,
@@ -579,9 +606,9 @@ impl TableBuilder {
         }
     }
 
-    fn end_row(&mut self, indices: &[u32]) -> Result<()> {
+    fn end_row(&mut self, indices: &[u32], link_values: &[u64]) -> Result<()> {
         // Append the current row's data to the arrays
-        self.save_row(indices)?;
+        self.save_row(indices, link_values)?;
         for field_builder in &mut self.field_builders {
             field_builder.has_value = false;
             field_builder.current_value.clear();
@@ -603,7 +630,7 @@ impl TableBuilder {
         }
     }
 
-    fn save_row(&mut self, indices: &[u32]) -> Result<()> {
+    fn save_row(&mut self, indices: &[u32], link_values: &[u64]) -> Result<()> {
         // Structural tables (empty `fields`) exist only to feed their
         // `row_index` counter to child tables; they are skipped by every
         // emission path. Appending their index values would grow builders
@@ -611,12 +638,24 @@ impl TableBuilder {
         // flush periodically, that would be the one unbounded allocation.
         // Only the `row_index` advance below is observable for them.
         if !self.field_builders.is_empty() {
-            // 1. Write the parent foreign keys.
+            // 1a. This table's own key, when something joins to it. Written
+            // *before* the increment below, so it is the ordinal this very row
+            // receives — the same number its children stored as their FK.
+            if let Some(id_builder) = &mut self.id_builder {
+                id_builder.append_value(self.global_row_index);
+            }
+
+            // 1b. Write the parent foreign keys.
             // The `indices` slice contains the row_index of each ancestor table,
             // in order of hierarchy. These align 1:1 with the `levels` defined
             // in this table's configuration.
             for (index, index_builder) in indices.iter().zip(&mut self.index_builders) {
                 index_builder.append_value(*index);
+            }
+
+            // 1c. Declared link columns, in configured order.
+            for (value, link_builder) in link_values.iter().zip(&mut self.link_builders) {
+                link_builder.append(*value);
             }
 
             // 2. Write the actual field values for this table.
@@ -634,8 +673,10 @@ impl TableBuilder {
             self.bytes_in_batch = self.bytes_in_batch.saturating_add(row_bytes);
         }
 
-        // 3. Advance this table's primary key.
+        // 3. Advance this table's counters. `row_index` restarts with each
+        // scope; `global_row_index` never does, which is what makes it a key.
         self.row_index += 1;
+        self.global_row_index += 1;
         Ok(())
     }
 
@@ -654,6 +695,12 @@ impl TableBuilder {
         for index_builder in &mut self.index_builders {
             *index_builder = UInt32Builder::with_capacity(rows);
         }
+        if let Some(id_builder) = &mut self.id_builder {
+            *id_builder = UInt64Builder::with_capacity(rows);
+        }
+        for link_builder in &mut self.link_builders {
+            link_builder.reserve(rows);
+        }
         let bytes_per_field = self.bytes_in_batch / self.field_builders.len().max(1);
         for field_builder in &mut self.field_builders {
             field_builder
@@ -669,10 +716,20 @@ impl TableBuilder {
     /// batches a table emits yields exactly the single batch a non-streaming
     /// parse would have produced.
     fn flush(&mut self, reserve_next: bool) -> Result<RecordBatch> {
-        let num_arrays = self.field_builders.len() + self.index_builders.len();
+        let num_arrays = self.field_builders.len()
+            + self.index_builders.len()
+            + self.link_builders.len()
+            + usize::from(self.id_builder.is_some());
         let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(num_arrays);
+        // Column order must match `build_table_schema`: key, levels, links, fields.
+        if let Some(id_builder) = &mut self.id_builder {
+            arrays.push(Arc::new(id_builder.finish()));
+        }
         for index_builder in &mut self.index_builders {
             arrays.push(Arc::new(index_builder.finish()));
+        }
+        for link_builder in &mut self.link_builders {
+            arrays.push(link_builder.finish());
         }
         for field_builder in &mut self.field_builders {
             arrays.push(field_builder.finish());
@@ -694,6 +751,48 @@ impl TableBuilder {
                 ))
             })?,
         )
+    }
+}
+
+/// A column produced by a declared link. Two Arrow types, because the two link
+/// kinds are genuinely different things: a `UInt64` join key and a `UInt32`
+/// positional ordinal.
+#[derive(Debug)]
+enum LinkBuilder {
+    ParentId(UInt64Builder),
+    IndexOf(UInt32Builder),
+}
+
+impl LinkBuilder {
+    fn from_kind(kind: LinkKind) -> Self {
+        match kind {
+            LinkKind::ParentId => LinkBuilder::ParentId(UInt64Builder::default()),
+            LinkKind::IndexOf => LinkBuilder::IndexOf(UInt32Builder::default()),
+        }
+    }
+
+    /// Appends one collected value. `IndexOf` narrows to `u32`, which cannot
+    /// truncate: it mirrors a `row_index` that `end_current_row` has already
+    /// range-checked for the `<level>` columns.
+    fn append(&mut self, value: u64) {
+        match self {
+            LinkBuilder::ParentId(b) => b.append_value(value),
+            LinkBuilder::IndexOf(b) => b.append_value(value as u32),
+        }
+    }
+
+    fn finish(&mut self) -> Arc<dyn Array> {
+        match self {
+            LinkBuilder::ParentId(b) => Arc::new(b.finish()),
+            LinkBuilder::IndexOf(b) => Arc::new(b.finish()),
+        }
+    }
+
+    fn reserve(&mut self, rows: usize) {
+        match self {
+            LinkBuilder::ParentId(b) => *b = UInt64Builder::with_capacity(rows),
+            LinkBuilder::IndexOf(b) => *b = UInt32Builder::with_capacity(rows),
+        }
     }
 }
 
@@ -727,6 +826,9 @@ struct XmlToArrowConverter {
     compiled: Arc<Compiled>,
     /// Reusable buffer for collecting parent row indices, avoiding per-row allocation.
     parent_indices_buffer: Vec<u32>,
+    /// Reused across rows like `parent_indices_buffer`: declared link values,
+    /// widened to `u64` so one buffer serves both link kinds.
+    link_values_buffer: Vec<u64>,
     /// Mirror of `ParserOptions::validate_attributes`. When `false`, the
     /// attribute iterator skips quick-xml's per-element duplicate-key check
     /// (and its backing allocation). Cached here so `parse_attributes` reads
@@ -810,9 +912,15 @@ impl XmlToArrowConverter {
         let config = &parser.inner.config;
         let max_value_bytes = config.parser_options.max_value_bytes.unwrap_or(usize::MAX);
         let mut table_builders = Vec::with_capacity(config.tables.len());
-        for (table_config, schema) in config.tables.iter().zip(&parser.inner.table_schemas) {
+        for (table_idx, (table_config, schema)) in config
+            .tables
+            .iter()
+            .zip(&parser.inner.table_schemas)
+            .enumerate()
+        {
             table_builders.push(TableBuilder::new(
                 table_config,
+                &parser.inner.link_plans[table_idx],
                 schema.clone(),
                 max_value_bytes,
             ));
@@ -823,6 +931,7 @@ impl XmlToArrowConverter {
             builder_stack: Vec::new(),
             compiled: Arc::clone(&parser.inner),
             parent_indices_buffer: Vec::new(),
+            link_values_buffer: Vec::new(),
             validate_attributes: config.parser_options.validate_attributes,
             error_on_unmatched_fields: config.parser_options.error_on_unmatched_fields,
             strip_namespaces: config.parser_options.strip_namespaces,
@@ -976,8 +1085,41 @@ impl XmlToArrowConverter {
         }
         if let Some(entry) = self.builder_stack.last() {
             let table_idx = entry.table_idx;
+
+            // Declared link values, read from the ancestors' own counters.
+            //
+            // A `parent` link takes the ancestor's *global* ordinal, which is
+            // the index the currently-open parent occurrence will receive when
+            // it finalizes — parents close after their children, so the row it
+            // names does not exist yet. That is exactly why the ordinal has to
+            // be global: it is stable against the parent arriving in a later
+            // batch, or in no batch at all under an early stop.
+            //
+            // An `index_of` link takes the ancestor's per-scope counter, which
+            // is the same value a `<level>` column carries for that path.
+            self.link_values_buffer.clear();
+            for spec in &self.compiled.link_plans[table_idx].links {
+                let ancestor = &self.table_builders[spec.ancestor_table_idx];
+                let value = match spec.kind {
+                    LinkKind::ParentId => ancestor.global_row_index,
+                    LinkKind::IndexOf => ancestor.row_index as u64,
+                };
+                self.link_values_buffer.push(value);
+            }
+            // Same ceiling as the `<level>` columns: an ordinal that wrapped
+            // would link rows to the wrong ancestor rather than fail.
+            for (value, spec) in self
+                .link_values_buffer
+                .iter()
+                .zip(&self.compiled.link_plans[table_idx].links)
+            {
+                if spec.kind == LinkKind::IndexOf && u32::try_from(*value).is_err() {
+                    return Err(self.row_index_overflow_error(spec.ancestor_table_idx));
+                }
+            }
+
             let table = &mut self.table_builders[table_idx];
-            table.end_row(&self.parent_indices_buffer)?;
+            table.end_row(&self.parent_indices_buffer, &self.link_values_buffer)?;
             // Batch-threshold check, on the only path where a row finalizes.
             // Structural tables keep `rows_in_batch == 0`, so they can never
             // trip this even with tiny thresholds.
@@ -1137,6 +1279,9 @@ struct Compiled {
     /// Whether any configured field maps to an attribute. Cached so the hot
     /// path can pick the attribute-free event loop without re-scanning config.
     needs_attrs: bool,
+    /// Per-table compiled `links:` / `row_id:`, aligned with `config.tables`.
+    /// Empty entries for tables using `levels`, which keeps that path untouched.
+    link_plans: Vec<TableLinkPlan>,
     /// Per-table output schemas (index columns + value columns), aligned with
     /// `config.tables`. Computed once here so every batch a table emits —
     /// streamed or collected — shares one `Arc<Schema>`, and so
@@ -1158,13 +1303,126 @@ impl Clone for Parser {
     }
 }
 
-/// Builds a table's output schema exactly as its batches are laid out:
-/// one non-nullable `UInt32` index column per `levels` entry (named
-/// `<level>`), followed by the configured fields in order.
-fn build_table_schema(table_config: &TableConfig) -> Schema {
-    let mut fields = Vec::with_capacity(table_config.levels.len() + table_config.fields.len());
+/// Which ancestor counter a declared link reads, resolved to a table index at
+/// compile time so row finalization is an array index rather than a search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinkKind {
+    /// The ancestor's **global** row ordinal: a join key, never reset.
+    ParentId,
+    /// The ancestor's **per-scope** row counter: a positional ordinal, and by
+    /// construction the same number a `<level>` column would carry.
+    IndexOf,
+}
+
+#[derive(Debug, Clone)]
+struct LinkSpec {
+    kind: LinkKind,
+    /// Index into `config.tables` of the ancestor whose counter this reads.
+    ancestor_table_idx: usize,
+    column_name: String,
+}
+
+/// What `links:` and `row_id:` compile to for one table.
+///
+/// Empty for every table that uses `levels` (or neither), which is what keeps
+/// the legacy path exactly as it was.
+#[derive(Debug, Clone, Default)]
+struct TableLinkPlan {
+    /// Name of this table's own key column, when it materializes one.
+    row_id_column: Option<String>,
+    links: Vec<LinkSpec>,
+}
+
+/// Resolves every table's `links:` and `row_id:` into index-based specs.
+///
+/// Runs once in `Parser::new`, after validation has established that every
+/// referenced table exists and encloses its referent — so the lookups here
+/// cannot fail and the parse never searches by name.
+fn build_link_plans(config: &Config) -> Vec<TableLinkPlan> {
+    let index_of_table = |path: &str, scope: &str| {
+        config.tables.iter().position(|t| {
+            let other = t.link_scope_path();
+            paths_equal(&other, path) && !paths_equal(&other, scope)
+        })
+    };
+
+    let mut plans: Vec<TableLinkPlan> = vec![TableLinkPlan::default(); config.tables.len()];
+
+    for (table_idx, table) in config.tables.iter().enumerate() {
+        let scope = table.link_scope_path();
+        for link in table.links.iter().flatten() {
+            let Some(column_name) = link.column_name() else {
+                continue;
+            };
+            if let Some(parent) = link.parent.as_deref() {
+                let Some(parent_idx) = config.tables.iter().position(|t| t.name == parent) else {
+                    continue;
+                };
+                plans[table_idx].links.push(LinkSpec {
+                    kind: LinkKind::ParentId,
+                    ancestor_table_idx: parent_idx,
+                    column_name,
+                });
+                // R17: a referenced table materializes its own key, so both
+                // sides of the join exist. Tables nobody references pay
+                // nothing, which is why this is driven by the links rather
+                // than switched on globally.
+                if plans[parent_idx].row_id_column.is_none() {
+                    plans[parent_idx].row_id_column =
+                        Some(default_row_id_name(&config.tables[parent_idx]));
+                }
+            } else if let Some(index_of) = link.index_of.as_deref()
+                && let Some(ancestor_idx) = index_of_table(index_of, &scope)
+            {
+                plans[table_idx].links.push(LinkSpec {
+                    kind: LinkKind::IndexOf,
+                    ancestor_table_idx: ancestor_idx,
+                    column_name,
+                });
+            }
+        }
+    }
+
+    // `row_id: false` suppresses the column even when referenced; `row_id: true`
+    // or a name forces it on for a table nobody references.
+    for (plan, table) in plans.iter_mut().zip(&config.tables) {
+        match table.row_id.as_ref() {
+            Some(RowId::Enabled(false)) => plan.row_id_column = None,
+            Some(RowId::Enabled(true)) => {
+                plan.row_id_column.get_or_insert_with(|| "_id".to_string());
+            }
+            Some(RowId::Named(name)) => plan.row_id_column = Some(name.clone()),
+            None => {}
+        }
+    }
+    plans
+}
+
+/// The default key-column name for a table: `_id`.
+fn default_row_id_name(_table: &TableConfig) -> String {
+    "_id".to_string()
+}
+
+/// Builds a table's output schema exactly as its batches are laid out: the
+/// table's own key column when it has one, then one index column per `levels`
+/// entry (named `<level>`, `UInt32`) or per declared link (`UInt64` for a
+/// parent key, `UInt32` for an ordinal), then the configured fields in order.
+fn build_table_schema(table_config: &TableConfig, plan: &TableLinkPlan) -> Schema {
+    let mut fields = Vec::with_capacity(
+        table_config.levels.len() + plan.links.len() + table_config.fields.len() + 1,
+    );
+    if let Some(row_id) = &plan.row_id_column {
+        fields.push(Field::new(row_id, DataType::UInt64, false));
+    }
     for level in &table_config.levels {
         fields.push(Field::new(format!("<{level}>"), DataType::UInt32, false));
+    }
+    for link in &plan.links {
+        let dtype = match link.kind {
+            LinkKind::ParentId => DataType::UInt64,
+            LinkKind::IndexOf => DataType::UInt32,
+        };
+        fields.push(Field::new(&link.column_name, dtype, false));
     }
     for fc in &table_config.fields {
         fields.push(Field::new(
@@ -1191,10 +1449,14 @@ impl Parser {
         // amortize across every document parsed through this `Parser`.
         let registry = PathRegistry::from_config(config);
 
+        // Links resolve to table indices once, so row finalization indexes an
+        // array instead of searching by name.
+        let link_plans = build_link_plans(config);
         let table_schemas = config
             .tables
             .iter()
-            .map(|tc| Arc::new(build_table_schema(tc)))
+            .zip(&link_plans)
+            .map(|(tc, plan)| Arc::new(build_table_schema(tc, plan)))
             .collect();
         let table_names = config
             .tables
@@ -1207,6 +1469,7 @@ impl Parser {
                 config: config.clone(),
                 registry,
                 needs_attrs: config.requires_attribute_parsing(),
+                link_plans,
                 table_schemas,
                 table_names,
             }),
@@ -8280,6 +8543,239 @@ mod tests {
         assert!(
             message.contains("/report/data/item/v"),
             "expected the resolved path in: {message}"
+        );
+    }
+
+    // --- Declared links (`links:`) --------------------------------------------
+    //
+    // The point of `parent:` is that its value is a *join key*, where a
+    // `<level>` value is only a position. The distinction is invisible until a
+    // container repeats — which is exactly what these documents do.
+
+    /// Two `<group>`s, so `stations`' per-scope counter resets and both
+    /// stations are "row 0" of their group. A positional column cannot
+    /// distinguish them; a global ordinal can. This is R18.
+    /// `<ms>` rather than hanging the measurements table off `<station>`
+    /// directly: a table boundary *on* an element puts that element's own
+    /// attributes inside the inner table's scope, which is existing behavior
+    /// (see the `attribute_child_of_table` corpus case) and unrelated to links.
+    const REPEATED_CONTAINER_XML: &str = r#"
+        <report>
+          <group>
+            <station><id>A</id><ms><m><v>1</v></m><m><v>2</v></m></ms></station>
+          </group>
+          <group>
+            <station><id>B</id><ms><m><v>3</v></m></ms></station>
+          </group>
+        </report>"#;
+
+    #[test]
+    fn parent_links_survive_a_repeating_container() {
+        let batches = parse(
+            REPEATED_CONTAINER_XML,
+            r#"
+            tables:
+              - name: stations
+                xml_path: /report/group
+                row: station
+                fields:
+                  - {name: id, path: id, data_type: Utf8}
+              - name: measurements
+                xml_path: /report/group/station/ms
+                row: m
+                links:
+                  - parent: stations
+                fields:
+                  - {name: v, path: v, data_type: Int32}
+            "#,
+        );
+
+        // R17: `stations` is referenced, so it materializes its own key.
+        let stations = batches.get("stations").unwrap();
+        assert_array_values!(stations, "_id", vec![0u64, 1], UInt64Array);
+        assert_array_values!(stations, "id", &["A", "B"], StringArray);
+
+        // The FK names the parent row globally: A's two measurements point at
+        // 0, B's at 1 — even though B is row 0 of *its* group.
+        let measurements = batches.get("measurements").unwrap();
+        assert_array_values!(measurements, "v", vec![1i32, 2, 3], Int32Array);
+        assert_array_values!(measurements, "_stations_id", vec![0u64, 0, 1], UInt64Array);
+    }
+
+    /// The contrast that motivates the phase: a positional ordinal for the same
+    /// document says "0" for both stations, so a join on it is wrong.
+    #[test]
+    fn an_index_of_ordinal_is_ambiguous_where_a_parent_key_is_not() {
+        let batches = parse(
+            REPEATED_CONTAINER_XML,
+            r#"
+            tables:
+              - name: stations
+                xml_path: /report/group
+                row: station
+                fields:
+                  - {name: id, path: id, data_type: Utf8}
+              - name: measurements
+                xml_path: /report/group/station/ms
+                row: m
+                links:
+                  - index_of: /report/group/station
+                    name: station_idx
+                fields:
+                  - {name: v, path: v, data_type: Int32}
+            "#,
+        );
+        let measurements = batches.get("measurements").unwrap();
+        // All three rows say "station 0 of my group" — true, and useless as a key.
+        assert_array_values!(measurements, "station_idx", vec![0u32, 0, 0], UInt32Array);
+    }
+
+    /// The migration promise: `index_of` must reproduce the legacy `<level>`
+    /// values exactly, so adopting `links:` changes no number.
+    #[test]
+    fn index_of_reproduces_the_legacy_level_values() {
+        let xml = r#"<report>
+             <station><m><v>1</v></m><m><v>2</v></m></station>
+             <station><m><v>3</v></m></station>
+           </report>"#;
+        let legacy = parse(
+            xml,
+            r#"
+            tables:
+              - name: stations
+                xml_path: /report
+                row: station
+                levels: []
+                fields: []
+              - name: measurements
+                xml_path: /report/station
+                row: m
+                levels: [station]
+                fields:
+                  - {name: v, path: v, data_type: Int32}
+            "#,
+        );
+        let linked = parse(
+            xml,
+            r#"
+            tables:
+              - name: stations
+                xml_path: /report
+                row: station
+                levels: []
+                fields: []
+              - name: measurements
+                xml_path: /report/station
+                row: m
+                links:
+                  - index_of: /report/station
+                    name: "<station>"
+                fields:
+                  - {name: v, path: v, data_type: Int32}
+            "#,
+        );
+        // Same column name via `name:`, so the batches must be identical —
+        // schema included, not merely the values.
+        assert_eq!(
+            legacy.get("measurements").unwrap(),
+            linked.get("measurements").unwrap()
+        );
+    }
+
+    /// R17: a table nobody references pays nothing.
+    #[test]
+    fn unreferenced_tables_get_no_key_column() {
+        let batches = parse(
+            r#"<report><station id="A"><m><v>1</v></m></station></report>"#,
+            r#"
+            tables:
+              - name: stations
+                xml_path: /report
+                row: station
+                levels: []
+                fields:
+                  - {name: id, path: "@id", data_type: Utf8}
+            "#,
+        );
+        let stations = batches.get("stations").unwrap();
+        assert!(stations.column_by_name("_id").is_none());
+        assert_eq!(stations.num_columns(), 1);
+    }
+
+    /// `row_id: false` suppresses the key even for a referenced table, for
+    /// anyone who wants the FK without the extra parent column.
+    #[test]
+    fn row_id_false_suppresses_the_key_column() {
+        let batches = parse(
+            REPEATED_CONTAINER_XML,
+            r#"
+            tables:
+              - name: stations
+                xml_path: /report/group
+                row: station
+                row_id: false
+                fields:
+                  - {name: id, path: id, data_type: Utf8}
+              - name: measurements
+                xml_path: /report/group/station/ms
+                row: m
+                links:
+                  - parent: stations
+                fields:
+                  - {name: v, path: v, data_type: Int32}
+            "#,
+        );
+        assert!(
+            batches
+                .get("stations")
+                .unwrap()
+                .column_by_name("_id")
+                .is_none()
+        );
+        // The foreign key still points at the right global ordinals.
+        assert_array_values!(
+            batches.get("measurements").unwrap(),
+            "_stations_id",
+            vec![0u64, 0, 1],
+            UInt64Array
+        );
+    }
+
+    /// A renamed key column, both sides.
+    #[test]
+    fn link_and_key_columns_can_be_renamed() {
+        let batches = parse(
+            r#"<report><station id="A"><m><v>1</v></m></station></report>"#,
+            r#"
+            tables:
+              - name: stations
+                xml_path: /report
+                row: station
+                row_id: station_key
+                levels: []
+                fields:
+                  - {name: id, path: "@id", data_type: Utf8}
+              - name: measurements
+                xml_path: /report/station
+                row: m
+                links:
+                  - parent: stations
+                    name: station_fk
+                fields:
+                  - {name: v, path: v, data_type: Int32}
+            "#,
+        );
+        assert_array_values!(
+            batches.get("stations").unwrap(),
+            "station_key",
+            vec![0u64],
+            UInt64Array
+        );
+        assert_array_values!(
+            batches.get("measurements").unwrap(),
+            "station_fk",
+            vec![0u64],
+            UInt64Array
         );
     }
 }

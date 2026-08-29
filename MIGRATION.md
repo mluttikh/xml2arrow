@@ -12,6 +12,8 @@ Everything here falls into three buckets, and only the first is mandatory:
 4. **[Optional](#4-optional-write-field-paths-relative-to-the-row)** — `path:`,
    which lets a field be written relative to the row. Pure ergonomics: both
    spellings compile to the same node.
+5. **[Optional](#5-optional-declare-links-instead-of-levels)** — `links:`,
+   replacing `levels` with declared relationships and a real join key.
 
 If you construct configs with `TableConfig::new` / `FieldConfigBuilder` and
 parse with `Parser`, the required work is **nothing** unless you *read*
@@ -322,7 +324,90 @@ form afterwards is a second, independent step.
 
 ---
 
-## 5. Deprecated, still working
+## 5. Optional: declare links instead of `levels`
+
+`levels` names *labels*. Its values come positionally from whatever ancestor
+tables happen to enclose the table, so a mismatch between the names you wrote
+and the tables that actually enclose you produces a column of plausible wrong
+numbers rather than an error.
+
+`links:` names the relationship itself:
+
+```yaml
+# before
+  - name: measurements
+    xml_path: /report/group/station/ms
+    row: m
+    levels: [station]
+
+# after
+  - name: measurements
+    xml_path: /report/group/station/ms
+    row: m
+    links:
+      - parent: stations
+```
+
+A table uses `levels` or `links`, never both.
+
+### The two kinds
+
+| Link | Column | Value | Use |
+|---|---|---|---|
+| `parent: <table>` | `_<table>_id`, `UInt64` | the parent's **global** row ordinal, never reset | a real join key |
+| `index_of: <path>` | `<element>_idx`, `UInt32` | per-scope ordinal | positional only — **identical to the legacy `<level>` value** |
+
+`index_of` exists so adopting `links:` need not change a single number. Only
+the column name moves (`<station>` → `station_idx`), and `name:` can keep even
+that identical.
+
+### Why `parent:` is worth the value change
+
+The difference only shows up when a container repeats:
+
+```xml
+<report>
+  <group><station><id>A</id><ms><m>…</m><m>…</m></ms></station></group>
+  <group><station><id>B</id><ms><m>…</m></ms></station></group>
+</report>
+```
+
+| column | values | meaning |
+|---|---|---|
+| `station_idx` (or legacy `<station>`) | `0, 0, 0` | "first station of my group" — true for both A and B |
+| `_stations_id` | `0, 0, 1` | station A, station A, station B |
+
+A join on the positional column silently attributes B's measurement to A. The
+`parent:` key does not, because it is a global ordinal.
+
+### `_id` on the parent
+
+A table referenced by a `parent:` link automatically materializes `_id`
+(`UInt64`, non-null), so both sides of the join exist. Tables nobody references
+gain nothing. Override per table with `row_id: my_name` or `row_id: false`.
+
+### Rules
+
+- The parent's rows must **enclose** the child's, checked by name at load time —
+  the misalignment `levels` could express is rejected rather than parsed.
+- `index_of:` must name an enclosing **table's** row element, since it reads
+  that table's existing counter.
+- A link column that would collide with a field name is an error, not a silent
+  shadow.
+- **Streaming note:** a parent row finalizes *after* its children, so a child
+  batch can reference a parent row that arrives in a later batch. The foreign
+  key is still correct — that is what "global" buys — but consumers that join
+  incrementally need to buffer or join at the end.
+
+### `levels` may now be omitted
+
+`levels:` is no longer a required key, so a table that declares `links:` (or
+needs no parent columns) simply leaves it out. Existing configs that state it
+are unaffected.
+
+---
+
+## 6. Deprecated, still working
 
 All three keep working until 1.0.
 
@@ -339,7 +424,7 @@ parse many" design — measurably faster for anything beyond a single document.
 
 ---
 
-## 6. New, purely additive
+## 7. New, purely additive
 
 Nothing below requires action.
 
