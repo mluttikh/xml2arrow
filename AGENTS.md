@@ -244,5 +244,12 @@ Code is a document for human logic verification:
   `docs:`, `chore:`.
 - Keep commits source-focused: no unrelated `Cargo.lock` churn, no editor or
   AI-tool artifacts, and no `Co-Authored-By` trailers.
+- **Do not cite planning documents** — not in commit messages, not in code
+  comments, not in rustdoc. Design notes, roadmaps and review write-ups live
+  outside the repository, so a reference to one (`see TRANSITION_PLAN.md`,
+  `R15`, `IMPROVEMENTS.md SF-5`) is a pointer the reader cannot follow. State
+  the reasoning instead: *"the parent's rows must contain this table's"* rather
+  than *"R15"*. A change should stand on its own terms — "declare links between
+  tables, with real join keys" needs no document to be understood.
 - Never commit directly to `main`; work on a branch and let CI (fmt, clippy,
   tests on Linux/macOS/Windows, CodSpeed) pass before merge.
