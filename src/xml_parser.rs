@@ -155,9 +155,19 @@ struct ResolvedPolicy {
     on_missing: OnMissing,
     on_invalid: OnInvalid,
     on_repeat: OnRepeat,
-    /// Literal values that count as missing. Empty in almost every config, and
-    /// checked with `is_empty()` first so those configs pay one length read.
-    null_values: Vec<String>,
+    /// Literal values that count as missing.
+    ///
+    /// A thin `Option<Box<Vec<_>>>` rather than a `Vec`, because it is `None`
+    /// in every config that does not set the key — and this struct sits inside
+    /// `FieldMeta` inside `FieldBuilder`, which `save_row` walks once per row.
+    /// A `Vec` spends 24 bytes of every field builder describing a list that
+    /// almost never exists, and `Box<[_]>` is a fat pointer costing 16; this is
+    /// 8, null-pointer-optimized to the same check.
+    #[allow(
+        clippy::box_collection,
+        reason = "the extra indirection is the point: this field is measured by                   its inline size, not its heap layout. A Vec costs 24 bytes of                   every FieldBuilder — which save_row walks per row — to                   describe a list that is absent in almost every config. The                   allocation it warns about only happens for configs that set                   null_values at all."
+    )]
+    null_values: Option<Box<Vec<String>>>,
 }
 
 impl ResolvedPolicy {
@@ -185,7 +195,10 @@ impl ResolvedPolicy {
             }),
             on_invalid: policies.on_invalid.unwrap_or(OnInvalid::Error),
             on_repeat: policies.on_repeat.unwrap_or(OnRepeat::Error),
-            null_values: policies.null_values.unwrap_or_default(),
+            null_values: policies
+                .null_values
+                .filter(|values| !values.is_empty())
+                .map(Box::new),
         }
     }
 
@@ -197,9 +210,9 @@ impl ResolvedPolicy {
         if value.is_empty() {
             return None;
         }
-        if !self.null_values.is_empty()
+        if let Some(null_values) = &self.null_values
             && let Ok(text) = std::str::from_utf8(value)
-            && self.null_values.iter().any(|nv| nv == text)
+            && null_values.iter().any(|nv| nv == text)
         {
             return None;
         }
@@ -9321,5 +9334,27 @@ mod tests {
         let batch = batches.get("t").unwrap();
         assert_array_values!(batch, "a", &["x"], StringArray);
         assert_array_values!(batch, "b", &[" y "], StringArray);
+    }
+
+    /// `save_row` walks `field_builders` once per finalized row, so a
+    /// `FieldBuilder`'s size is a per-row cache cost — and it grows silently,
+    /// because adding a field to a struct reads as free.
+    ///
+    /// Per-field value policies first cost 24 bytes here by storing an
+    /// `Option<Vec<String>>` of null literals inline: 24 bytes in every field
+    /// builder to describe a list that is absent in almost every config.
+    /// Boxing it behind a thin pointer took the growth from +24 to +8.
+    ///
+    /// The numbers are not sacred; the review is. If a change moves them, say
+    /// in the commit message what bought the bytes.
+    #[test]
+    fn value_path_structs_stay_small() {
+        assert_eq!(
+            std::mem::size_of::<ResolvedPolicy>(),
+            16,
+            "policies live inside every FieldBuilder; see this test's comment"
+        );
+        assert_eq!(std::mem::size_of::<FieldMeta>(), 96);
+        assert_eq!(std::mem::size_of::<FieldBuilder>(), 248);
     }
 }
