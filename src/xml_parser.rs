@@ -920,7 +920,7 @@ impl XmlToArrowConverter {
         {
             table_builders.push(TableBuilder::new(
                 table_config,
-                &parser.inner.link_plans[table_idx],
+                link_plan(&parser.inner.link_plans, table_idx),
                 schema.clone(),
                 max_value_bytes,
             ));
@@ -1107,7 +1107,7 @@ impl XmlToArrowConverter {
             // pass for the same reason.
             self.link_values_buffer.clear();
             if !self.table_builders[table_idx].link_builders.is_empty() {
-                for spec in &self.compiled.link_plans[table_idx].links {
+                for spec in &link_plan(&self.compiled.link_plans, table_idx).links {
                     let ancestor = &self.table_builders[spec.ancestor_table_idx];
                     let value = match spec.kind {
                         LinkKind::ParentId => ancestor.global_row_index,
@@ -1340,12 +1340,38 @@ struct TableLinkPlan {
     links: Vec<LinkSpec>,
 }
 
+/// The plan every table gets when the configuration declares no links at all.
+/// A `static` so `link_plan()` can hand out a reference without allocating.
+static EMPTY_LINK_PLAN: TableLinkPlan = TableLinkPlan {
+    row_id_column: None,
+    links: Vec::new(),
+};
+
+/// The compiled plan for one table, or the shared empty one when the
+/// configuration declared no links.
+fn link_plan(plans: &[TableLinkPlan], table_idx: usize) -> &TableLinkPlan {
+    plans.get(table_idx).unwrap_or(&EMPTY_LINK_PLAN)
+}
+
 /// Resolves every table's `links:` and `row_id:` into index-based specs.
 ///
 /// Runs once in `Parser::new`, after validation has established that every
 /// referenced table exists and encloses its referent — so the lookups here
 /// cannot fail and the parse never searches by name.
 fn build_link_plans(config: &Config) -> Vec<TableLinkPlan> {
+    // Empty when nothing declares links or a key column — which is every
+    // configuration written before this release. Returning no plans at all,
+    // rather than one default per table, keeps `Parser::new` from allocating
+    // for a feature the config does not use; `link_plan()` serves a shared
+    // default to the callers that index it.
+    if config
+        .tables
+        .iter()
+        .all(|t| t.links.is_none() && t.row_id.is_none())
+    {
+        return Vec::new();
+    }
+
     let index_of_table = |path: &str, scope: &str| {
         config.tables.iter().position(|t| {
             let other = t.link_scope_path();
@@ -1415,8 +1441,15 @@ fn default_row_id_name(_table: &TableConfig) -> String {
 /// entry (named `<level>`, `UInt32`) or per declared link (`UInt64` for a
 /// parent key, `UInt32` for an ordinal), then the configured fields in order.
 fn build_table_schema(table_config: &TableConfig, plan: &TableLinkPlan) -> Schema {
+    // Exact, not `+ 1` for a key column most tables do not have: an
+    // over-allocated `Vec` leaves `len != capacity`, and this runs once per
+    // table per `Parser::new`, whose fixed cost is the whole parse for a small
+    // document.
     let mut fields = Vec::with_capacity(
-        table_config.levels.len() + plan.links.len() + table_config.fields.len() + 1,
+        usize::from(plan.row_id_column.is_some())
+            + table_config.levels.len()
+            + plan.links.len()
+            + table_config.fields.len(),
     );
     if let Some(row_id) = &plan.row_id_column {
         fields.push(Field::new(row_id, DataType::UInt64, false));
@@ -1462,8 +1495,8 @@ impl Parser {
         let table_schemas = config
             .tables
             .iter()
-            .zip(&link_plans)
-            .map(|(tc, plan)| Arc::new(build_table_schema(tc, plan)))
+            .enumerate()
+            .map(|(idx, tc)| Arc::new(build_table_schema(tc, link_plan(&link_plans, idx))))
             .collect();
         let table_names = config
             .tables
@@ -8784,5 +8817,56 @@ mod tests {
             vec![0u64],
             UInt64Array
         );
+    }
+
+    /// `Parser::new`'s fixed cost is the whole parse for a small document, so a
+    /// feature nobody used must allocate nothing. A config without `links:` or
+    /// `row_id:` compiles to *no* plans at all — not one empty plan per table —
+    /// and `link_plan()` hands those tables a shared static.
+    ///
+    /// Guarded because the natural way to write this code allocates a `Vec` of
+    /// per-table defaults, which is what the first version did.
+    #[test]
+    fn a_config_without_links_compiles_to_no_link_plans() {
+        let config = config_from_yaml!(
+            r#"
+            tables:
+              - name: outer
+                xml_path: /report
+                levels: []
+                fields:
+                  - {name: a, xml_path: /report/item/a, data_type: Utf8}
+              - name: inner
+                xml_path: /report/item
+                levels: [item]
+                fields:
+                  - {name: b, xml_path: /report/item/sub/b, data_type: Utf8}
+            "#
+        );
+        let parser = Parser::new(&config).unwrap();
+        assert!(parser.inner.link_plans.is_empty());
+        // And the tables still get a usable plan through the accessor.
+        assert!(link_plan(&parser.inner.link_plans, 1).links.is_empty());
+    }
+
+    /// The schema `Vec` is sized exactly: an over-allocation leaves
+    /// `len != capacity` for every table, on a path that runs once per table
+    /// per `Parser::new`.
+    #[test]
+    fn table_schemas_are_sized_exactly() {
+        let config = config_from_yaml!(
+            r#"
+            tables:
+              - name: t
+                xml_path: /report
+                levels: [a, b]
+                fields:
+                  - {name: v, xml_path: /report/item/v, data_type: Int32}
+                  - {name: w, xml_path: /report/item/w, data_type: Int32}
+            "#
+        );
+        let schema = build_table_schema(&config.tables[0], &EMPTY_LINK_PLAN);
+        // 2 levels + 2 fields, no key column.
+        assert_eq!(schema.fields().len(), 4);
     }
 }
