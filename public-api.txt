@@ -1,0 +1,831 @@
+pub mod xml2arrow
+pub mod xml2arrow::config
+#[non_exhaustive] pub enum xml2arrow::config::DType
+pub xml2arrow::config::DType::Boolean
+pub xml2arrow::config::DType::Float32
+pub xml2arrow::config::DType::Float64
+pub xml2arrow::config::DType::Int16
+pub xml2arrow::config::DType::Int32
+pub xml2arrow::config::DType::Int64
+pub xml2arrow::config::DType::Int8
+pub xml2arrow::config::DType::UInt16
+pub xml2arrow::config::DType::UInt32
+pub xml2arrow::config::DType::UInt64
+pub xml2arrow::config::DType::UInt8
+pub xml2arrow::config::DType::Utf8
+impl core::clone::Clone for xml2arrow::config::DType
+pub fn xml2arrow::config::DType::clone(&self) -> xml2arrow::config::DType
+impl core::cmp::Eq for xml2arrow::config::DType
+impl core::cmp::PartialEq for xml2arrow::config::DType
+pub fn xml2arrow::config::DType::eq(&self, &xml2arrow::config::DType) -> bool
+impl core::default::Default for xml2arrow::config::DType
+pub fn xml2arrow::config::DType::default() -> xml2arrow::config::DType
+impl core::fmt::Debug for xml2arrow::config::DType
+pub fn xml2arrow::config::DType::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xml2arrow::config::DType
+impl core::marker::StructuralPartialEq for xml2arrow::config::DType
+impl serde_core::ser::Serialize for xml2arrow::config::DType
+pub fn xml2arrow::config::DType::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for xml2arrow::config::DType
+pub fn xml2arrow::config::DType::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for xml2arrow::config::DType
+impl core::marker::Send for xml2arrow::config::DType
+impl core::marker::Sync for xml2arrow::config::DType
+impl core::marker::Unpin for xml2arrow::config::DType
+impl core::marker::UnsafeUnpin for xml2arrow::config::DType
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::DType
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::DType
+#[non_exhaustive] pub struct xml2arrow::config::Config
+pub xml2arrow::config::Config::parser_options: xml2arrow::config::ParserOptions
+pub xml2arrow::config::Config::tables: alloc::vec::Vec<xml2arrow::config::TableConfig>
+impl xml2arrow::config::Config
+pub fn xml2arrow::config::Config::builder() -> xml2arrow::config::ConfigBuilder
+pub fn xml2arrow::config::Config::from_yaml_file(impl core::convert::AsRef<std::path::Path>) -> xml2arrow::errors::Result<Self>
+pub fn xml2arrow::config::Config::requires_attribute_parsing(&self) -> bool
+pub fn xml2arrow::config::Config::to_yaml_file(&self, impl core::convert::AsRef<std::path::Path>) -> xml2arrow::errors::Result<()>
+pub fn xml2arrow::config::Config::validate(&self) -> xml2arrow::errors::Result<()>
+impl xml2arrow::config::Config
+pub fn xml2arrow::config::Config::lint(&self) -> alloc::vec::Vec<xml2arrow::lint::Lint>
+impl core::clone::Clone for xml2arrow::config::Config
+pub fn xml2arrow::config::Config::clone(&self) -> xml2arrow::config::Config
+impl core::cmp::PartialEq for xml2arrow::config::Config
+pub fn xml2arrow::config::Config::eq(&self, &xml2arrow::config::Config) -> bool
+impl core::fmt::Debug for xml2arrow::config::Config
+pub fn xml2arrow::config::Config::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for xml2arrow::config::Config
+impl serde_core::ser::Serialize for xml2arrow::config::Config
+pub fn xml2arrow::config::Config::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for xml2arrow::config::Config
+pub fn xml2arrow::config::Config::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for xml2arrow::config::Config
+impl core::marker::Send for xml2arrow::config::Config
+impl core::marker::Sync for xml2arrow::config::Config
+impl core::marker::Unpin for xml2arrow::config::Config
+impl core::marker::UnsafeUnpin for xml2arrow::config::Config
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::Config
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::Config
+pub struct xml2arrow::config::ConfigBuilder
+impl xml2arrow::config::ConfigBuilder
+pub fn xml2arrow::config::ConfigBuilder::build(self) -> xml2arrow::errors::Result<xml2arrow::config::Config>
+pub fn xml2arrow::config::ConfigBuilder::parser_options(self, xml2arrow::config::ParserOptions) -> Self
+pub fn xml2arrow::config::ConfigBuilder::table(self, xml2arrow::config::TableConfig) -> Self
+pub fn xml2arrow::config::ConfigBuilder::tables(self, impl core::iter::traits::collect::IntoIterator<Item = xml2arrow::config::TableConfig>) -> Self
+impl core::default::Default for xml2arrow::config::ConfigBuilder
+pub fn xml2arrow::config::ConfigBuilder::default() -> xml2arrow::config::ConfigBuilder
+impl core::fmt::Debug for xml2arrow::config::ConfigBuilder
+pub fn xml2arrow::config::ConfigBuilder::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for xml2arrow::config::ConfigBuilder
+impl core::marker::Send for xml2arrow::config::ConfigBuilder
+impl core::marker::Sync for xml2arrow::config::ConfigBuilder
+impl core::marker::Unpin for xml2arrow::config::ConfigBuilder
+impl core::marker::UnsafeUnpin for xml2arrow::config::ConfigBuilder
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::ConfigBuilder
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::ConfigBuilder
+#[non_exhaustive] pub struct xml2arrow::config::FieldConfig
+pub xml2arrow::config::FieldConfig::data_type: xml2arrow::config::DType
+pub xml2arrow::config::FieldConfig::name: alloc::string::String
+pub xml2arrow::config::FieldConfig::nullable: bool
+pub xml2arrow::config::FieldConfig::offset: core::option::Option<f64>
+pub xml2arrow::config::FieldConfig::scale: core::option::Option<f64>
+pub xml2arrow::config::FieldConfig::xml_path: alloc::string::String
+impl xml2arrow::config::FieldConfig
+pub fn xml2arrow::config::FieldConfig::validate(&self) -> xml2arrow::errors::Result<()>
+impl core::clone::Clone for xml2arrow::config::FieldConfig
+pub fn xml2arrow::config::FieldConfig::clone(&self) -> xml2arrow::config::FieldConfig
+impl core::cmp::PartialEq for xml2arrow::config::FieldConfig
+pub fn xml2arrow::config::FieldConfig::eq(&self, &xml2arrow::config::FieldConfig) -> bool
+impl core::fmt::Debug for xml2arrow::config::FieldConfig
+pub fn xml2arrow::config::FieldConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for xml2arrow::config::FieldConfig
+impl serde_core::ser::Serialize for xml2arrow::config::FieldConfig
+pub fn xml2arrow::config::FieldConfig::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for xml2arrow::config::FieldConfig
+pub fn xml2arrow::config::FieldConfig::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for xml2arrow::config::FieldConfig
+impl core::marker::Send for xml2arrow::config::FieldConfig
+impl core::marker::Sync for xml2arrow::config::FieldConfig
+impl core::marker::Unpin for xml2arrow::config::FieldConfig
+impl core::marker::UnsafeUnpin for xml2arrow::config::FieldConfig
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::FieldConfig
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::FieldConfig
+pub struct xml2arrow::config::FieldConfigBuilder
+impl xml2arrow::config::FieldConfigBuilder
+pub fn xml2arrow::config::FieldConfigBuilder::build(self) -> xml2arrow::errors::Result<xml2arrow::config::FieldConfig>
+pub fn xml2arrow::config::FieldConfigBuilder::new(&str, &str, xml2arrow::config::DType) -> Self
+pub fn xml2arrow::config::FieldConfigBuilder::nullable(self, bool) -> Self
+pub fn xml2arrow::config::FieldConfigBuilder::offset(self, f64) -> Self
+pub fn xml2arrow::config::FieldConfigBuilder::scale(self, f64) -> Self
+impl core::default::Default for xml2arrow::config::FieldConfigBuilder
+pub fn xml2arrow::config::FieldConfigBuilder::default() -> xml2arrow::config::FieldConfigBuilder
+impl core::marker::Freeze for xml2arrow::config::FieldConfigBuilder
+impl core::marker::Send for xml2arrow::config::FieldConfigBuilder
+impl core::marker::Sync for xml2arrow::config::FieldConfigBuilder
+impl core::marker::Unpin for xml2arrow::config::FieldConfigBuilder
+impl core::marker::UnsafeUnpin for xml2arrow::config::FieldConfigBuilder
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::FieldConfigBuilder
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::FieldConfigBuilder
+#[non_exhaustive] pub struct xml2arrow::config::ParserOptions
+pub xml2arrow::config::ParserOptions::allow_truncated_input: bool
+pub xml2arrow::config::ParserOptions::error_on_unmatched_fields: bool
+pub xml2arrow::config::ParserOptions::max_value_bytes: core::option::Option<usize>
+pub xml2arrow::config::ParserOptions::stop_at_paths: alloc::vec::Vec<alloc::string::String>
+pub xml2arrow::config::ParserOptions::strip_namespaces: bool
+pub xml2arrow::config::ParserOptions::trim_text: bool
+pub xml2arrow::config::ParserOptions::validate_attributes: bool
+pub xml2arrow::config::ParserOptions::validate_closing_tags: bool
+impl core::clone::Clone for xml2arrow::config::ParserOptions
+pub fn xml2arrow::config::ParserOptions::clone(&self) -> xml2arrow::config::ParserOptions
+impl core::cmp::PartialEq for xml2arrow::config::ParserOptions
+pub fn xml2arrow::config::ParserOptions::eq(&self, &xml2arrow::config::ParserOptions) -> bool
+impl core::default::Default for xml2arrow::config::ParserOptions
+pub fn xml2arrow::config::ParserOptions::default() -> Self
+impl core::fmt::Debug for xml2arrow::config::ParserOptions
+pub fn xml2arrow::config::ParserOptions::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for xml2arrow::config::ParserOptions
+impl serde_core::ser::Serialize for xml2arrow::config::ParserOptions
+pub fn xml2arrow::config::ParserOptions::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for xml2arrow::config::ParserOptions
+pub fn xml2arrow::config::ParserOptions::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for xml2arrow::config::ParserOptions
+impl core::marker::Send for xml2arrow::config::ParserOptions
+impl core::marker::Sync for xml2arrow::config::ParserOptions
+impl core::marker::Unpin for xml2arrow::config::ParserOptions
+impl core::marker::UnsafeUnpin for xml2arrow::config::ParserOptions
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::ParserOptions
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::ParserOptions
+#[non_exhaustive] pub struct xml2arrow::config::TableConfig
+pub xml2arrow::config::TableConfig::fields: alloc::vec::Vec<xml2arrow::config::FieldConfig>
+pub xml2arrow::config::TableConfig::levels: alloc::vec::Vec<alloc::string::String>
+pub xml2arrow::config::TableConfig::name: alloc::string::String
+pub xml2arrow::config::TableConfig::row: core::option::Option<alloc::string::String>
+pub xml2arrow::config::TableConfig::xml_path: alloc::string::String
+impl xml2arrow::config::TableConfig
+pub fn xml2arrow::config::TableConfig::builder(&str, &str) -> xml2arrow::config::TableConfigBuilder
+pub fn xml2arrow::config::TableConfig::new(&str, &str, alloc::vec::Vec<alloc::string::String>, alloc::vec::Vec<xml2arrow::config::FieldConfig>) -> Self
+impl core::clone::Clone for xml2arrow::config::TableConfig
+pub fn xml2arrow::config::TableConfig::clone(&self) -> xml2arrow::config::TableConfig
+impl core::cmp::PartialEq for xml2arrow::config::TableConfig
+pub fn xml2arrow::config::TableConfig::eq(&self, &xml2arrow::config::TableConfig) -> bool
+impl core::fmt::Debug for xml2arrow::config::TableConfig
+pub fn xml2arrow::config::TableConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for xml2arrow::config::TableConfig
+impl serde_core::ser::Serialize for xml2arrow::config::TableConfig
+pub fn xml2arrow::config::TableConfig::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for xml2arrow::config::TableConfig
+pub fn xml2arrow::config::TableConfig::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for xml2arrow::config::TableConfig
+impl core::marker::Send for xml2arrow::config::TableConfig
+impl core::marker::Sync for xml2arrow::config::TableConfig
+impl core::marker::Unpin for xml2arrow::config::TableConfig
+impl core::marker::UnsafeUnpin for xml2arrow::config::TableConfig
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::TableConfig
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::TableConfig
+pub struct xml2arrow::config::TableConfigBuilder
+impl xml2arrow::config::TableConfigBuilder
+pub fn xml2arrow::config::TableConfigBuilder::build(self) -> xml2arrow::config::TableConfig
+pub fn xml2arrow::config::TableConfigBuilder::field(self, xml2arrow::config::FieldConfig) -> Self
+pub fn xml2arrow::config::TableConfigBuilder::fields(self, impl core::iter::traits::collect::IntoIterator<Item = xml2arrow::config::FieldConfig>) -> Self
+pub fn xml2arrow::config::TableConfigBuilder::level(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn xml2arrow::config::TableConfigBuilder::levels(self, impl core::iter::traits::collect::IntoIterator<Item = impl core::convert::Into<alloc::string::String>>) -> Self
+pub fn xml2arrow::config::TableConfigBuilder::row(self, impl core::convert::Into<alloc::string::String>) -> Self
+impl core::fmt::Debug for xml2arrow::config::TableConfigBuilder
+pub fn xml2arrow::config::TableConfigBuilder::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for xml2arrow::config::TableConfigBuilder
+impl core::marker::Send for xml2arrow::config::TableConfigBuilder
+impl core::marker::Sync for xml2arrow::config::TableConfigBuilder
+impl core::marker::Unpin for xml2arrow::config::TableConfigBuilder
+impl core::marker::UnsafeUnpin for xml2arrow::config::TableConfigBuilder
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::TableConfigBuilder
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::TableConfigBuilder
+pub mod xml2arrow::errors
+#[non_exhaustive] pub enum xml2arrow::errors::ConfigIssue
+pub xml2arrow::errors::ConfigIssue::DuplicateFieldName
+pub xml2arrow::errors::ConfigIssue::DuplicateFieldName::field: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::DuplicateFieldName::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::DuplicateTableName
+pub xml2arrow::errors::ConfigIssue::DuplicateTableName::name: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::DuplicateTableXmlPath
+pub xml2arrow::errors::ConfigIssue::DuplicateTableXmlPath::table_a: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::DuplicateTableXmlPath::table_b: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::DuplicateTableXmlPath::xml_path: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::EmptyFieldName
+pub xml2arrow::errors::ConfigIssue::EmptyFieldName::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::EmptyFieldXmlPath
+pub xml2arrow::errors::ConfigIssue::EmptyFieldXmlPath::field: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::EmptyFieldXmlPath::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::EmptyRowPath
+pub xml2arrow::errors::ConfigIssue::EmptyRowPath::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::EmptyTableName
+pub xml2arrow::errors::ConfigIssue::EmptyTableXmlPath
+pub xml2arrow::errors::ConfigIssue::EmptyTableXmlPath::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::FieldPathNotUnderTable
+pub xml2arrow::errors::ConfigIssue::FieldPathNotUnderTable::field: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::FieldPathNotUnderTable::field_path: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::FieldPathNotUnderTable::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::FieldPathNotUnderTable::table_path: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::RowIsRootTable
+pub xml2arrow::errors::ConfigIssue::RowIsRootTable::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::RowPathCrossesTable
+pub xml2arrow::errors::ConfigIssue::RowPathCrossesTable::nested_table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::RowPathCrossesTable::nested_table_path: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::RowPathCrossesTable::row_path: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::RowPathCrossesTable::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::RowPathNotUnderTable
+pub xml2arrow::errors::ConfigIssue::RowPathNotUnderTable::row: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::RowPathNotUnderTable::row_path: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::RowPathNotUnderTable::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::RowPathNotUnderTable::table_path: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::SingleTableRequired
+pub xml2arrow::errors::ConfigIssue::SingleTableRequired::output_tables: usize
+impl core::fmt::Debug for xml2arrow::errors::ConfigIssue
+pub fn xml2arrow::errors::ConfigIssue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for xml2arrow::errors::ConfigIssue
+pub fn xml2arrow::errors::ConfigIssue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for xml2arrow::errors::ConfigIssue
+impl core::marker::Send for xml2arrow::errors::ConfigIssue
+impl core::marker::Sync for xml2arrow::errors::ConfigIssue
+impl core::marker::Unpin for xml2arrow::errors::ConfigIssue
+impl core::marker::UnsafeUnpin for xml2arrow::errors::ConfigIssue
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::errors::ConfigIssue
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::errors::ConfigIssue
+#[non_exhaustive] pub enum xml2arrow::errors::ConversionKind
+pub xml2arrow::errors::ConversionKind::Offset
+pub xml2arrow::errors::ConversionKind::Scaling
+impl core::fmt::Debug for xml2arrow::errors::ConversionKind
+pub fn xml2arrow::errors::ConversionKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for xml2arrow::errors::ConversionKind
+impl core::marker::Send for xml2arrow::errors::ConversionKind
+impl core::marker::Sync for xml2arrow::errors::ConversionKind
+impl core::marker::Unpin for xml2arrow::errors::ConversionKind
+impl core::marker::UnsafeUnpin for xml2arrow::errors::ConversionKind
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::errors::ConversionKind
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::errors::ConversionKind
+#[non_exhaustive] pub enum xml2arrow::errors::Error
+pub xml2arrow::errors::Error::Arrow(arrow_schema::error::ArrowError)
+pub xml2arrow::errors::Error::InvalidConfig
+pub xml2arrow::errors::Error::InvalidConfig::reason: xml2arrow::errors::ConfigIssue
+pub xml2arrow::errors::Error::Io(std::io::error::Error)
+pub xml2arrow::errors::Error::MissingRequiredField
+pub xml2arrow::errors::Error::MissingRequiredField::field: alloc::sync::Arc<str>
+pub xml2arrow::errors::Error::MissingRequiredField::location: alloc::boxed::Box<xml2arrow::errors::ErrorLocation>
+pub xml2arrow::errors::Error::MissingRequiredField::path: alloc::sync::Arc<str>
+pub xml2arrow::errors::Error::ParseError
+pub xml2arrow::errors::Error::ParseError::field: alloc::sync::Arc<str>
+pub xml2arrow::errors::Error::ParseError::kind: xml2arrow::errors::ParseKind
+pub xml2arrow::errors::Error::ParseError::location: alloc::boxed::Box<xml2arrow::errors::ErrorLocation>
+pub xml2arrow::errors::Error::ParseError::path: alloc::sync::Arc<str>
+pub xml2arrow::errors::Error::ParseError::value: alloc::string::String
+pub xml2arrow::errors::Error::RowIndexOverflow
+pub xml2arrow::errors::Error::RowIndexOverflow::table: alloc::sync::Arc<str>
+pub xml2arrow::errors::Error::TruncatedInput
+pub xml2arrow::errors::Error::TruncatedInput::open_elements: usize
+pub xml2arrow::errors::Error::UnmatchedFields
+pub xml2arrow::errors::Error::UnmatchedFields::fields: alloc::vec::Vec<xml2arrow::errors::UnmatchedField>
+pub xml2arrow::errors::Error::UnmatchedFields::stop_paths_configured: bool
+pub xml2arrow::errors::Error::UnsupportedConversion
+pub xml2arrow::errors::Error::UnsupportedConversion::conversion: xml2arrow::errors::ConversionKind
+pub xml2arrow::errors::Error::UnsupportedConversion::data_type: alloc::string::String
+pub xml2arrow::errors::Error::Utf8Error(core::str::error::Utf8Error)
+pub xml2arrow::errors::Error::ValueTooLarge
+pub xml2arrow::errors::Error::ValueTooLarge::field: alloc::sync::Arc<str>
+pub xml2arrow::errors::Error::ValueTooLarge::limit: usize
+pub xml2arrow::errors::Error::ValueTooLarge::location: alloc::boxed::Box<xml2arrow::errors::ErrorLocation>
+pub xml2arrow::errors::Error::ValueTooLarge::path: alloc::sync::Arc<str>
+pub xml2arrow::errors::Error::XmlParseAttr(quick_xml::events::attributes::AttrError)
+pub xml2arrow::errors::Error::XmlParseEncoding(quick_xml::encoding::EncodingError)
+pub xml2arrow::errors::Error::XmlParsing(quick_xml::errors::Error)
+pub xml2arrow::errors::Error::Yaml(yaml_serde::error::Error)
+impl core::convert::From<arrow_schema::error::ArrowError> for xml2arrow::errors::Error
+pub fn xml2arrow::errors::Error::from(arrow_schema::error::ArrowError) -> Self
+impl core::convert::From<core::str::error::Utf8Error> for xml2arrow::errors::Error
+pub fn xml2arrow::errors::Error::from(core::str::error::Utf8Error) -> Self
+impl core::convert::From<quick_xml::encoding::EncodingError> for xml2arrow::errors::Error
+pub fn xml2arrow::errors::Error::from(quick_xml::encoding::EncodingError) -> Self
+impl core::convert::From<quick_xml::errors::Error> for xml2arrow::errors::Error
+pub fn xml2arrow::errors::Error::from(quick_xml::errors::Error) -> Self
+impl core::convert::From<quick_xml::events::attributes::AttrError> for xml2arrow::errors::Error
+pub fn xml2arrow::errors::Error::from(quick_xml::events::attributes::AttrError) -> Self
+impl core::convert::From<std::io::error::Error> for xml2arrow::errors::Error
+pub fn xml2arrow::errors::Error::from(std::io::error::Error) -> Self
+impl core::convert::From<yaml_serde::error::Error> for xml2arrow::errors::Error
+pub fn xml2arrow::errors::Error::from(yaml_serde::error::Error) -> Self
+impl core::error::Error for xml2arrow::errors::Error
+pub fn xml2arrow::errors::Error::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for xml2arrow::errors::Error
+pub fn xml2arrow::errors::Error::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for xml2arrow::errors::Error
+pub fn xml2arrow::errors::Error::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for xml2arrow::errors::Error
+impl core::marker::Send for xml2arrow::errors::Error
+impl core::marker::Sync for xml2arrow::errors::Error
+impl core::marker::Unpin for xml2arrow::errors::Error
+impl core::marker::UnsafeUnpin for xml2arrow::errors::Error
+impl !core::panic::unwind_safe::RefUnwindSafe for xml2arrow::errors::Error
+impl !core::panic::unwind_safe::UnwindSafe for xml2arrow::errors::Error
+#[non_exhaustive] pub enum xml2arrow::errors::ParseKind
+pub xml2arrow::errors::ParseKind::DuplicateValue
+pub xml2arrow::errors::ParseKind::InvalidBoolean
+pub xml2arrow::errors::ParseKind::InvalidNumber
+pub xml2arrow::errors::ParseKind::InvalidNumber::reason: alloc::string::String
+pub xml2arrow::errors::ParseKind::InvalidNumber::type_name: &'static str
+pub xml2arrow::errors::ParseKind::UnresolvedEntity
+impl core::fmt::Debug for xml2arrow::errors::ParseKind
+pub fn xml2arrow::errors::ParseKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for xml2arrow::errors::ParseKind
+impl core::marker::Send for xml2arrow::errors::ParseKind
+impl core::marker::Sync for xml2arrow::errors::ParseKind
+impl core::marker::Unpin for xml2arrow::errors::ParseKind
+impl core::marker::UnsafeUnpin for xml2arrow::errors::ParseKind
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::errors::ParseKind
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::errors::ParseKind
+pub struct xml2arrow::errors::ErrorLocation
+pub xml2arrow::errors::ErrorLocation::position: core::option::Option<u64>
+pub xml2arrow::errors::ErrorLocation::row: core::option::Option<usize>
+impl core::clone::Clone for xml2arrow::errors::ErrorLocation
+pub fn xml2arrow::errors::ErrorLocation::clone(&self) -> xml2arrow::errors::ErrorLocation
+impl core::cmp::Eq for xml2arrow::errors::ErrorLocation
+impl core::cmp::PartialEq for xml2arrow::errors::ErrorLocation
+pub fn xml2arrow::errors::ErrorLocation::eq(&self, &xml2arrow::errors::ErrorLocation) -> bool
+impl core::default::Default for xml2arrow::errors::ErrorLocation
+pub fn xml2arrow::errors::ErrorLocation::default() -> xml2arrow::errors::ErrorLocation
+impl core::fmt::Debug for xml2arrow::errors::ErrorLocation
+pub fn xml2arrow::errors::ErrorLocation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for xml2arrow::errors::ErrorLocation
+impl core::marker::Freeze for xml2arrow::errors::ErrorLocation
+impl core::marker::Send for xml2arrow::errors::ErrorLocation
+impl core::marker::Sync for xml2arrow::errors::ErrorLocation
+impl core::marker::Unpin for xml2arrow::errors::ErrorLocation
+impl core::marker::UnsafeUnpin for xml2arrow::errors::ErrorLocation
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::errors::ErrorLocation
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::errors::ErrorLocation
+pub struct xml2arrow::errors::UnmatchedField
+pub xml2arrow::errors::UnmatchedField::field: alloc::string::String
+pub xml2arrow::errors::UnmatchedField::table: alloc::string::String
+pub xml2arrow::errors::UnmatchedField::xml_path: alloc::string::String
+impl core::clone::Clone for xml2arrow::errors::UnmatchedField
+pub fn xml2arrow::errors::UnmatchedField::clone(&self) -> xml2arrow::errors::UnmatchedField
+impl core::cmp::Eq for xml2arrow::errors::UnmatchedField
+impl core::cmp::PartialEq for xml2arrow::errors::UnmatchedField
+pub fn xml2arrow::errors::UnmatchedField::eq(&self, &xml2arrow::errors::UnmatchedField) -> bool
+impl core::fmt::Debug for xml2arrow::errors::UnmatchedField
+pub fn xml2arrow::errors::UnmatchedField::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for xml2arrow::errors::UnmatchedField
+impl core::marker::Freeze for xml2arrow::errors::UnmatchedField
+impl core::marker::Send for xml2arrow::errors::UnmatchedField
+impl core::marker::Sync for xml2arrow::errors::UnmatchedField
+impl core::marker::Unpin for xml2arrow::errors::UnmatchedField
+impl core::marker::UnsafeUnpin for xml2arrow::errors::UnmatchedField
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::errors::UnmatchedField
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::errors::UnmatchedField
+pub type xml2arrow::errors::Result<T> = core::result::Result<T, xml2arrow::errors::Error>
+pub mod xml2arrow::lint
+#[non_exhaustive] pub enum xml2arrow::lint::Lint
+pub xml2arrow::lint::Lint::ExcessLevels
+pub xml2arrow::lint::Lint::ExcessLevels::available: usize
+pub xml2arrow::lint::Lint::ExcessLevels::declared: usize
+pub xml2arrow::lint::Lint::ExcessLevels::table: alloc::string::String
+pub xml2arrow::lint::Lint::FieldOutsideRow
+pub xml2arrow::lint::Lint::FieldOutsideRow::field: alloc::string::String
+pub xml2arrow::lint::Lint::FieldOutsideRow::field_path: alloc::string::String
+pub xml2arrow::lint::Lint::FieldOutsideRow::row_path: alloc::string::String
+pub xml2arrow::lint::Lint::FieldOutsideRow::table: alloc::string::String
+pub xml2arrow::lint::Lint::ImplicitEmptyString
+pub xml2arrow::lint::Lint::ImplicitEmptyString::fields: alloc::vec::Vec<alloc::string::String>
+pub xml2arrow::lint::Lint::ImplicitEmptyString::table: alloc::string::String
+pub xml2arrow::lint::Lint::InferredRowBoundary
+pub xml2arrow::lint::Lint::InferredRowBoundary::child_elements: alloc::vec::Vec<alloc::string::String>
+pub xml2arrow::lint::Lint::InferredRowBoundary::table: alloc::string::String
+pub xml2arrow::lint::Lint::InferredRowBoundary::xml_path: alloc::string::String
+pub xml2arrow::lint::Lint::NeverFinalizesRows
+pub xml2arrow::lint::Lint::NeverFinalizesRows::table: alloc::string::String
+pub xml2arrow::lint::Lint::NeverFinalizesRows::xml_path: alloc::string::String
+pub xml2arrow::lint::Lint::StructuralTable
+pub xml2arrow::lint::Lint::StructuralTable::table: alloc::string::String
+impl core::clone::Clone for xml2arrow::lint::Lint
+pub fn xml2arrow::lint::Lint::clone(&self) -> xml2arrow::lint::Lint
+impl core::cmp::Eq for xml2arrow::lint::Lint
+impl core::cmp::PartialEq for xml2arrow::lint::Lint
+pub fn xml2arrow::lint::Lint::eq(&self, &xml2arrow::lint::Lint) -> bool
+impl core::fmt::Debug for xml2arrow::lint::Lint
+pub fn xml2arrow::lint::Lint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for xml2arrow::lint::Lint
+pub fn xml2arrow::lint::Lint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for xml2arrow::lint::Lint
+impl core::marker::Freeze for xml2arrow::lint::Lint
+impl core::marker::Send for xml2arrow::lint::Lint
+impl core::marker::Sync for xml2arrow::lint::Lint
+impl core::marker::Unpin for xml2arrow::lint::Lint
+impl core::marker::UnsafeUnpin for xml2arrow::lint::Lint
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::lint::Lint
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::lint::Lint
+pub macro xml2arrow::config_from_yaml!
+#[non_exhaustive] pub enum xml2arrow::DType
+pub xml2arrow::DType::Boolean
+pub xml2arrow::DType::Float32
+pub xml2arrow::DType::Float64
+pub xml2arrow::DType::Int16
+pub xml2arrow::DType::Int32
+pub xml2arrow::DType::Int64
+pub xml2arrow::DType::Int8
+pub xml2arrow::DType::UInt16
+pub xml2arrow::DType::UInt32
+pub xml2arrow::DType::UInt64
+pub xml2arrow::DType::UInt8
+pub xml2arrow::DType::Utf8
+impl core::clone::Clone for xml2arrow::config::DType
+pub fn xml2arrow::config::DType::clone(&self) -> xml2arrow::config::DType
+impl core::cmp::Eq for xml2arrow::config::DType
+impl core::cmp::PartialEq for xml2arrow::config::DType
+pub fn xml2arrow::config::DType::eq(&self, &xml2arrow::config::DType) -> bool
+impl core::default::Default for xml2arrow::config::DType
+pub fn xml2arrow::config::DType::default() -> xml2arrow::config::DType
+impl core::fmt::Debug for xml2arrow::config::DType
+pub fn xml2arrow::config::DType::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xml2arrow::config::DType
+impl core::marker::StructuralPartialEq for xml2arrow::config::DType
+impl serde_core::ser::Serialize for xml2arrow::config::DType
+pub fn xml2arrow::config::DType::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for xml2arrow::config::DType
+pub fn xml2arrow::config::DType::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for xml2arrow::config::DType
+impl core::marker::Send for xml2arrow::config::DType
+impl core::marker::Sync for xml2arrow::config::DType
+impl core::marker::Unpin for xml2arrow::config::DType
+impl core::marker::UnsafeUnpin for xml2arrow::config::DType
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::DType
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::DType
+#[non_exhaustive] pub enum xml2arrow::Error
+pub xml2arrow::Error::Arrow(arrow_schema::error::ArrowError)
+pub xml2arrow::Error::InvalidConfig
+pub xml2arrow::Error::InvalidConfig::reason: xml2arrow::errors::ConfigIssue
+pub xml2arrow::Error::Io(std::io::error::Error)
+pub xml2arrow::Error::MissingRequiredField
+pub xml2arrow::Error::MissingRequiredField::field: alloc::sync::Arc<str>
+pub xml2arrow::Error::MissingRequiredField::location: alloc::boxed::Box<xml2arrow::errors::ErrorLocation>
+pub xml2arrow::Error::MissingRequiredField::path: alloc::sync::Arc<str>
+pub xml2arrow::Error::ParseError
+pub xml2arrow::Error::ParseError::field: alloc::sync::Arc<str>
+pub xml2arrow::Error::ParseError::kind: xml2arrow::errors::ParseKind
+pub xml2arrow::Error::ParseError::location: alloc::boxed::Box<xml2arrow::errors::ErrorLocation>
+pub xml2arrow::Error::ParseError::path: alloc::sync::Arc<str>
+pub xml2arrow::Error::ParseError::value: alloc::string::String
+pub xml2arrow::Error::RowIndexOverflow
+pub xml2arrow::Error::RowIndexOverflow::table: alloc::sync::Arc<str>
+pub xml2arrow::Error::TruncatedInput
+pub xml2arrow::Error::TruncatedInput::open_elements: usize
+pub xml2arrow::Error::UnmatchedFields
+pub xml2arrow::Error::UnmatchedFields::fields: alloc::vec::Vec<xml2arrow::errors::UnmatchedField>
+pub xml2arrow::Error::UnmatchedFields::stop_paths_configured: bool
+pub xml2arrow::Error::UnsupportedConversion
+pub xml2arrow::Error::UnsupportedConversion::conversion: xml2arrow::errors::ConversionKind
+pub xml2arrow::Error::UnsupportedConversion::data_type: alloc::string::String
+pub xml2arrow::Error::Utf8Error(core::str::error::Utf8Error)
+pub xml2arrow::Error::ValueTooLarge
+pub xml2arrow::Error::ValueTooLarge::field: alloc::sync::Arc<str>
+pub xml2arrow::Error::ValueTooLarge::limit: usize
+pub xml2arrow::Error::ValueTooLarge::location: alloc::boxed::Box<xml2arrow::errors::ErrorLocation>
+pub xml2arrow::Error::ValueTooLarge::path: alloc::sync::Arc<str>
+pub xml2arrow::Error::XmlParseAttr(quick_xml::events::attributes::AttrError)
+pub xml2arrow::Error::XmlParseEncoding(quick_xml::encoding::EncodingError)
+pub xml2arrow::Error::XmlParsing(quick_xml::errors::Error)
+pub xml2arrow::Error::Yaml(yaml_serde::error::Error)
+impl core::convert::From<arrow_schema::error::ArrowError> for xml2arrow::errors::Error
+pub fn xml2arrow::errors::Error::from(arrow_schema::error::ArrowError) -> Self
+impl core::convert::From<core::str::error::Utf8Error> for xml2arrow::errors::Error
+pub fn xml2arrow::errors::Error::from(core::str::error::Utf8Error) -> Self
+impl core::convert::From<quick_xml::encoding::EncodingError> for xml2arrow::errors::Error
+pub fn xml2arrow::errors::Error::from(quick_xml::encoding::EncodingError) -> Self
+impl core::convert::From<quick_xml::errors::Error> for xml2arrow::errors::Error
+pub fn xml2arrow::errors::Error::from(quick_xml::errors::Error) -> Self
+impl core::convert::From<quick_xml::events::attributes::AttrError> for xml2arrow::errors::Error
+pub fn xml2arrow::errors::Error::from(quick_xml::events::attributes::AttrError) -> Self
+impl core::convert::From<std::io::error::Error> for xml2arrow::errors::Error
+pub fn xml2arrow::errors::Error::from(std::io::error::Error) -> Self
+impl core::convert::From<yaml_serde::error::Error> for xml2arrow::errors::Error
+pub fn xml2arrow::errors::Error::from(yaml_serde::error::Error) -> Self
+impl core::error::Error for xml2arrow::errors::Error
+pub fn xml2arrow::errors::Error::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for xml2arrow::errors::Error
+pub fn xml2arrow::errors::Error::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for xml2arrow::errors::Error
+pub fn xml2arrow::errors::Error::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for xml2arrow::errors::Error
+impl core::marker::Send for xml2arrow::errors::Error
+impl core::marker::Sync for xml2arrow::errors::Error
+impl core::marker::Unpin for xml2arrow::errors::Error
+impl core::marker::UnsafeUnpin for xml2arrow::errors::Error
+impl !core::panic::unwind_safe::RefUnwindSafe for xml2arrow::errors::Error
+impl !core::panic::unwind_safe::UnwindSafe for xml2arrow::errors::Error
+#[non_exhaustive] pub enum xml2arrow::Lint
+pub xml2arrow::Lint::ExcessLevels
+pub xml2arrow::Lint::ExcessLevels::available: usize
+pub xml2arrow::Lint::ExcessLevels::declared: usize
+pub xml2arrow::Lint::ExcessLevels::table: alloc::string::String
+pub xml2arrow::Lint::FieldOutsideRow
+pub xml2arrow::Lint::FieldOutsideRow::field: alloc::string::String
+pub xml2arrow::Lint::FieldOutsideRow::field_path: alloc::string::String
+pub xml2arrow::Lint::FieldOutsideRow::row_path: alloc::string::String
+pub xml2arrow::Lint::FieldOutsideRow::table: alloc::string::String
+pub xml2arrow::Lint::ImplicitEmptyString
+pub xml2arrow::Lint::ImplicitEmptyString::fields: alloc::vec::Vec<alloc::string::String>
+pub xml2arrow::Lint::ImplicitEmptyString::table: alloc::string::String
+pub xml2arrow::Lint::InferredRowBoundary
+pub xml2arrow::Lint::InferredRowBoundary::child_elements: alloc::vec::Vec<alloc::string::String>
+pub xml2arrow::Lint::InferredRowBoundary::table: alloc::string::String
+pub xml2arrow::Lint::InferredRowBoundary::xml_path: alloc::string::String
+pub xml2arrow::Lint::NeverFinalizesRows
+pub xml2arrow::Lint::NeverFinalizesRows::table: alloc::string::String
+pub xml2arrow::Lint::NeverFinalizesRows::xml_path: alloc::string::String
+pub xml2arrow::Lint::StructuralTable
+pub xml2arrow::Lint::StructuralTable::table: alloc::string::String
+impl core::clone::Clone for xml2arrow::lint::Lint
+pub fn xml2arrow::lint::Lint::clone(&self) -> xml2arrow::lint::Lint
+impl core::cmp::Eq for xml2arrow::lint::Lint
+impl core::cmp::PartialEq for xml2arrow::lint::Lint
+pub fn xml2arrow::lint::Lint::eq(&self, &xml2arrow::lint::Lint) -> bool
+impl core::fmt::Debug for xml2arrow::lint::Lint
+pub fn xml2arrow::lint::Lint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for xml2arrow::lint::Lint
+pub fn xml2arrow::lint::Lint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for xml2arrow::lint::Lint
+impl core::marker::Freeze for xml2arrow::lint::Lint
+impl core::marker::Send for xml2arrow::lint::Lint
+impl core::marker::Sync for xml2arrow::lint::Lint
+impl core::marker::Unpin for xml2arrow::lint::Lint
+impl core::marker::UnsafeUnpin for xml2arrow::lint::Lint
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::lint::Lint
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::lint::Lint
+#[non_exhaustive] pub struct xml2arrow::BatchOptions
+pub xml2arrow::BatchOptions::max_bytes_per_batch: usize
+pub xml2arrow::BatchOptions::max_rows_per_batch: usize
+impl xml2arrow::BatchOptions
+pub fn xml2arrow::BatchOptions::with_max_bytes_per_batch(self, usize) -> Self
+pub fn xml2arrow::BatchOptions::with_max_rows_per_batch(self, usize) -> Self
+impl core::clone::Clone for xml2arrow::BatchOptions
+pub fn xml2arrow::BatchOptions::clone(&self) -> xml2arrow::BatchOptions
+impl core::default::Default for xml2arrow::BatchOptions
+pub fn xml2arrow::BatchOptions::default() -> Self
+impl core::fmt::Debug for xml2arrow::BatchOptions
+pub fn xml2arrow::BatchOptions::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xml2arrow::BatchOptions
+impl core::marker::Freeze for xml2arrow::BatchOptions
+impl core::marker::Send for xml2arrow::BatchOptions
+impl core::marker::Sync for xml2arrow::BatchOptions
+impl core::marker::Unpin for xml2arrow::BatchOptions
+impl core::marker::UnsafeUnpin for xml2arrow::BatchOptions
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::BatchOptions
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::BatchOptions
+pub struct xml2arrow::BatchStream<'p, S>
+impl<'p, S: xml2arrow::EventSource> core::iter::traits::iterator::Iterator for xml2arrow::BatchStream<'p, S>
+pub type xml2arrow::BatchStream<'p, S>::Item = core::result::Result<xml2arrow::TableBatch, xml2arrow::errors::Error>
+pub fn xml2arrow::BatchStream<'p, S>::next(&mut self) -> core::option::Option<Self::Item>
+impl<'p, S: xml2arrow::EventSource> core::iter::traits::marker::FusedIterator for xml2arrow::BatchStream<'p, S>
+impl<S> core::fmt::Debug for xml2arrow::BatchStream<'_, S>
+pub fn xml2arrow::BatchStream<'_, S>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'p, S> core::marker::Freeze for xml2arrow::BatchStream<'p, S> where S: core::marker::Freeze
+impl<'p, S> core::marker::Send for xml2arrow::BatchStream<'p, S> where S: core::marker::Send
+impl<'p, S> core::marker::Sync for xml2arrow::BatchStream<'p, S> where S: core::marker::Sync
+impl<'p, S> core::marker::Unpin for xml2arrow::BatchStream<'p, S> where S: core::marker::Unpin
+impl<'p, S> core::marker::UnsafeUnpin for xml2arrow::BatchStream<'p, S> where S: core::marker::UnsafeUnpin
+impl<'p, S> core::panic::unwind_safe::RefUnwindSafe for xml2arrow::BatchStream<'p, S> where S: core::panic::unwind_safe::RefUnwindSafe
+impl<'p, S> core::panic::unwind_safe::UnwindSafe for xml2arrow::BatchStream<'p, S> where S: core::panic::unwind_safe::UnwindSafe
+#[non_exhaustive] pub struct xml2arrow::Config
+pub xml2arrow::Config::parser_options: xml2arrow::config::ParserOptions
+pub xml2arrow::Config::tables: alloc::vec::Vec<xml2arrow::config::TableConfig>
+impl xml2arrow::config::Config
+pub fn xml2arrow::config::Config::builder() -> xml2arrow::config::ConfigBuilder
+pub fn xml2arrow::config::Config::from_yaml_file(impl core::convert::AsRef<std::path::Path>) -> xml2arrow::errors::Result<Self>
+pub fn xml2arrow::config::Config::requires_attribute_parsing(&self) -> bool
+pub fn xml2arrow::config::Config::to_yaml_file(&self, impl core::convert::AsRef<std::path::Path>) -> xml2arrow::errors::Result<()>
+pub fn xml2arrow::config::Config::validate(&self) -> xml2arrow::errors::Result<()>
+impl xml2arrow::config::Config
+pub fn xml2arrow::config::Config::lint(&self) -> alloc::vec::Vec<xml2arrow::lint::Lint>
+impl core::clone::Clone for xml2arrow::config::Config
+pub fn xml2arrow::config::Config::clone(&self) -> xml2arrow::config::Config
+impl core::cmp::PartialEq for xml2arrow::config::Config
+pub fn xml2arrow::config::Config::eq(&self, &xml2arrow::config::Config) -> bool
+impl core::fmt::Debug for xml2arrow::config::Config
+pub fn xml2arrow::config::Config::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for xml2arrow::config::Config
+impl serde_core::ser::Serialize for xml2arrow::config::Config
+pub fn xml2arrow::config::Config::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for xml2arrow::config::Config
+pub fn xml2arrow::config::Config::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for xml2arrow::config::Config
+impl core::marker::Send for xml2arrow::config::Config
+impl core::marker::Sync for xml2arrow::config::Config
+impl core::marker::Unpin for xml2arrow::config::Config
+impl core::marker::UnsafeUnpin for xml2arrow::config::Config
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::Config
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::Config
+pub struct xml2arrow::ConfigBuilder
+impl xml2arrow::config::ConfigBuilder
+pub fn xml2arrow::config::ConfigBuilder::build(self) -> xml2arrow::errors::Result<xml2arrow::config::Config>
+pub fn xml2arrow::config::ConfigBuilder::parser_options(self, xml2arrow::config::ParserOptions) -> Self
+pub fn xml2arrow::config::ConfigBuilder::table(self, xml2arrow::config::TableConfig) -> Self
+pub fn xml2arrow::config::ConfigBuilder::tables(self, impl core::iter::traits::collect::IntoIterator<Item = xml2arrow::config::TableConfig>) -> Self
+impl core::default::Default for xml2arrow::config::ConfigBuilder
+pub fn xml2arrow::config::ConfigBuilder::default() -> xml2arrow::config::ConfigBuilder
+impl core::fmt::Debug for xml2arrow::config::ConfigBuilder
+pub fn xml2arrow::config::ConfigBuilder::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for xml2arrow::config::ConfigBuilder
+impl core::marker::Send for xml2arrow::config::ConfigBuilder
+impl core::marker::Sync for xml2arrow::config::ConfigBuilder
+impl core::marker::Unpin for xml2arrow::config::ConfigBuilder
+impl core::marker::UnsafeUnpin for xml2arrow::config::ConfigBuilder
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::ConfigBuilder
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::ConfigBuilder
+#[non_exhaustive] pub struct xml2arrow::FieldConfig
+pub xml2arrow::FieldConfig::data_type: xml2arrow::config::DType
+pub xml2arrow::FieldConfig::name: alloc::string::String
+pub xml2arrow::FieldConfig::nullable: bool
+pub xml2arrow::FieldConfig::offset: core::option::Option<f64>
+pub xml2arrow::FieldConfig::scale: core::option::Option<f64>
+pub xml2arrow::FieldConfig::xml_path: alloc::string::String
+impl xml2arrow::config::FieldConfig
+pub fn xml2arrow::config::FieldConfig::validate(&self) -> xml2arrow::errors::Result<()>
+impl core::clone::Clone for xml2arrow::config::FieldConfig
+pub fn xml2arrow::config::FieldConfig::clone(&self) -> xml2arrow::config::FieldConfig
+impl core::cmp::PartialEq for xml2arrow::config::FieldConfig
+pub fn xml2arrow::config::FieldConfig::eq(&self, &xml2arrow::config::FieldConfig) -> bool
+impl core::fmt::Debug for xml2arrow::config::FieldConfig
+pub fn xml2arrow::config::FieldConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for xml2arrow::config::FieldConfig
+impl serde_core::ser::Serialize for xml2arrow::config::FieldConfig
+pub fn xml2arrow::config::FieldConfig::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for xml2arrow::config::FieldConfig
+pub fn xml2arrow::config::FieldConfig::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for xml2arrow::config::FieldConfig
+impl core::marker::Send for xml2arrow::config::FieldConfig
+impl core::marker::Sync for xml2arrow::config::FieldConfig
+impl core::marker::Unpin for xml2arrow::config::FieldConfig
+impl core::marker::UnsafeUnpin for xml2arrow::config::FieldConfig
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::FieldConfig
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::FieldConfig
+pub struct xml2arrow::FieldConfigBuilder
+impl xml2arrow::config::FieldConfigBuilder
+pub fn xml2arrow::config::FieldConfigBuilder::build(self) -> xml2arrow::errors::Result<xml2arrow::config::FieldConfig>
+pub fn xml2arrow::config::FieldConfigBuilder::new(&str, &str, xml2arrow::config::DType) -> Self
+pub fn xml2arrow::config::FieldConfigBuilder::nullable(self, bool) -> Self
+pub fn xml2arrow::config::FieldConfigBuilder::offset(self, f64) -> Self
+pub fn xml2arrow::config::FieldConfigBuilder::scale(self, f64) -> Self
+impl core::default::Default for xml2arrow::config::FieldConfigBuilder
+pub fn xml2arrow::config::FieldConfigBuilder::default() -> xml2arrow::config::FieldConfigBuilder
+impl core::marker::Freeze for xml2arrow::config::FieldConfigBuilder
+impl core::marker::Send for xml2arrow::config::FieldConfigBuilder
+impl core::marker::Sync for xml2arrow::config::FieldConfigBuilder
+impl core::marker::Unpin for xml2arrow::config::FieldConfigBuilder
+impl core::marker::UnsafeUnpin for xml2arrow::config::FieldConfigBuilder
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::FieldConfigBuilder
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::FieldConfigBuilder
+pub struct xml2arrow::Parser
+impl xml2arrow::Parser
+pub fn xml2arrow::Parser::into_batches<R: std::io::BufRead>(self, R, xml2arrow::BatchOptions) -> xml2arrow::BatchStream<'static, xml2arrow::ReaderSource<R>>
+pub fn xml2arrow::Parser::into_single_table<R: std::io::BufRead>(self, R, xml2arrow::BatchOptions) -> xml2arrow::errors::Result<xml2arrow::SingleTableReader<'static, xml2arrow::ReaderSource<R>>>
+pub fn xml2arrow::Parser::new(&xml2arrow::config::Config) -> xml2arrow::errors::Result<Self>
+pub fn xml2arrow::Parser::parse(&self, impl std::io::BufRead) -> xml2arrow::errors::Result<indexmap::map::IndexMap<alloc::string::String, arrow_array::record_batch::RecordBatch>>
+pub fn xml2arrow::Parser::parse_batches<R: std::io::BufRead>(&self, R, xml2arrow::BatchOptions) -> xml2arrow::BatchStream<'_, xml2arrow::ReaderSource<R>>
+pub fn xml2arrow::Parser::parse_batches_slice<'a>(&'a self, &'a [u8], xml2arrow::BatchOptions) -> xml2arrow::BatchStream<'a, xml2arrow::SliceSource<'a>>
+pub fn xml2arrow::Parser::parse_single_table<R: std::io::BufRead>(&self, R, xml2arrow::BatchOptions) -> xml2arrow::errors::Result<xml2arrow::SingleTableReader<'_, xml2arrow::ReaderSource<R>>>
+pub fn xml2arrow::Parser::parse_single_table_slice<'a>(&'a self, &'a [u8], xml2arrow::BatchOptions) -> xml2arrow::errors::Result<xml2arrow::SingleTableReader<'a, xml2arrow::SliceSource<'a>>>
+pub fn xml2arrow::Parser::parse_slice(&self, &[u8]) -> xml2arrow::errors::Result<indexmap::map::IndexMap<alloc::string::String, arrow_array::record_batch::RecordBatch>>
+pub fn xml2arrow::Parser::parse_streaming<R, F>(&self, R, xml2arrow::BatchOptions, F) -> xml2arrow::errors::Result<()> where R: std::io::BufRead, F: core::ops::function::FnMut(&str, arrow_array::record_batch::RecordBatch) -> xml2arrow::errors::Result<()>
+pub fn xml2arrow::Parser::schema(&self, &str) -> core::option::Option<arrow_schema::schema::SchemaRef>
+pub fn xml2arrow::Parser::single_table_schema(&self) -> xml2arrow::errors::Result<arrow_schema::schema::SchemaRef>
+pub fn xml2arrow::Parser::warnings(&self) -> alloc::vec::Vec<xml2arrow::lint::Lint>
+impl core::clone::Clone for xml2arrow::Parser
+pub fn xml2arrow::Parser::clone(&self) -> Self
+impl core::marker::Freeze for xml2arrow::Parser
+impl core::marker::Send for xml2arrow::Parser
+impl core::marker::Sync for xml2arrow::Parser
+impl core::marker::Unpin for xml2arrow::Parser
+impl core::marker::UnsafeUnpin for xml2arrow::Parser
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::Parser
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::Parser
+#[non_exhaustive] pub struct xml2arrow::ParserOptions
+pub xml2arrow::ParserOptions::allow_truncated_input: bool
+pub xml2arrow::ParserOptions::error_on_unmatched_fields: bool
+pub xml2arrow::ParserOptions::max_value_bytes: core::option::Option<usize>
+pub xml2arrow::ParserOptions::stop_at_paths: alloc::vec::Vec<alloc::string::String>
+pub xml2arrow::ParserOptions::strip_namespaces: bool
+pub xml2arrow::ParserOptions::trim_text: bool
+pub xml2arrow::ParserOptions::validate_attributes: bool
+pub xml2arrow::ParserOptions::validate_closing_tags: bool
+impl core::clone::Clone for xml2arrow::config::ParserOptions
+pub fn xml2arrow::config::ParserOptions::clone(&self) -> xml2arrow::config::ParserOptions
+impl core::cmp::PartialEq for xml2arrow::config::ParserOptions
+pub fn xml2arrow::config::ParserOptions::eq(&self, &xml2arrow::config::ParserOptions) -> bool
+impl core::default::Default for xml2arrow::config::ParserOptions
+pub fn xml2arrow::config::ParserOptions::default() -> Self
+impl core::fmt::Debug for xml2arrow::config::ParserOptions
+pub fn xml2arrow::config::ParserOptions::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for xml2arrow::config::ParserOptions
+impl serde_core::ser::Serialize for xml2arrow::config::ParserOptions
+pub fn xml2arrow::config::ParserOptions::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for xml2arrow::config::ParserOptions
+pub fn xml2arrow::config::ParserOptions::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for xml2arrow::config::ParserOptions
+impl core::marker::Send for xml2arrow::config::ParserOptions
+impl core::marker::Sync for xml2arrow::config::ParserOptions
+impl core::marker::Unpin for xml2arrow::config::ParserOptions
+impl core::marker::UnsafeUnpin for xml2arrow::config::ParserOptions
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::ParserOptions
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::ParserOptions
+pub struct xml2arrow::ReaderSource<R: std::io::BufRead>
+impl<R: std::io::BufRead> xml2arrow::EventSource for xml2arrow::ReaderSource<R>
+impl<R> core::marker::Freeze for xml2arrow::ReaderSource<R> where R: core::marker::Freeze
+impl<R> core::marker::Send for xml2arrow::ReaderSource<R> where R: core::marker::Send
+impl<R> core::marker::Sync for xml2arrow::ReaderSource<R> where R: core::marker::Sync
+impl<R> core::marker::Unpin for xml2arrow::ReaderSource<R> where R: core::marker::Unpin
+impl<R> core::marker::UnsafeUnpin for xml2arrow::ReaderSource<R> where R: core::marker::UnsafeUnpin
+impl<R> core::panic::unwind_safe::RefUnwindSafe for xml2arrow::ReaderSource<R> where R: core::panic::unwind_safe::RefUnwindSafe
+impl<R> core::panic::unwind_safe::UnwindSafe for xml2arrow::ReaderSource<R> where R: core::panic::unwind_safe::UnwindSafe
+pub struct xml2arrow::SingleTableReader<'p, S>
+impl<'p, S: xml2arrow::EventSource> arrow_array::record_batch::RecordBatchReader for xml2arrow::SingleTableReader<'p, S>
+pub fn xml2arrow::SingleTableReader<'p, S>::schema(&self) -> arrow_schema::schema::SchemaRef
+impl<'p, S: xml2arrow::EventSource> core::iter::traits::iterator::Iterator for xml2arrow::SingleTableReader<'p, S>
+pub type xml2arrow::SingleTableReader<'p, S>::Item = core::result::Result<arrow_array::record_batch::RecordBatch, arrow_schema::error::ArrowError>
+pub fn xml2arrow::SingleTableReader<'p, S>::next(&mut self) -> core::option::Option<Self::Item>
+impl<'p, S: xml2arrow::EventSource> core::iter::traits::marker::FusedIterator for xml2arrow::SingleTableReader<'p, S>
+impl<S> core::fmt::Debug for xml2arrow::SingleTableReader<'_, S>
+pub fn xml2arrow::SingleTableReader<'_, S>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'p, S> core::marker::Freeze for xml2arrow::SingleTableReader<'p, S> where S: core::marker::Freeze
+impl<'p, S> core::marker::Send for xml2arrow::SingleTableReader<'p, S> where S: core::marker::Send
+impl<'p, S> core::marker::Sync for xml2arrow::SingleTableReader<'p, S> where S: core::marker::Sync
+impl<'p, S> core::marker::Unpin for xml2arrow::SingleTableReader<'p, S> where S: core::marker::Unpin
+impl<'p, S> core::marker::UnsafeUnpin for xml2arrow::SingleTableReader<'p, S> where S: core::marker::UnsafeUnpin
+impl<'p, S> core::panic::unwind_safe::RefUnwindSafe for xml2arrow::SingleTableReader<'p, S> where S: core::panic::unwind_safe::RefUnwindSafe
+impl<'p, S> core::panic::unwind_safe::UnwindSafe for xml2arrow::SingleTableReader<'p, S> where S: core::panic::unwind_safe::UnwindSafe
+pub struct xml2arrow::SliceSource<'x>
+impl xml2arrow::EventSource for xml2arrow::SliceSource<'_>
+impl<'x> core::marker::Freeze for xml2arrow::SliceSource<'x>
+impl<'x> core::marker::Send for xml2arrow::SliceSource<'x>
+impl<'x> core::marker::Sync for xml2arrow::SliceSource<'x>
+impl<'x> core::marker::Unpin for xml2arrow::SliceSource<'x>
+impl<'x> core::marker::UnsafeUnpin for xml2arrow::SliceSource<'x>
+impl<'x> core::panic::unwind_safe::RefUnwindSafe for xml2arrow::SliceSource<'x>
+impl<'x> core::panic::unwind_safe::UnwindSafe for xml2arrow::SliceSource<'x>
+pub struct xml2arrow::TableBatch
+pub xml2arrow::TableBatch::batch: arrow_array::record_batch::RecordBatch
+pub xml2arrow::TableBatch::table: alloc::sync::Arc<str>
+impl core::clone::Clone for xml2arrow::TableBatch
+pub fn xml2arrow::TableBatch::clone(&self) -> xml2arrow::TableBatch
+impl core::fmt::Debug for xml2arrow::TableBatch
+pub fn xml2arrow::TableBatch::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for xml2arrow::TableBatch
+impl core::marker::Send for xml2arrow::TableBatch
+impl core::marker::Sync for xml2arrow::TableBatch
+impl core::marker::Unpin for xml2arrow::TableBatch
+impl core::marker::UnsafeUnpin for xml2arrow::TableBatch
+impl !core::panic::unwind_safe::RefUnwindSafe for xml2arrow::TableBatch
+impl !core::panic::unwind_safe::UnwindSafe for xml2arrow::TableBatch
+#[non_exhaustive] pub struct xml2arrow::TableConfig
+pub xml2arrow::TableConfig::fields: alloc::vec::Vec<xml2arrow::config::FieldConfig>
+pub xml2arrow::TableConfig::levels: alloc::vec::Vec<alloc::string::String>
+pub xml2arrow::TableConfig::name: alloc::string::String
+pub xml2arrow::TableConfig::row: core::option::Option<alloc::string::String>
+pub xml2arrow::TableConfig::xml_path: alloc::string::String
+impl xml2arrow::config::TableConfig
+pub fn xml2arrow::config::TableConfig::builder(&str, &str) -> xml2arrow::config::TableConfigBuilder
+pub fn xml2arrow::config::TableConfig::new(&str, &str, alloc::vec::Vec<alloc::string::String>, alloc::vec::Vec<xml2arrow::config::FieldConfig>) -> Self
+impl core::clone::Clone for xml2arrow::config::TableConfig
+pub fn xml2arrow::config::TableConfig::clone(&self) -> xml2arrow::config::TableConfig
+impl core::cmp::PartialEq for xml2arrow::config::TableConfig
+pub fn xml2arrow::config::TableConfig::eq(&self, &xml2arrow::config::TableConfig) -> bool
+impl core::fmt::Debug for xml2arrow::config::TableConfig
+pub fn xml2arrow::config::TableConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for xml2arrow::config::TableConfig
+impl serde_core::ser::Serialize for xml2arrow::config::TableConfig
+pub fn xml2arrow::config::TableConfig::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for xml2arrow::config::TableConfig
+pub fn xml2arrow::config::TableConfig::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for xml2arrow::config::TableConfig
+impl core::marker::Send for xml2arrow::config::TableConfig
+impl core::marker::Sync for xml2arrow::config::TableConfig
+impl core::marker::Unpin for xml2arrow::config::TableConfig
+impl core::marker::UnsafeUnpin for xml2arrow::config::TableConfig
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::TableConfig
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::TableConfig
+pub struct xml2arrow::TableConfigBuilder
+impl xml2arrow::config::TableConfigBuilder
+pub fn xml2arrow::config::TableConfigBuilder::build(self) -> xml2arrow::config::TableConfig
+pub fn xml2arrow::config::TableConfigBuilder::field(self, xml2arrow::config::FieldConfig) -> Self
+pub fn xml2arrow::config::TableConfigBuilder::fields(self, impl core::iter::traits::collect::IntoIterator<Item = xml2arrow::config::FieldConfig>) -> Self
+pub fn xml2arrow::config::TableConfigBuilder::level(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn xml2arrow::config::TableConfigBuilder::levels(self, impl core::iter::traits::collect::IntoIterator<Item = impl core::convert::Into<alloc::string::String>>) -> Self
+pub fn xml2arrow::config::TableConfigBuilder::row(self, impl core::convert::Into<alloc::string::String>) -> Self
+impl core::fmt::Debug for xml2arrow::config::TableConfigBuilder
+pub fn xml2arrow::config::TableConfigBuilder::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for xml2arrow::config::TableConfigBuilder
+impl core::marker::Send for xml2arrow::config::TableConfigBuilder
+impl core::marker::Sync for xml2arrow::config::TableConfigBuilder
+impl core::marker::Unpin for xml2arrow::config::TableConfigBuilder
+impl core::marker::UnsafeUnpin for xml2arrow::config::TableConfigBuilder
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::TableConfigBuilder
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::TableConfigBuilder
+pub trait xml2arrow::EventSource: xml2arrow::xml_parser::sealed::Sealed
+impl xml2arrow::EventSource for xml2arrow::SliceSource<'_>
+impl<R: std::io::BufRead> xml2arrow::EventSource for xml2arrow::ReaderSource<R>
+pub fn xml2arrow::parse_xml(impl std::io::BufRead, &xml2arrow::config::Config) -> xml2arrow::errors::Result<indexmap::map::IndexMap<alloc::string::String, arrow_array::record_batch::RecordBatch>>
+pub fn xml2arrow::parse_xml_slice(&[u8], &xml2arrow::config::Config) -> xml2arrow::errors::Result<indexmap::map::IndexMap<alloc::string::String, arrow_array::record_batch::RecordBatch>>
+pub type xml2arrow::Result<T> = core::result::Result<T, xml2arrow::errors::Error>

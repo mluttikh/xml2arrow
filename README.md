@@ -12,6 +12,10 @@ A Rust crate for efficiently converting XML data to Apache Arrow format.
 
 A Python version of this library is also available on GitHub: [https://github.com/mluttikh/xml2arrow-python](https://github.com/mluttikh/xml2arrow-python)
 
+> **Upgrading from 0.19?** See [MIGRATION.md](MIGRATION.md). One mechanical
+> source change is required; truncated documents now error instead of returning
+> partial rows.
+
 ## Overview
 
 `xml2arrow` transforms XML documents into Apache Arrow `RecordBatch`es. It uses
@@ -245,7 +249,7 @@ for path in xml_files {
 Each call allocates fresh Arrow builders, so batches from one document never
 leak into the next. A `Parser` can also serve several streams concurrently.
 
-> **Deprecated since 0.20:** the free functions `parse_xml` and
+> **Deprecated since 0.20** (see [MIGRATION.md](MIGRATION.md#4-deprecated-still-working)): the free functions `parse_xml` and
 > `parse_xml_slice` do exactly `Parser::new(&config)?.parse(..)` /
 > `.parse_slice(..)`, paying the compilation cost on *every* call. They still
 > work, and will be removed in 1.0.

@@ -201,6 +201,9 @@ cargo fmt --check                           # CI-enforced
 cargo clippy -- -D warnings                 # CI-enforced
 cargo clippy --features python -- -D warnings   # CI-enforced
 cargo check --features python               # python bindings still compile
+
+# Public API changed on purpose? Re-record the snapshot and commit the diff:
+cargo public-api --simplified > public-api.txt   # CI-enforced (nightly)
 ```
 
 Before declaring work done:
@@ -208,7 +211,13 @@ Before declaring work done:
 2. Parser touched? Benchmark comparison done (see above).
 3. `Error`/`ConfigIssue` touched? PyErr mapping + guard tests updated.
 4. Bug fix? Repro added to `tests/integration_tests.rs`.
-5. Public API touched? Doc examples still compile (doctests run in `cargo test`).
+5. Public API touched? Doc examples still compile (doctests run in `cargo test`),
+   **and `public-api.txt` re-recorded**. The snapshot is the enforcement behind
+   `TRANSITION_PLAN.md` contract C2: an intentional change is a reviewable diff,
+   an accidental removal is a failing job. `cargo semver-checks` runs alongside
+   it and judges the change against the version in `Cargo.toml`.
+6. User-visible change? Add a section to `MIGRATION.md` — a before/after and
+   the exact output delta, not prose.
 
 ## Code Style: Literate Programming
 

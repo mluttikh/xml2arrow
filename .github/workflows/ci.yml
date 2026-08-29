@@ -38,3 +38,49 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
         run: cargo test
+
+  # --- API compatibility gates (TRANSITION_PLAN.md contract C2) ---
+  #
+  # C2 promises that after 0.20, no release removes or changes a public item
+  # without a deprecation period. Review cannot enforce that across five phases
+  # of additive work; these two jobs can.
+
+  semver:
+    name: Semver
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Compares the working tree against the newest version on crates.io and
+      # judges it by the version in Cargo.toml. Cargo's 0.x rules apply, so a
+      # 0.19 -> 0.20 bump permits the breaking changes this release makes
+      # deliberately; the job fails when a break arrives *without* the bump.
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+
+  public-api:
+    name: Public API
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # cargo-public-api renders the API from rustdoc JSON, which is nightly-only.
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-public-api
+      # The same shape as the frozen corpus: a checked-in snapshot, regenerated
+      # and compared. An intentional API change is a reviewable diff in
+      # public-api.txt; an accidental removal is a failing job.
+      - name: Check the public API against its snapshot
+        run: |
+          cargo public-api --simplified > /tmp/public-api.actual
+          if ! diff -u public-api.txt /tmp/public-api.actual; then
+            echo
+            echo "::error::The public API differs from public-api.txt."
+            echo "If the change is intentional, re-record it and commit the diff:"
+            echo "    cargo public-api --simplified > public-api.txt"
+            echo "Removing or changing a public item also needs a deprecation"
+            echo "period first — see TRANSITION_PLAN.md contract C2."
+            exit 1
+          fi
