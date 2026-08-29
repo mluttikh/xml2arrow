@@ -1420,10 +1420,10 @@ fn build_link_plans(config: &Config) -> Vec<TableLinkPlan> {
                     ancestor_table_idx: parent_idx,
                     column_name,
                 });
-                // R17: a referenced table materializes its own key, so both
-                // sides of the join exist. Tables nobody references pay
-                // nothing, which is why this is driven by the links rather
-                // than switched on globally.
+                // A referenced table materializes its own key, so both sides
+                // of the join exist. Tables nobody references pay nothing,
+                // which is why this is driven by the links rather than
+                // switched on globally.
                 if plans[parent_idx].row_id_column.is_none() {
                     plans[parent_idx].row_id_column =
                         Some(default_row_id_name(&config.tables[parent_idx]));
@@ -8334,9 +8334,10 @@ mod tests {
         assert_array_values!(batch, "v", vec![1i32, 2], Int32Array);
     }
 
-    /// Dual-form equivalence (`TRANSITION_PLAN.md` §7): the three spellings are
-    /// config ergonomics, not semantics, so they must compile to the same node
-    /// and produce byte-identical batches.
+    /// The three spellings are config ergonomics, not semantics, so they must
+    /// compile to the same node and produce byte-identical batches. Asserted on
+    /// the output rather than on the resolved path, so the claim holds even if
+    /// resolution changes.
     #[rstest]
     #[case::relative("row: item")]
     #[case::absolute("row: /report/data/item")]
@@ -8499,8 +8500,9 @@ mod tests {
     // rather than trusting it, since the whole phase is ergonomics with no
     // semantic content.
 
-    /// Dual-form equivalence (`TRANSITION_PLAN.md` §7): the same mapping
-    /// written three ways must produce identical batches.
+    /// The same mapping written three ways must produce identical batches:
+    /// `path` and `xml_path` name one location, so which key it was written
+    /// under cannot be observable in the output.
     ///
     /// Fields are given as a YAML flow sequence so the case string never
     /// carries a newline into the interpolation — indentation is what makes
@@ -8618,7 +8620,8 @@ mod tests {
 
     /// Two `<group>`s, so `stations`' per-scope counter resets and both
     /// stations are "row 0" of their group. A positional column cannot
-    /// distinguish them; a global ordinal can. This is R18.
+    /// distinguish them; a global ordinal can — which is the property that
+    /// makes `child._<parent>_id == parent._id` a correct equi-join.
     /// `<ms>` rather than hanging the measurements table off `<station>`
     /// directly: a table boundary *on* an element puts that element's own
     /// attributes inside the inner table's scope, which is existing behavior
@@ -8654,7 +8657,7 @@ mod tests {
             "#,
         );
 
-        // R17: `stations` is referenced, so it materializes its own key.
+        // `stations` is referenced, so it materializes its own key.
         let stations = batches.get("stations").unwrap();
         assert_array_values!(stations, "_id", vec![0u64, 1], UInt64Array);
         assert_array_values!(stations, "id", &["A", "B"], StringArray);
@@ -8746,7 +8749,7 @@ mod tests {
         );
     }
 
-    /// R17: a table nobody references pays nothing.
+    /// A table nobody references pays nothing.
     #[test]
     fn unreferenced_tables_get_no_key_column() {
         let batches = parse(

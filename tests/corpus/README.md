@@ -16,10 +16,12 @@ The harness is `tests/frozen_corpus.rs`; read its module docs for the mechanics.
 
 ## What this is for
 
-The transition to declared row semantics (`TRANSITION_PLAN.md`) promises that a
-configuration which does not opt in keeps producing byte-identical output for
-the whole 0.x line. That promise is only worth something if it is checked
-mechanically, on every commit, rather than by review — this corpus is the check.
+The transition to declared row semantics promises that a configuration which
+does not opt in keeps producing byte-identical output for the whole 0.x line —
+every new capability (`row:`, `path:`, `links:`) is opt-in per table, and a
+config that adopts none of them must be unaffected by all of them. That promise
+is only worth something if it is checked mechanically, on every commit, rather
+than by review — this corpus is the check.
 
 Every case additionally runs through all three entry points (buffered,
 zero-copy, and streaming with a batch size small enough to force flushes) and
@@ -66,8 +68,9 @@ so keep them LF.
 Output changed. Read the diff and decide which it is:
 
 - **a bug** — fix the code;
-- **an intentional change** — it must be catalogued (`DESIGN_V2.md` §10.1) and,
-  during the 0.x line, reachable only through an opt-in. Then re-record.
+- **an intentional change** — during the 0.x line it must be reachable only
+  through an opt-in, so a case that opts into nothing must not have moved.
+  Document what changed and why, then re-record.
 
 Re-recording is a deliberate act. A pull request that re-records a snapshot
 should say which of the two it is, in the commit message.

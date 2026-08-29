@@ -143,7 +143,7 @@ the pattern before reading any code:
 | Only the **non-reused** `parse_tiny` variants move; `reused_parser_*` are clean | `Parser::new` — validation, registry build, builder construction. The reused variants hoist it out of the measured loop, so the pair is a built-in bisector. |
 | **All four** `parse_tiny` variants move | The parse path, not setup. |
 | Everything moves uniformly across sizes, buffered but not zero-copy | Suspect lost inlining before real cost — see the symbol check below. |
-| **One** of `buffered` / `zero_copy` moves while the other doesn't | Usually codegen-unit placement, not real work: the two pumps are separate monomorphizations, and both call identical `Parser::new` code. `IMPROVEMENTS.md` SF-5 documents a prior instance. |
+| **One** of `buffered` / `zero_copy` moves while the other doesn't | Usually codegen-unit placement, not real work: the two pumps are separate monomorphizations, and both call identical `Parser::new` code. Seen twice — once where `parse_small` buffered read +11% at the default bench profile but ±2% at `codegen-units = 1` while zero-copy ran the *identical* changed code 3% faster, and once where a 2 KB case swung ±4% across commits with no matching code change. |
 | `parse_wide_fanout` alone | Per-element-open work (24 sibling fields). |
 
 **Prefer deterministic checks over timing.** Three regressions in a row were
@@ -215,9 +215,11 @@ Before declaring work done:
 4. Bug fix? Repro added to `tests/integration_tests.rs`.
 5. Public API touched? Doc examples still compile (doctests run in `cargo test`),
    **and `public-api.txt` re-recorded**. The snapshot is the enforcement behind
-   `TRANSITION_PLAN.md` contract C2: an intentional change is a reviewable diff,
-   an accidental removal is a failing job. `cargo semver-checks` runs alongside
-   it and judges the change against the version in `Cargo.toml`.
+   the compatibility rule this crate holds itself to: **no release removes or
+   changes a public item without a deprecation period first**. An intentional
+   change is then a reviewable diff in the snapshot; an accidental removal is a
+   failing job. `cargo semver-checks` runs alongside it and judges the change
+   against the version in `Cargo.toml`.
 6. User-visible change? Add a section to `MIGRATION.md` — a before/after and
    the exact output delta, not prose.
 
