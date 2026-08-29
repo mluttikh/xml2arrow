@@ -1097,24 +1097,31 @@ impl XmlToArrowConverter {
             //
             // An `index_of` link takes the ancestor's per-scope counter, which
             // is the same value a `<level>` column carries for that path.
+            //
+            // Guarded on the builder's own (non-`Arc`) list rather than read
+            // unconditionally from the compiled plan: this runs once per
+            // finalized row, and reaching through `compiled` costs a pointer
+            // chase and a bounds check that every table using `levels` — that
+            // is, every configuration written before this release — would pay
+            // for an empty list. The overflow check rides along in the same
+            // pass for the same reason.
             self.link_values_buffer.clear();
-            for spec in &self.compiled.link_plans[table_idx].links {
-                let ancestor = &self.table_builders[spec.ancestor_table_idx];
-                let value = match spec.kind {
-                    LinkKind::ParentId => ancestor.global_row_index,
-                    LinkKind::IndexOf => ancestor.row_index as u64,
-                };
-                self.link_values_buffer.push(value);
-            }
-            // Same ceiling as the `<level>` columns: an ordinal that wrapped
-            // would link rows to the wrong ancestor rather than fail.
-            for (value, spec) in self
-                .link_values_buffer
-                .iter()
-                .zip(&self.compiled.link_plans[table_idx].links)
-            {
-                if spec.kind == LinkKind::IndexOf && u32::try_from(*value).is_err() {
-                    return Err(self.row_index_overflow_error(spec.ancestor_table_idx));
+            if !self.table_builders[table_idx].link_builders.is_empty() {
+                for spec in &self.compiled.link_plans[table_idx].links {
+                    let ancestor = &self.table_builders[spec.ancestor_table_idx];
+                    let value = match spec.kind {
+                        LinkKind::ParentId => ancestor.global_row_index,
+                        LinkKind::IndexOf => {
+                            // Same ceiling as the `<level>` columns: an ordinal
+                            // that wrapped would link rows to the wrong
+                            // ancestor rather than fail.
+                            if u32::try_from(ancestor.row_index).is_err() {
+                                return Err(self.row_index_overflow_error(spec.ancestor_table_idx));
+                            }
+                            ancestor.row_index as u64
+                        }
+                    };
+                    self.link_values_buffer.push(value);
                 }
             }
 
