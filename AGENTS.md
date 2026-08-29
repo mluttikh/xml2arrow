@@ -136,8 +136,14 @@ cargo bench --bench parse_benchmark -- --baseline before 'parse_(tiny|small|wide
   per-benchmark numbers do not, and neither does a side-by-side you do by eye.
   This has cost two rounds of investigation on this repo. **A cross-CPU pair
   has no resolution at the 1–2% scale: the diagnostic table below cannot be
-  read from it.** Re-trigger both runs to get a same-runner pair when that
-  resolution is what you need.
+  read from it.** Re-triggering is a lottery — runner assignment is random and
+  the base run is already fixed — so the cheaper move is a **control PR**: open
+  a docs-only branch off the same base and let it benchmark. It changes no
+  code, so its binary is identical to the base's and *any* movement in its
+  absolute numbers is purely environmental. If it climbs by the same magnitude
+  as the branch under suspicion, the climb is the runner and there is nothing
+  in the code to find. GitHub's own logs do not record the CPU model, so this
+  is the most direct evidence available without CodSpeed's profile.
 - **CodSpeed counts instructions, not time.** Its summary says "will not alter
   performance" until a delta crosses an alerting threshold, so — *on a
   same-runner pair* — read the detailed per-benchmark view; a repeatable 1–2%
