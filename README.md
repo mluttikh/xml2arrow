@@ -111,6 +111,17 @@ tables:
         nullable: <true|false> # Whether the field can be null (default: false)
                                # If false, a missing/empty value is an error —
                                # except Utf8 fields, which yield "" (see below)
+        trim: <true|false>     # Strip surrounding whitespace (optional).
+                               # Default: numeric/boolean trim, Utf8 does not.
+        on_missing: <policy>   # error | null | empty — what an absent or blank
+                               # value becomes. Default depends on the type:
+                               # nullable -> null, non-nullable Utf8 -> "",
+                               # anything else -> error.
+        on_invalid: <policy>   # error | null — what an unparseable value becomes
+                               # (default: error).
+        on_repeat: <policy>    # error | first | last — what a repeated element
+                               # does (default: error).
+        null_values: [<str>]   # Literals that count as missing ("N/A", "-").
         scale: <number>        # Multiply float values by this factor (optional)
         offset: <number>       # Add this value to float values after scaling (optional)
                                # value = (value * scale) + offset
@@ -181,6 +192,28 @@ its scope. It is **value-identical to the legacy `<level>` column** for the same
 path, so it exists to let you adopt `links:` without changing a single number.
 It is not a join key: where a container repeats, two different parents both
 report `0`.
+
+**Value policies.** Every policy above is optional and **absent means current
+behavior**, including the type-dependent quirks — setting one opts out of a
+specific quirk rather than switching engines. A `defaults:` block at the top of
+the config applies them to every field that sets none:
+
+```yaml
+defaults:
+  trim: true
+tables:
+  - name: items
+    xml_path: /report
+    row: item
+    fields:
+      - {name: n, path: n, data_type: Int32, nullable: true, on_invalid: null}
+      - {name: v, path: v, data_type: Utf8, nullable: true, on_repeat: last}
+```
+
+The most useful is `on_missing`, because the default is genuinely surprising: a
+missing non-nullable `Utf8` field yields `""` while a missing non-nullable
+number is an error. `on_missing: error` makes a column behave the same whatever
+its type.
 
 **Supported data types:** `Boolean`, `Int8`, `UInt8`, `Int16`, `UInt16`, `Int32`,
 `UInt32`, `Int64`, `UInt64`, `Float32`, `Float64`, `Utf8`

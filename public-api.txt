@@ -35,6 +35,77 @@ impl core::marker::Unpin for xml2arrow::config::DType
 impl core::marker::UnsafeUnpin for xml2arrow::config::DType
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::DType
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::DType
+#[non_exhaustive] pub enum xml2arrow::config::OnInvalid
+pub xml2arrow::config::OnInvalid::Error
+pub xml2arrow::config::OnInvalid::Null
+impl core::clone::Clone for xml2arrow::config::OnInvalid
+pub fn xml2arrow::config::OnInvalid::clone(&self) -> xml2arrow::config::OnInvalid
+impl core::cmp::Eq for xml2arrow::config::OnInvalid
+impl core::cmp::PartialEq for xml2arrow::config::OnInvalid
+pub fn xml2arrow::config::OnInvalid::eq(&self, &xml2arrow::config::OnInvalid) -> bool
+impl core::fmt::Debug for xml2arrow::config::OnInvalid
+pub fn xml2arrow::config::OnInvalid::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xml2arrow::config::OnInvalid
+impl core::marker::StructuralPartialEq for xml2arrow::config::OnInvalid
+impl serde_core::ser::Serialize for xml2arrow::config::OnInvalid
+pub fn xml2arrow::config::OnInvalid::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for xml2arrow::config::OnInvalid
+pub fn xml2arrow::config::OnInvalid::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for xml2arrow::config::OnInvalid
+impl core::marker::Send for xml2arrow::config::OnInvalid
+impl core::marker::Sync for xml2arrow::config::OnInvalid
+impl core::marker::Unpin for xml2arrow::config::OnInvalid
+impl core::marker::UnsafeUnpin for xml2arrow::config::OnInvalid
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::OnInvalid
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::OnInvalid
+#[non_exhaustive] pub enum xml2arrow::config::OnMissing
+pub xml2arrow::config::OnMissing::Empty
+pub xml2arrow::config::OnMissing::Error
+pub xml2arrow::config::OnMissing::Null
+impl core::clone::Clone for xml2arrow::config::OnMissing
+pub fn xml2arrow::config::OnMissing::clone(&self) -> xml2arrow::config::OnMissing
+impl core::cmp::Eq for xml2arrow::config::OnMissing
+impl core::cmp::PartialEq for xml2arrow::config::OnMissing
+pub fn xml2arrow::config::OnMissing::eq(&self, &xml2arrow::config::OnMissing) -> bool
+impl core::fmt::Debug for xml2arrow::config::OnMissing
+pub fn xml2arrow::config::OnMissing::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xml2arrow::config::OnMissing
+impl core::marker::StructuralPartialEq for xml2arrow::config::OnMissing
+impl serde_core::ser::Serialize for xml2arrow::config::OnMissing
+pub fn xml2arrow::config::OnMissing::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for xml2arrow::config::OnMissing
+pub fn xml2arrow::config::OnMissing::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for xml2arrow::config::OnMissing
+impl core::marker::Send for xml2arrow::config::OnMissing
+impl core::marker::Sync for xml2arrow::config::OnMissing
+impl core::marker::Unpin for xml2arrow::config::OnMissing
+impl core::marker::UnsafeUnpin for xml2arrow::config::OnMissing
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::OnMissing
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::OnMissing
+#[non_exhaustive] pub enum xml2arrow::config::OnRepeat
+pub xml2arrow::config::OnRepeat::Error
+pub xml2arrow::config::OnRepeat::First
+pub xml2arrow::config::OnRepeat::Last
+impl core::clone::Clone for xml2arrow::config::OnRepeat
+pub fn xml2arrow::config::OnRepeat::clone(&self) -> xml2arrow::config::OnRepeat
+impl core::cmp::Eq for xml2arrow::config::OnRepeat
+impl core::cmp::PartialEq for xml2arrow::config::OnRepeat
+pub fn xml2arrow::config::OnRepeat::eq(&self, &xml2arrow::config::OnRepeat) -> bool
+impl core::fmt::Debug for xml2arrow::config::OnRepeat
+pub fn xml2arrow::config::OnRepeat::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xml2arrow::config::OnRepeat
+impl core::marker::StructuralPartialEq for xml2arrow::config::OnRepeat
+impl serde_core::ser::Serialize for xml2arrow::config::OnRepeat
+pub fn xml2arrow::config::OnRepeat::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for xml2arrow::config::OnRepeat
+pub fn xml2arrow::config::OnRepeat::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for xml2arrow::config::OnRepeat
+impl core::marker::Send for xml2arrow::config::OnRepeat
+impl core::marker::Sync for xml2arrow::config::OnRepeat
+impl core::marker::Unpin for xml2arrow::config::OnRepeat
+impl core::marker::UnsafeUnpin for xml2arrow::config::OnRepeat
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::OnRepeat
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::OnRepeat
 #[non_exhaustive] pub enum xml2arrow::config::RowId
 pub xml2arrow::config::RowId::Enabled(bool)
 pub xml2arrow::config::RowId::Named(alloc::string::String)
@@ -58,6 +129,7 @@ impl core::marker::UnsafeUnpin for xml2arrow::config::RowId
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::RowId
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::RowId
 #[non_exhaustive] pub struct xml2arrow::config::Config
+pub xml2arrow::config::Config::defaults: core::option::Option<xml2arrow::config::ValuePolicies>
 pub xml2arrow::config::Config::parser_options: xml2arrow::config::ParserOptions
 pub xml2arrow::config::Config::tables: alloc::vec::Vec<xml2arrow::config::TableConfig>
 impl xml2arrow::config::Config
@@ -89,6 +161,7 @@ impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::Config
 pub struct xml2arrow::config::ConfigBuilder
 impl xml2arrow::config::ConfigBuilder
 pub fn xml2arrow::config::ConfigBuilder::build(self) -> xml2arrow::errors::Result<xml2arrow::config::Config>
+pub fn xml2arrow::config::ConfigBuilder::defaults(self, xml2arrow::config::ValuePolicies) -> Self
 pub fn xml2arrow::config::ConfigBuilder::parser_options(self, xml2arrow::config::ParserOptions) -> Self
 pub fn xml2arrow::config::ConfigBuilder::table(self, xml2arrow::config::TableConfig) -> Self
 pub fn xml2arrow::config::ConfigBuilder::tables(self, impl core::iter::traits::collect::IntoIterator<Item = xml2arrow::config::TableConfig>) -> Self
@@ -109,6 +182,7 @@ pub xml2arrow::config::FieldConfig::name: alloc::string::String
 pub xml2arrow::config::FieldConfig::nullable: bool
 pub xml2arrow::config::FieldConfig::offset: core::option::Option<f64>
 pub xml2arrow::config::FieldConfig::path: core::option::Option<alloc::string::String>
+pub xml2arrow::config::FieldConfig::policies: xml2arrow::config::ValuePolicies
 pub xml2arrow::config::FieldConfig::scale: core::option::Option<f64>
 pub xml2arrow::config::FieldConfig::xml_path: core::option::Option<alloc::string::String>
 impl xml2arrow::config::FieldConfig
@@ -137,6 +211,7 @@ pub fn xml2arrow::config::FieldConfigBuilder::build(self) -> xml2arrow::errors::
 pub fn xml2arrow::config::FieldConfigBuilder::new(&str, &str, xml2arrow::config::DType) -> Self
 pub fn xml2arrow::config::FieldConfigBuilder::nullable(self, bool) -> Self
 pub fn xml2arrow::config::FieldConfigBuilder::offset(self, f64) -> Self
+pub fn xml2arrow::config::FieldConfigBuilder::policies(self, xml2arrow::config::ValuePolicies) -> Self
 pub fn xml2arrow::config::FieldConfigBuilder::scale(self, f64) -> Self
 impl core::default::Default for xml2arrow::config::FieldConfigBuilder
 pub fn xml2arrow::config::FieldConfigBuilder::default() -> xml2arrow::config::FieldConfigBuilder
@@ -251,6 +326,33 @@ impl core::marker::Unpin for xml2arrow::config::TableConfigBuilder
 impl core::marker::UnsafeUnpin for xml2arrow::config::TableConfigBuilder
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::TableConfigBuilder
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::TableConfigBuilder
+#[non_exhaustive] pub struct xml2arrow::config::ValuePolicies
+pub xml2arrow::config::ValuePolicies::null_values: core::option::Option<alloc::vec::Vec<alloc::string::String>>
+pub xml2arrow::config::ValuePolicies::on_invalid: core::option::Option<xml2arrow::config::OnInvalid>
+pub xml2arrow::config::ValuePolicies::on_missing: core::option::Option<xml2arrow::config::OnMissing>
+pub xml2arrow::config::ValuePolicies::on_repeat: core::option::Option<xml2arrow::config::OnRepeat>
+pub xml2arrow::config::ValuePolicies::trim: core::option::Option<bool>
+impl core::clone::Clone for xml2arrow::config::ValuePolicies
+pub fn xml2arrow::config::ValuePolicies::clone(&self) -> xml2arrow::config::ValuePolicies
+impl core::cmp::Eq for xml2arrow::config::ValuePolicies
+impl core::cmp::PartialEq for xml2arrow::config::ValuePolicies
+pub fn xml2arrow::config::ValuePolicies::eq(&self, &xml2arrow::config::ValuePolicies) -> bool
+impl core::default::Default for xml2arrow::config::ValuePolicies
+pub fn xml2arrow::config::ValuePolicies::default() -> xml2arrow::config::ValuePolicies
+impl core::fmt::Debug for xml2arrow::config::ValuePolicies
+pub fn xml2arrow::config::ValuePolicies::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for xml2arrow::config::ValuePolicies
+impl serde_core::ser::Serialize for xml2arrow::config::ValuePolicies
+pub fn xml2arrow::config::ValuePolicies::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for xml2arrow::config::ValuePolicies
+pub fn xml2arrow::config::ValuePolicies::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for xml2arrow::config::ValuePolicies
+impl core::marker::Send for xml2arrow::config::ValuePolicies
+impl core::marker::Sync for xml2arrow::config::ValuePolicies
+impl core::marker::Unpin for xml2arrow::config::ValuePolicies
+impl core::marker::UnsafeUnpin for xml2arrow::config::ValuePolicies
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::ValuePolicies
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::ValuePolicies
 pub mod xml2arrow::errors
 #[non_exhaustive] pub enum xml2arrow::errors::ConfigIssue
 pub xml2arrow::errors::ConfigIssue::DuplicateFieldName
@@ -283,6 +385,11 @@ pub xml2arrow::errors::ConfigIssue::FieldPathNotUnderTable::field: alloc::string
 pub xml2arrow::errors::ConfigIssue::FieldPathNotUnderTable::field_path: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::FieldPathNotUnderTable::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::FieldPathNotUnderTable::table_path: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::InapplicablePolicy
+pub xml2arrow::errors::ConfigIssue::InapplicablePolicy::field: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::InapplicablePolicy::policy: &'static str
+pub xml2arrow::errors::ConfigIssue::InapplicablePolicy::reason: &'static str
+pub xml2arrow::errors::ConfigIssue::InapplicablePolicy::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::IndexOfNotAncestorTable
 pub xml2arrow::errors::ConfigIssue::IndexOfNotAncestorTable::index_of: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::IndexOfNotAncestorTable::table: alloc::string::String
@@ -637,6 +744,77 @@ impl core::marker::Unpin for xml2arrow::lint::Lint
 impl core::marker::UnsafeUnpin for xml2arrow::lint::Lint
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::lint::Lint
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::lint::Lint
+#[non_exhaustive] pub enum xml2arrow::OnInvalid
+pub xml2arrow::OnInvalid::Error
+pub xml2arrow::OnInvalid::Null
+impl core::clone::Clone for xml2arrow::config::OnInvalid
+pub fn xml2arrow::config::OnInvalid::clone(&self) -> xml2arrow::config::OnInvalid
+impl core::cmp::Eq for xml2arrow::config::OnInvalid
+impl core::cmp::PartialEq for xml2arrow::config::OnInvalid
+pub fn xml2arrow::config::OnInvalid::eq(&self, &xml2arrow::config::OnInvalid) -> bool
+impl core::fmt::Debug for xml2arrow::config::OnInvalid
+pub fn xml2arrow::config::OnInvalid::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xml2arrow::config::OnInvalid
+impl core::marker::StructuralPartialEq for xml2arrow::config::OnInvalid
+impl serde_core::ser::Serialize for xml2arrow::config::OnInvalid
+pub fn xml2arrow::config::OnInvalid::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for xml2arrow::config::OnInvalid
+pub fn xml2arrow::config::OnInvalid::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for xml2arrow::config::OnInvalid
+impl core::marker::Send for xml2arrow::config::OnInvalid
+impl core::marker::Sync for xml2arrow::config::OnInvalid
+impl core::marker::Unpin for xml2arrow::config::OnInvalid
+impl core::marker::UnsafeUnpin for xml2arrow::config::OnInvalid
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::OnInvalid
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::OnInvalid
+#[non_exhaustive] pub enum xml2arrow::OnMissing
+pub xml2arrow::OnMissing::Empty
+pub xml2arrow::OnMissing::Error
+pub xml2arrow::OnMissing::Null
+impl core::clone::Clone for xml2arrow::config::OnMissing
+pub fn xml2arrow::config::OnMissing::clone(&self) -> xml2arrow::config::OnMissing
+impl core::cmp::Eq for xml2arrow::config::OnMissing
+impl core::cmp::PartialEq for xml2arrow::config::OnMissing
+pub fn xml2arrow::config::OnMissing::eq(&self, &xml2arrow::config::OnMissing) -> bool
+impl core::fmt::Debug for xml2arrow::config::OnMissing
+pub fn xml2arrow::config::OnMissing::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xml2arrow::config::OnMissing
+impl core::marker::StructuralPartialEq for xml2arrow::config::OnMissing
+impl serde_core::ser::Serialize for xml2arrow::config::OnMissing
+pub fn xml2arrow::config::OnMissing::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for xml2arrow::config::OnMissing
+pub fn xml2arrow::config::OnMissing::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for xml2arrow::config::OnMissing
+impl core::marker::Send for xml2arrow::config::OnMissing
+impl core::marker::Sync for xml2arrow::config::OnMissing
+impl core::marker::Unpin for xml2arrow::config::OnMissing
+impl core::marker::UnsafeUnpin for xml2arrow::config::OnMissing
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::OnMissing
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::OnMissing
+#[non_exhaustive] pub enum xml2arrow::OnRepeat
+pub xml2arrow::OnRepeat::Error
+pub xml2arrow::OnRepeat::First
+pub xml2arrow::OnRepeat::Last
+impl core::clone::Clone for xml2arrow::config::OnRepeat
+pub fn xml2arrow::config::OnRepeat::clone(&self) -> xml2arrow::config::OnRepeat
+impl core::cmp::Eq for xml2arrow::config::OnRepeat
+impl core::cmp::PartialEq for xml2arrow::config::OnRepeat
+pub fn xml2arrow::config::OnRepeat::eq(&self, &xml2arrow::config::OnRepeat) -> bool
+impl core::fmt::Debug for xml2arrow::config::OnRepeat
+pub fn xml2arrow::config::OnRepeat::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xml2arrow::config::OnRepeat
+impl core::marker::StructuralPartialEq for xml2arrow::config::OnRepeat
+impl serde_core::ser::Serialize for xml2arrow::config::OnRepeat
+pub fn xml2arrow::config::OnRepeat::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for xml2arrow::config::OnRepeat
+pub fn xml2arrow::config::OnRepeat::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for xml2arrow::config::OnRepeat
+impl core::marker::Send for xml2arrow::config::OnRepeat
+impl core::marker::Sync for xml2arrow::config::OnRepeat
+impl core::marker::Unpin for xml2arrow::config::OnRepeat
+impl core::marker::UnsafeUnpin for xml2arrow::config::OnRepeat
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::OnRepeat
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::OnRepeat
 #[non_exhaustive] pub enum xml2arrow::RowId
 pub xml2arrow::RowId::Enabled(bool)
 pub xml2arrow::RowId::Named(alloc::string::String)
@@ -694,6 +872,7 @@ impl<'p, S> core::marker::UnsafeUnpin for xml2arrow::BatchStream<'p, S> where S:
 impl<'p, S> core::panic::unwind_safe::RefUnwindSafe for xml2arrow::BatchStream<'p, S> where S: core::panic::unwind_safe::RefUnwindSafe
 impl<'p, S> core::panic::unwind_safe::UnwindSafe for xml2arrow::BatchStream<'p, S> where S: core::panic::unwind_safe::UnwindSafe
 #[non_exhaustive] pub struct xml2arrow::Config
+pub xml2arrow::Config::defaults: core::option::Option<xml2arrow::config::ValuePolicies>
 pub xml2arrow::Config::parser_options: xml2arrow::config::ParserOptions
 pub xml2arrow::Config::tables: alloc::vec::Vec<xml2arrow::config::TableConfig>
 impl xml2arrow::config::Config
@@ -725,6 +904,7 @@ impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::Config
 pub struct xml2arrow::ConfigBuilder
 impl xml2arrow::config::ConfigBuilder
 pub fn xml2arrow::config::ConfigBuilder::build(self) -> xml2arrow::errors::Result<xml2arrow::config::Config>
+pub fn xml2arrow::config::ConfigBuilder::defaults(self, xml2arrow::config::ValuePolicies) -> Self
 pub fn xml2arrow::config::ConfigBuilder::parser_options(self, xml2arrow::config::ParserOptions) -> Self
 pub fn xml2arrow::config::ConfigBuilder::table(self, xml2arrow::config::TableConfig) -> Self
 pub fn xml2arrow::config::ConfigBuilder::tables(self, impl core::iter::traits::collect::IntoIterator<Item = xml2arrow::config::TableConfig>) -> Self
@@ -745,6 +925,7 @@ pub xml2arrow::FieldConfig::name: alloc::string::String
 pub xml2arrow::FieldConfig::nullable: bool
 pub xml2arrow::FieldConfig::offset: core::option::Option<f64>
 pub xml2arrow::FieldConfig::path: core::option::Option<alloc::string::String>
+pub xml2arrow::FieldConfig::policies: xml2arrow::config::ValuePolicies
 pub xml2arrow::FieldConfig::scale: core::option::Option<f64>
 pub xml2arrow::FieldConfig::xml_path: core::option::Option<alloc::string::String>
 impl xml2arrow::config::FieldConfig
@@ -773,6 +954,7 @@ pub fn xml2arrow::config::FieldConfigBuilder::build(self) -> xml2arrow::errors::
 pub fn xml2arrow::config::FieldConfigBuilder::new(&str, &str, xml2arrow::config::DType) -> Self
 pub fn xml2arrow::config::FieldConfigBuilder::nullable(self, bool) -> Self
 pub fn xml2arrow::config::FieldConfigBuilder::offset(self, f64) -> Self
+pub fn xml2arrow::config::FieldConfigBuilder::policies(self, xml2arrow::config::ValuePolicies) -> Self
 pub fn xml2arrow::config::FieldConfigBuilder::scale(self, f64) -> Self
 impl core::default::Default for xml2arrow::config::FieldConfigBuilder
 pub fn xml2arrow::config::FieldConfigBuilder::default() -> xml2arrow::config::FieldConfigBuilder
@@ -959,6 +1141,33 @@ impl core::marker::Unpin for xml2arrow::config::TableConfigBuilder
 impl core::marker::UnsafeUnpin for xml2arrow::config::TableConfigBuilder
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::TableConfigBuilder
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::TableConfigBuilder
+#[non_exhaustive] pub struct xml2arrow::ValuePolicies
+pub xml2arrow::ValuePolicies::null_values: core::option::Option<alloc::vec::Vec<alloc::string::String>>
+pub xml2arrow::ValuePolicies::on_invalid: core::option::Option<xml2arrow::config::OnInvalid>
+pub xml2arrow::ValuePolicies::on_missing: core::option::Option<xml2arrow::config::OnMissing>
+pub xml2arrow::ValuePolicies::on_repeat: core::option::Option<xml2arrow::config::OnRepeat>
+pub xml2arrow::ValuePolicies::trim: core::option::Option<bool>
+impl core::clone::Clone for xml2arrow::config::ValuePolicies
+pub fn xml2arrow::config::ValuePolicies::clone(&self) -> xml2arrow::config::ValuePolicies
+impl core::cmp::Eq for xml2arrow::config::ValuePolicies
+impl core::cmp::PartialEq for xml2arrow::config::ValuePolicies
+pub fn xml2arrow::config::ValuePolicies::eq(&self, &xml2arrow::config::ValuePolicies) -> bool
+impl core::default::Default for xml2arrow::config::ValuePolicies
+pub fn xml2arrow::config::ValuePolicies::default() -> xml2arrow::config::ValuePolicies
+impl core::fmt::Debug for xml2arrow::config::ValuePolicies
+pub fn xml2arrow::config::ValuePolicies::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for xml2arrow::config::ValuePolicies
+impl serde_core::ser::Serialize for xml2arrow::config::ValuePolicies
+pub fn xml2arrow::config::ValuePolicies::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for xml2arrow::config::ValuePolicies
+pub fn xml2arrow::config::ValuePolicies::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for xml2arrow::config::ValuePolicies
+impl core::marker::Send for xml2arrow::config::ValuePolicies
+impl core::marker::Sync for xml2arrow::config::ValuePolicies
+impl core::marker::Unpin for xml2arrow::config::ValuePolicies
+impl core::marker::UnsafeUnpin for xml2arrow::config::ValuePolicies
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::ValuePolicies
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::ValuePolicies
 pub trait xml2arrow::EventSource: xml2arrow::xml_parser::sealed::Sealed
 impl xml2arrow::EventSource for xml2arrow::SliceSource<'_>
 impl<R: alloc::io::buf_read::BufRead> xml2arrow::EventSource for xml2arrow::ReaderSource<R>

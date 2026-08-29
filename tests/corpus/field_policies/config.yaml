@@ -1,0 +1,23 @@
+# Every value policy at once, on a document built to trip each: a null literal,
+# an unparseable number, a missing element, a repeated element, and a value with
+# surrounding whitespace. Without these keys the same document is a parse error
+# on row 3 — the snapshot is what the opt-outs buy.
+defaults:
+  trim: true
+tables:
+  - name: items
+    xml_path: /report
+    row: item
+    fields:
+      - name: n
+        path: n
+        data_type: Int32
+        nullable: true
+        null_values: ["N/A"]
+        on_invalid: null
+      - name: s
+        path: s
+        data_type: Utf8
+        nullable: true
+        on_missing: null
+      - {name: v, path: v, data_type: Utf8, nullable: true, on_repeat: last}

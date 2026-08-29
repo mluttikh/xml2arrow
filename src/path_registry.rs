@@ -777,6 +777,7 @@ tables:
                 ),
             ],
             parser_options: Default::default(),
+            defaults: None,
         }
     }
 

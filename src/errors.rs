@@ -315,6 +315,14 @@ pub enum ConfigIssue {
         row: String,
         row_path: String,
     },
+    /// A value policy that cannot apply to the field it was set on: `null`
+    /// on a non-nullable column, or `empty` on a type that has no empty value.
+    InapplicablePolicy {
+        table: String,
+        field: String,
+        policy: &'static str,
+        reason: &'static str,
+    },
     /// A table declared both `links` and a non-empty `levels`. They are two
     /// ways to say the same thing, and `links` supersedes `levels`.
     LinksAndLevels {
@@ -570,6 +578,15 @@ impl fmt::Display for ConfigIssue {
             } => write!(
                 f,
                 "Table '{table}' declares row '{row}' which resolves to '{row_path}', not under its xml_path '{table_path}'"
+            ),
+            ConfigIssue::InapplicablePolicy {
+                table,
+                field,
+                policy,
+                reason,
+            } => write!(
+                f,
+                "Field '{field}' in table '{table}' sets {policy}, which cannot apply here: {reason}"
             ),
             ConfigIssue::LinksAndLevels { table } => write!(
                 f,

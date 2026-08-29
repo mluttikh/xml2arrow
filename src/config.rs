@@ -257,6 +257,10 @@ pub struct Config {
     /// Parser options.
     #[serde(default)]
     pub parser_options: ParserOptions,
+    /// Value-handling policies applied to every field that does not set its
+    /// own. Absent leaves every field on current behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defaults: Option<ValuePolicies>,
 }
 
 impl Config {
@@ -287,6 +291,7 @@ impl Config {
     ///
     /// Returns an error if any of the above constraints are violated.
     pub fn validate(&self) -> Result<()> {
+        let empty_policies = ValuePolicies::default();
         // --- Table-level checks ---
         let mut table_names = HashSet::with_capacity(self.tables.len());
         for (table_idx, table) in self.tables.iter().enumerate() {
@@ -554,6 +559,40 @@ impl Config {
                     });
                 }
 
+                // A policy that cannot apply is rejected rather than quietly
+                // ignored: `on_missing: null` on a non-nullable column has no
+                // valid outcome, and silently falling back to the default
+                // would leave the config saying one thing and the data doing
+                // another.
+                let effective = field
+                    .policies
+                    .over(self.defaults.as_ref().unwrap_or(&empty_policies));
+                let inapplicable =
+                    if effective.on_missing == Some(OnMissing::Null) && !field.nullable {
+                        Some(("on_missing: null", "the column is not nullable"))
+                    } else if effective.on_missing == Some(OnMissing::Empty)
+                        && field.data_type != DType::Utf8
+                    {
+                        Some((
+                            "on_missing: empty",
+                            "only Utf8 has an empty value; use null or error",
+                        ))
+                    } else if effective.on_invalid == Some(OnInvalid::Null) && !field.nullable {
+                        Some(("on_invalid: null", "the column is not nullable"))
+                    } else {
+                        None
+                    };
+                if let Some((policy, reason)) = inapplicable {
+                    return Err(Error::InvalidConfig {
+                        reason: ConfigIssue::InapplicablePolicy {
+                            table: table.name.clone(),
+                            field: field.name.clone(),
+                            policy,
+                            reason,
+                        },
+                    });
+                }
+
                 field.validate()?;
             }
         }
@@ -646,6 +685,146 @@ impl Config {
             }
         }
         false
+    }
+}
+
+/// Accepts YAML's bare `null` as the `Null` variant rather than as "key absent".
+///
+/// `on_missing: null` is what anyone would write, but in YAML a bare `null` is
+/// the null *literal*, so `Option<OnMissing>` deserializes it to `None` — which
+/// is indistinguishable from omitting the key, and would silently leave the
+/// field on its default. A policy that is quietly ignored is worse than one
+/// that is rejected, so the key is read through here: present-but-null means
+/// the variant, and only an absent key means unset.
+fn de_policy_allowing_null<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + NullPolicy,
+{
+    // Serde calls this only when the key is *present* — an absent key takes the
+    // `#[serde(default)]` path and never reaches here. So a value that
+    // deserializes to `None` is a written-out null, which is the variant.
+    Ok(Some(
+        Option::<T>::deserialize(deserializer)?.unwrap_or_else(T::null_variant),
+    ))
+}
+
+/// Implemented by the policies that have a `null` outcome, so
+/// [`de_policy_allowing_null`] knows what a bare `null` means for each.
+trait NullPolicy {
+    fn null_variant() -> Self;
+}
+
+impl NullPolicy for OnMissing {
+    fn null_variant() -> Self {
+        OnMissing::Null
+    }
+}
+
+impl NullPolicy for OnInvalid {
+    fn null_variant() -> Self {
+        OnInvalid::Null
+    }
+}
+
+/// What to do when a field captures no value in a row.
+///
+/// Absent from a config, the default depends on the field: a `nullable` field
+/// yields null, a non-nullable `Utf8` field yields `""`, and any other
+/// non-nullable field raises an error. That asymmetry is long-standing and
+/// surprising, and naming a policy is how a config opts out of it.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum OnMissing {
+    /// Raise `MissingRequiredField`.
+    Error,
+    /// Append null. Requires the column to be nullable.
+    Null,
+    /// Append the type's empty value — `""` for `Utf8`; not valid elsewhere.
+    Empty,
+}
+
+/// What to do when a field's value cannot be parsed as its declared type.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum OnInvalid {
+    /// Raise `ParseError`, naming the field, value and reason.
+    Error,
+    /// Append null and continue. Requires the column to be nullable.
+    Null,
+}
+
+/// What to do when a field's element carries a value more than once in one row.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum OnRepeat {
+    /// Raise `ParseKind::DuplicateValue`. Silently keeping one of several
+    /// values is how a repeated element becomes a wrong column, so this is the
+    /// default.
+    Error,
+    /// Keep the first occurrence and ignore later ones.
+    First,
+    /// Keep the last occurrence, overwriting earlier ones.
+    Last,
+}
+
+/// Per-field value-handling policies.
+///
+/// Every key is optional and **absent means current behavior**, including the
+/// type-dependent quirks — setting one is opting out of a specific quirk, not
+/// switching to a different engine. A [`Config::defaults`] block sets them for
+/// every field at once; a field's own setting wins.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ValuePolicies {
+    /// Whether to strip surrounding whitespace before using the value.
+    ///
+    /// Absent keeps the existing split: numeric and boolean fields trim,
+    /// `Utf8` does not. Setting it applies uniformly, whatever the type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trim: Option<bool>,
+    /// See [`OnMissing`].
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "de_policy_allowing_null"
+    )]
+    pub on_missing: Option<OnMissing>,
+    /// See [`OnInvalid`].
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "de_policy_allowing_null"
+    )]
+    pub on_invalid: Option<OnInvalid>,
+    /// See [`OnRepeat`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_repeat: Option<OnRepeat>,
+    /// Literal values that count as *missing* rather than as data — `"N/A"`,
+    /// `"-"`, `"null"`. Compared after trimming, case-sensitively.
+    ///
+    /// The resulting missing value is then handled by [`ValuePolicies::on_missing`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub null_values: Option<Vec<String>>,
+}
+
+impl ValuePolicies {
+    /// Returns `self`'s settings, falling back to `defaults` key by key.
+    #[must_use]
+    pub(crate) fn over(&self, defaults: &ValuePolicies) -> ValuePolicies {
+        ValuePolicies {
+            trim: self.trim.or(defaults.trim),
+            on_missing: self.on_missing.or(defaults.on_missing),
+            on_invalid: self.on_invalid.or(defaults.on_invalid),
+            on_repeat: self.on_repeat.or(defaults.on_repeat),
+            null_values: self
+                .null_values
+                .clone()
+                .or_else(|| defaults.null_values.clone()),
+        }
     }
 }
 
@@ -855,6 +1034,7 @@ impl TableConfig {
 pub struct ConfigBuilder {
     tables: Vec<TableConfig>,
     parser_options: ParserOptions,
+    defaults: Option<ValuePolicies>,
 }
 
 impl ConfigBuilder {
@@ -879,6 +1059,13 @@ impl ConfigBuilder {
         self
     }
 
+    /// Sets the value-handling policies applied to fields that set none.
+    #[must_use]
+    pub fn defaults(mut self, defaults: ValuePolicies) -> Self {
+        self.defaults = Some(defaults);
+        self
+    }
+
     /// Validates and returns the configuration.
     ///
     /// # Errors
@@ -889,6 +1076,7 @@ impl ConfigBuilder {
         let config = Config {
             tables: self.tables,
             parser_options: self.parser_options,
+            defaults: self.defaults,
         };
         config.validate()?;
         Ok(config)
@@ -1032,6 +1220,10 @@ pub struct FieldConfig {
     /// Constant added to `Float32`/`Float64` values *after* scaling:
     /// `value = (value * scale) + offset`. Rejected on any other data type.
     pub offset: Option<f64>,
+    /// Value-handling policies for this field. Flattened, so they are written
+    /// as ordinary field keys (`trim:`, `on_missing:`, …).
+    #[serde(flatten)]
+    pub policies: ValuePolicies,
 }
 
 impl FieldConfig {
@@ -1074,6 +1266,7 @@ pub struct FieldConfigBuilder {
     nullable: bool,
     scale: Option<f64>,
     offset: Option<f64>,
+    policies: ValuePolicies,
 }
 
 impl FieldConfigBuilder {
@@ -1104,6 +1297,13 @@ impl FieldConfigBuilder {
             data_type,
             ..Default::default()
         }
+    }
+
+    /// Sets this field's value-handling policies. See [`ValuePolicies`].
+    #[must_use]
+    pub fn policies(mut self, policies: ValuePolicies) -> Self {
+        self.policies = policies;
+        self
     }
 
     /// Sets the `nullable` flag for the field configuration being built.
@@ -1177,6 +1377,7 @@ impl FieldConfigBuilder {
             nullable: self.nullable,
             scale: self.scale,
             offset: self.offset,
+            policies: self.policies,
         };
         cfg.validate()?;
         Ok(cfg)
@@ -1263,6 +1464,7 @@ mod tests {
         #[values(
             Config {
                 parser_options: Default::default(),
+                defaults: None,
                 tables: vec![
                     TableConfig::new("table1", "/path/to", vec![], vec![
                         FieldConfigBuilder::new("string_field", "/path/to/string_field", DType::Utf8)
@@ -1284,6 +1486,7 @@ mod tests {
             },
             Config {
                 parser_options: Default::default(),
+                defaults: None,
                 tables: vec![]
             }
         )]
@@ -1324,6 +1527,7 @@ mod tests {
         let config = Config {
             tables: vec![],
             parser_options: Default::default(),
+            defaults: None,
         };
         let result = config.to_yaml_file(PathBuf::from("/not/existing/path/config.yaml"));
         assert!(result.is_err());
@@ -1589,6 +1793,7 @@ mod tests {
     fn test_duplicate_table_names_rejected() {
         let config = Config {
             parser_options: Default::default(),
+            defaults: None,
             tables: vec![
                 TableConfig::new("items", "/root/a", vec![], vec![]),
                 TableConfig::new("items", "/root/b", vec![], vec![]),
@@ -1603,6 +1808,7 @@ mod tests {
     fn test_empty_table_name_rejected() {
         let config = Config {
             parser_options: Default::default(),
+            defaults: None,
             tables: vec![TableConfig::new("", "/root", vec![], vec![])],
         };
         let err = config.validate().unwrap_err();
@@ -1614,6 +1820,7 @@ mod tests {
     fn test_empty_table_xml_path_rejected() {
         let config = Config {
             parser_options: Default::default(),
+            defaults: None,
             tables: vec![TableConfig::new("items", "", vec![], vec![])],
         };
         let err = config.validate().unwrap_err();
@@ -1625,6 +1832,7 @@ mod tests {
     fn test_duplicate_field_names_in_same_table_rejected() {
         let config = Config {
             parser_options: Default::default(),
+            defaults: None,
             tables: vec![TableConfig::new(
                 "items",
                 "/root",
@@ -1648,6 +1856,7 @@ mod tests {
     fn test_same_field_name_in_different_tables_allowed() {
         let config = Config {
             parser_options: Default::default(),
+            defaults: None,
             tables: vec![
                 TableConfig::new(
                     "table_a",
@@ -1678,6 +1887,7 @@ mod tests {
     fn test_empty_field_name_rejected() {
         let config = Config {
             parser_options: Default::default(),
+            defaults: None,
             tables: vec![TableConfig::new(
                 "items",
                 "/root",
@@ -1698,6 +1908,7 @@ mod tests {
     fn test_empty_field_xml_path_rejected() {
         let config = Config {
             parser_options: Default::default(),
+            defaults: None,
             tables: vec![TableConfig::new(
                 "items",
                 "/root",
@@ -1718,6 +1929,7 @@ mod tests {
     fn test_field_path_not_under_table_path_rejected() {
         let config = Config {
             parser_options: Default::default(),
+            defaults: None,
             tables: vec![TableConfig::new(
                 "items",
                 "/root/items",
@@ -1740,6 +1952,7 @@ mod tests {
         // not under it as a *path* — the check must be segment-aware.
         let config = Config {
             parser_options: Default::default(),
+            defaults: None,
             tables: vec![TableConfig::new(
                 "items",
                 "/root/item",
@@ -1761,6 +1974,7 @@ mod tests {
         // A field can capture the table element's own text content.
         let config = Config {
             parser_options: Default::default(),
+            defaults: None,
             tables: vec![TableConfig::new(
                 "items",
                 "/root/items",
@@ -1781,6 +1995,7 @@ mod tests {
         // would silently starve the earlier table of rows.
         let config = Config {
             parser_options: Default::default(),
+            defaults: None,
             tables: vec![
                 TableConfig::new("a", "/data", vec![], vec![]),
                 TableConfig::new("b", "/data", vec![], vec![]),
@@ -1799,6 +2014,7 @@ mod tests {
         // node, so they must count as duplicates regardless of spelling.
         let config = Config {
             parser_options: Default::default(),
+            defaults: None,
             tables: vec![
                 TableConfig::new("a", "/data", vec![], vec![]),
                 TableConfig::new("b", "data/", vec![], vec![]),
@@ -1812,6 +2028,7 @@ mod tests {
     fn test_field_path_under_table_path_accepted() {
         let config = Config {
             parser_options: Default::default(),
+            defaults: None,
             tables: vec![TableConfig::new(
                 "items",
                 "/root/items",
@@ -1830,6 +2047,7 @@ mod tests {
     fn test_root_table_allows_any_field_path() {
         let config = Config {
             parser_options: Default::default(),
+            defaults: None,
             tables: vec![TableConfig::new(
                 "root",
                 "/",
@@ -1848,6 +2066,7 @@ mod tests {
     fn test_valid_config_passes_all_checks() {
         let config = Config {
             parser_options: Default::default(),
+            defaults: None,
             tables: vec![
                 TableConfig::new(
                     "header",
@@ -2382,5 +2601,147 @@ mod tests {
         .unwrap();
         assert!(config.tables[0].levels.is_empty());
         assert!(config.validate().is_ok());
+    }
+
+    // --- Value policies ------------------------------------------------------
+
+    /// `on_missing: null` is what anyone would write, and in YAML a bare `null`
+    /// is the null *literal* — so the obvious spelling deserializes to "key
+    /// absent" unless it is handled. A silently ignored policy is worse than a
+    /// rejected one, hence the custom deserializer this pins.
+    #[rstest]
+    #[case("on_missing: null")]
+    #[case("on_missing: \"null\"")]
+    fn a_bare_yaml_null_selects_the_null_policy(#[case] line: &str) {
+        let config: Config = yaml_serde::from_str(&format!(
+            r#"
+            tables:
+              - name: t
+                xml_path: /a
+                row: item
+                fields:
+                  - {{name: v, path: v, data_type: Int32, nullable: true, {line}}}
+            "#
+        ))
+        .unwrap();
+        assert_eq!(
+            config.tables[0].fields[0].policies.on_missing,
+            Some(OnMissing::Null)
+        );
+    }
+
+    /// Omitting the key still means unset, which is what keeps every existing
+    /// config on its current behavior.
+    #[test]
+    fn an_absent_policy_key_stays_unset() {
+        let config: Config = yaml_serde::from_str(
+            r#"
+            tables:
+              - name: t
+                xml_path: /a
+                row: item
+                fields:
+                  - {name: v, path: v, data_type: Int32}
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.tables[0].fields[0].policies,
+            ValuePolicies::default()
+        );
+    }
+
+    fn config_with_policy(nullable: bool, dtype: DType, policies: ValuePolicies) -> Result<Config> {
+        let field = FieldConfigBuilder::new("v", "v", dtype)
+            .nullable(nullable)
+            .policies(policies)
+            .build()
+            .unwrap();
+        Config::builder()
+            .table(
+                TableConfig::builder("t", "/a")
+                    .row("item")
+                    .field(field)
+                    .build(),
+            )
+            .build()
+    }
+
+    /// A policy with no valid outcome is rejected rather than quietly ignored.
+    #[rstest]
+    #[case::null_missing_on_non_nullable(false, DType::Int32, ValuePolicies { on_missing: Some(OnMissing::Null), ..Default::default() })]
+    #[case::null_invalid_on_non_nullable(false, DType::Int32, ValuePolicies { on_invalid: Some(OnInvalid::Null), ..Default::default() })]
+    #[case::empty_on_a_number(false, DType::Int32, ValuePolicies { on_missing: Some(OnMissing::Empty), ..Default::default() })]
+    fn inapplicable_policies_are_rejected(
+        #[case] nullable: bool,
+        #[case] dtype: DType,
+        #[case] policies: ValuePolicies,
+    ) {
+        let config = config_with_policy(nullable, dtype, policies);
+        assert!(
+            matches!(
+                config,
+                Err(Error::InvalidConfig {
+                    reason: ConfigIssue::InapplicablePolicy { .. }
+                })
+            ),
+            "got {config:?}"
+        );
+    }
+
+    /// The same policies are fine where they can apply.
+    #[rstest]
+    #[case::null_on_nullable(true, DType::Int32, ValuePolicies { on_missing: Some(OnMissing::Null), ..Default::default() })]
+    #[case::empty_on_utf8(false, DType::Utf8, ValuePolicies { on_missing: Some(OnMissing::Empty), ..Default::default() })]
+    #[case::error_anywhere(false, DType::Int32, ValuePolicies { on_missing: Some(OnMissing::Error), ..Default::default() })]
+    fn applicable_policies_are_accepted(
+        #[case] nullable: bool,
+        #[case] dtype: DType,
+        #[case] policies: ValuePolicies,
+    ) {
+        assert!(config_with_policy(nullable, dtype, policies).is_ok());
+    }
+
+    /// A field's own setting wins over the `defaults:` block, key by key.
+    #[test]
+    fn field_policies_layer_over_config_defaults() {
+        let defaults = ValuePolicies {
+            trim: Some(true),
+            on_repeat: Some(OnRepeat::Last),
+            ..Default::default()
+        };
+        let field = ValuePolicies {
+            trim: Some(false),
+            ..Default::default()
+        };
+        let merged = field.over(&defaults);
+        assert_eq!(merged.trim, Some(false), "the field wins");
+        assert_eq!(
+            merged.on_repeat,
+            Some(OnRepeat::Last),
+            "the default fills the gap"
+        );
+    }
+
+    #[test]
+    fn policies_survive_a_yaml_round_trip() {
+        let config = config_with_policy(
+            true,
+            DType::Int32,
+            ValuePolicies {
+                trim: Some(true),
+                on_missing: Some(OnMissing::Null),
+                on_repeat: Some(OnRepeat::First),
+                null_values: Some(vec!["N/A".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let yaml = yaml_serde::to_string(&config).unwrap();
+        let restored: Config = yaml_serde::from_str(&yaml).unwrap();
+        assert_eq!(restored, config);
+        // Unset keys must not appear, so a config that sets no policy stays as
+        // it was written.
+        assert!(!yaml.contains("on_invalid"));
     }
 }
