@@ -126,17 +126,34 @@ cargo bench --bench parse_benchmark -- --baseline before 'parse_(tiny|small|wide
   If results look bad, re-bench the *unchanged* code against its own baseline
   first — a few percent of "regression" is often thermal noise. CI runs
   CodSpeed for authoritative numbers.
+- **Check the runner CPU before reading anything else.** CodSpeed's simulation
+  mode derives its cache and frequency model from the physical CPU, so when a
+  base and head run land on different hardware, *every* benchmark's absolute
+  microseconds shift on byte-identical code — uniformly, in one direction, and
+  most on the small setup-dominated cases. It reads exactly like a real
+  regression. CodSpeed's own comparison corrects for it (that is why the
+  verdict can say 0% while the raw numbers look 1–6% worse), but the raw
+  per-benchmark numbers do not, and neither does a side-by-side you do by eye.
+  This has cost two rounds of investigation on this repo. **A cross-CPU pair
+  has no resolution at the 1–2% scale: the diagnostic table below cannot be
+  read from it.** Re-trigger both runs to get a same-runner pair when that
+  resolution is what you need.
 - **CodSpeed counts instructions, not time.** Its summary says "will not alter
-  performance" until a delta crosses an alerting threshold, so read the
-  *detailed per-benchmark view* — a repeatable 1–2% there is real signal.
-  The two metrics can move in opposite directions: a change has measured 7%
-  *faster* in local wall-clock while CodSpeed counted more instructions. Do
-  not use a stopwatch to argue against an instruction count.
+  performance" until a delta crosses an alerting threshold, so — *on a
+  same-runner pair* — read the detailed per-benchmark view; a repeatable 1–2%
+  there is real signal. The two metrics can move in opposite directions: a
+  change has measured 7% *faster* in local wall-clock while CodSpeed counted
+  more instructions. Do not use a stopwatch to argue against an instruction
+  count.
+- **The trustworthy order** when a number looks wrong: same runner? → is the
+  aggregate verdict flat? → does the pattern below localize it? → only then
+  read code.
 
 ### Reading the benchmark set as a diagnostic
 
 The suite is built so that *which* benchmarks move localizes the cause. Check
-the pattern before reading any code:
+the pattern before reading any code — after confirming both runs measured on the
+same runner, without which none of these rows mean anything:
 
 | Pattern | Cause |
 |---|---|
