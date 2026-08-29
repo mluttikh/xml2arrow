@@ -82,17 +82,6 @@ pub struct PathNodeInfo {
     /// leaves them directly, without going through the row-finalizing close
     /// path, so an attribute has never delimited a row.
     pub ends_row: bool,
-    /// Whether closing this element finalizes a row of **its own** table,
-    /// rather than of the enclosing one. Set only by `row: "."`, where the
-    /// declared row element *is* the table element.
-    ///
-    /// It needs its own bit because of ordering: `close_element` pops the
-    /// table scope before finalizing a row, so a single flag on a table node
-    /// would hand the row to the parent table. `ends_own_row` fires before the
-    /// pop, `ends_row` after it, and a node may legitimately carry both — a
-    /// `row: "."` table that is itself a configured child of an outer table
-    /// closes its own row *and* delimits the outer table's.
-    pub ends_own_row: bool,
     /// Whether this node is a `stop_at_paths` target, so that closing it ends
     /// the parse. Replaces a linear scan of the configured stop paths on every
     /// element close.
@@ -287,13 +276,15 @@ impl PathRegistry {
             };
             let table_node = registry.get_or_create_path(&table_config.xml_path);
             let row_node = registry.get_or_create_path(&row_path);
-            if row_node == table_node {
-                // `row: "."` — one row per table element. Finalized before the
-                // table scope is popped; see `PathNodeInfo::ends_own_row`.
-                registry.node_info[row_node.index()].ends_own_row = true;
-            } else {
+            if row_node != table_node {
                 registry.node_info[row_node.index()].ends_row = true;
             }
+            // `row: "."` deliberately marks nothing here. The row element *is*
+            // the table element, so it has to finalize before its own scope is
+            // popped — which is `end_table`'s job, reached only when a table
+            // element closes. Carrying it as a frame bit instead would have put
+            // 4 bytes on the stack entry of every element in the document to
+            // serve a case that can only arise on a table close.
         }
 
         // Phase 5b: mark the nodes whose closing tag finalizes a row — every
@@ -413,7 +404,7 @@ impl PathRegistry {
 ///
 /// Carries everything the parser needs when the matching close arrives, all
 /// materialized once at `enter()` from `PathNodeInfo`. Closing an element is
-/// therefore a pop plus four bit tests, with no registry lookup and no look
+/// therefore a pop plus three bit tests, with no registry lookup and no look
 /// at the parent frame.
 #[derive(Debug, Clone, Copy)]
 struct StackEntry {
@@ -426,9 +417,6 @@ struct StackEntry {
     /// Whether closing this element finalizes a row. See
     /// [`PathNodeInfo::ends_row`].
     ends_row: bool,
-    /// Whether closing this element finalizes a row of its *own* table. See
-    /// [`PathNodeInfo::ends_own_row`].
-    ends_own_row: bool,
     /// Whether closing this element ends the parse (`stop_at_paths`).
     is_stop: bool,
 }
@@ -442,7 +430,6 @@ struct StackEntry {
 pub struct ClosedFrame {
     pub is_table: bool,
     pub ends_row: bool,
-    pub ends_own_row: bool,
     pub is_stop: bool,
 }
 
@@ -476,7 +463,6 @@ impl StackEntry {
         is_known: false,
         is_table: false,
         ends_row: false,
-        ends_own_row: false,
         is_stop: false,
     };
 }
@@ -496,7 +482,6 @@ impl PathTracker {
                 is_table: root_is_table,
                 // The root frame is never popped, so these are inert.
                 ends_row: false,
-                ends_own_row: false,
                 is_stop: false,
             }],
         }
@@ -532,7 +517,6 @@ impl PathTracker {
                 is_known: true,
                 is_table: info.is_table(),
                 ends_row: info.ends_row,
-                ends_own_row: info.ends_own_row,
                 is_stop: info.is_stop,
             });
             Some((child_id, info))
@@ -554,7 +538,6 @@ impl PathTracker {
             return Some(ClosedFrame {
                 is_table: entry.is_table,
                 ends_row: entry.ends_row,
-                ends_own_row: entry.ends_own_row,
                 is_stop: entry.is_stop,
             });
         }
@@ -916,5 +899,29 @@ tables:
         let info = registry.get_node_info(node_id);
         assert!(info.has_fields());
         assert_eq!(info.field_indices[0], (0, 0)); // table 0, field 0
+    }
+    /// `PathTracker` pushes and pops a `StackEntry` for **every element in the
+    /// document**, so its size is a hot-path cost paid per element, and growth
+    /// here is invisible in review: adding one `bool` reads as free.
+    ///
+    /// It is not. Phase C first carried `row: \".\"` as a fourth frame flag,
+    /// which took the entry from 8 to 12 bytes — a 50% growth of the parser's
+    /// hottest structure to serve a case that can only arise when a *table*
+    /// element closes. CodSpeed measured it as a consistent 1-2% across the
+    /// buffered benchmarks. Moving that flag to per-table state (`TableMeta::
+    /// row_is_table_element`, read only in `end_table`) restored both.
+    ///
+    /// This test is the guard: a `bool` added here has to be a deliberate,
+    /// argued 4 bytes, not an accident. If a future flag genuinely belongs on
+    /// the frame, pack the flags into a `u8` bitfield rather than raising this
+    /// number — there is room for eight.
+    #[test]
+    fn hot_path_frames_stay_small() {
+        assert_eq!(
+            std::mem::size_of::<StackEntry>(),
+            8,
+            "StackEntry is pushed per element; see this test's comment before changing it"
+        );
+        assert_eq!(std::mem::size_of::<ClosedFrame>(), 3);
     }
 }

@@ -315,6 +315,12 @@ pub enum ConfigIssue {
         row: String,
         row_path: String,
     },
+    /// A root table (`xml_path: /`) declared a `row:` resolving to itself.
+    /// The implicit document root never closes, so no row could ever be
+    /// finalized and the table would silently produce nothing.
+    RowIsRootTable {
+        table: String,
+    },
     /// Another table sits strictly between a table and its declared `row:`
     /// element. Rows are finalized against the innermost open table, so the
     /// inner table would silently absorb them.
@@ -512,6 +518,10 @@ impl fmt::Display for ConfigIssue {
             } => write!(
                 f,
                 "Table '{table}' declares row '{row}' which resolves to '{row_path}', not under its xml_path '{table_path}'"
+            ),
+            ConfigIssue::RowIsRootTable { table } => write!(
+                f,
+                "Table '{table}' has xml_path '/' and declares a row resolving to it. The implicit document root never closes, so no row would ever be finalized and the table would produce no rows. Either omit 'row' (the document's top-level element already finalizes one row) or set xml_path to that element and keep row: \".\""
             ),
             ConfigIssue::RowPathCrossesTable {
                 table,

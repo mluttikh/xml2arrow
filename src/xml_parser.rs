@@ -30,7 +30,7 @@ use quick_xml::events::attributes::Attributes;
 use quick_xml::events::{BytesRef, Event};
 
 use crate::Config;
-use crate::config::{DType, FieldConfig, TableConfig};
+use crate::config::{DType, FieldConfig, TableConfig, paths_equal};
 use crate::errors::ConfigIssue;
 use crate::errors::Error;
 use crate::errors::ErrorLocation;
@@ -478,6 +478,15 @@ impl FieldBuilder {
 struct TableMeta {
     name: String,
     xml_path: String,
+    /// Whether `row:` names the table element itself (`row: "."`), meaning one
+    /// row per occurrence of the table element.
+    ///
+    /// Lives here rather than on the trie node because of *when* it is needed:
+    /// the row must finalize while this table is still the innermost open one,
+    /// i.e. before `end_table` pops its scope. Reading it from per-table state
+    /// on a table close keeps `PathTracker`'s stack entry — pushed and popped
+    /// for every element in the document — at its original size.
+    row_is_table_element: bool,
 }
 
 impl TableMeta {
@@ -485,6 +494,9 @@ impl TableMeta {
         Self {
             name: tc.name.clone(),
             xml_path: tc.xml_path.clone(),
+            row_is_table_element: tc
+                .row_path()
+                .is_some_and(|row_path| paths_equal(&row_path, &tc.xml_path)),
         }
     }
 }
@@ -988,8 +1000,25 @@ impl XmlToArrowConverter {
         self.table_builders[table_idx].row_index = 0;
     }
 
-    fn end_table(&mut self) {
+    /// Pops the innermost table scope, first finalizing its row when the table
+    /// declared `row: "."`.
+    ///
+    /// The ordering is the whole reason this lives here: `end_current_row`
+    /// finalizes against the innermost open table, so a `row: "."` row has to
+    /// close while this table is still that table. Afterwards the popped
+    /// frame's own `ends_row` may finalize the *enclosing* table's row, which
+    /// is how a `row: "."` table that is also a configured child of an outer
+    /// table keeps delimiting the outer table exactly as it did before.
+    fn end_table(&mut self) -> Result<()> {
+        if let Some(entry) = self.builder_stack.last()
+            && self.table_builders[entry.table_idx]
+                .meta
+                .row_is_table_element
+        {
+            self.end_current_row()?;
+        }
         self.builder_stack.pop();
+        Ok(())
     }
 
     /// Reports every configured field that captured nothing anywhere in the
@@ -1730,17 +1759,11 @@ fn close_element(
         return Ok(LoopAction::Continue);
     };
 
-    // Order is load-bearing. A row finalizes against the innermost open table,
-    // so `row: "."` — where the row element *is* the table element — must
-    // finalize before its own scope is popped, and the inferred rule must
-    // finalize after, against the enclosing table. A node can carry both bits:
-    // a `row: "."` table that is also a configured child of an outer table
-    // closes its own row here and delimits the outer table's below.
-    if frame.ends_own_row {
-        xml_to_arrow_converter.end_current_row()?;
-    }
+    // Order is load-bearing: `end_table` finalizes a declared `row: "."` while
+    // its own scope is still innermost, then pops it, and only then can
+    // `ends_row` finalize the *enclosing* table's row.
     if frame.is_table {
-        xml_to_arrow_converter.end_table();
+        xml_to_arrow_converter.end_table()?;
     }
     if frame.ends_row {
         xml_to_arrow_converter.end_current_row()?;

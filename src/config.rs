@@ -313,6 +313,22 @@ impl Config {
                         },
                     });
                 }
+                // The implicit document root is never closed by the parser —
+                // `PathTracker`'s bottom frame is never popped — so a root
+                // table whose row resolves to itself could never finalize one.
+                // Rejected rather than silently returning an empty table, and
+                // rejected loudly because *inference* handles this shape fine:
+                // adding `row: "."` here would turn a working config into an
+                // empty one.
+                if paths_equal(&row_path, &table.xml_path)
+                    && path_segments(&table.xml_path).next().is_none()
+                {
+                    return Err(Error::InvalidConfig {
+                        reason: ConfigIssue::RowIsRootTable {
+                            table: table.name.clone(),
+                        },
+                    });
+                }
                 // A row is finalized against the *innermost open table*, so a
                 // second table sitting strictly between this one and its row
                 // element would receive the row instead — silently, with a
@@ -1611,6 +1627,55 @@ mod tests {
         let config = Config::builder()
             .table(table_with_row("/a", "b"))
             .table(TableConfig::new("inner", "/a/b", vec![], vec![]))
+            .build();
+        assert!(config.is_ok(), "got {config:?}");
+    }
+
+    /// The root frame is never popped, so a row resolving to the root could
+    /// never finalize. Silently returning an empty table would be worse than
+    /// useless here, because inference handles this shape correctly — adding
+    /// the line would *break* a working config.
+    #[test]
+    fn a_row_resolving_to_the_root_table_is_rejected() {
+        for row in [".", "/"] {
+            let config = Config::builder()
+                .table(
+                    TableConfig::builder("doc", "/")
+                        .row(row)
+                        .field(
+                            FieldConfigBuilder::new("v", "/report/v", DType::Int32)
+                                .build()
+                                .unwrap(),
+                        )
+                        .build(),
+                )
+                .build();
+            assert!(
+                matches!(
+                    config,
+                    Err(Error::InvalidConfig {
+                        reason: ConfigIssue::RowIsRootTable { .. }
+                    })
+                ),
+                "row: {row:?} produced {config:?}"
+            );
+        }
+    }
+
+    /// The same declaration one level down is fine: `<report>` does close.
+    #[test]
+    fn row_dot_below_the_root_is_accepted() {
+        let config = Config::builder()
+            .table(
+                TableConfig::builder("doc", "/report")
+                    .row(".")
+                    .field(
+                        FieldConfigBuilder::new("v", "/report/v", DType::Int32)
+                            .build()
+                            .unwrap(),
+                    )
+                    .build(),
+            )
             .build();
         assert!(config.is_ok(), "got {config:?}");
     }
