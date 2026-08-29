@@ -263,6 +263,18 @@ impl PathRegistry {
             registry.node_info[node_id.index()].is_stop = true;
         }
 
+        // Does *any* table declare a row? One discriminant read per table, and
+        // it buys the right to skip an entire extra walk over the tables (5a)
+        // plus a per-table-node lookup (5b) for every config that declares
+        // none — which, for now, is nearly all of them.
+        //
+        // `Parser::new`'s fixed cost is the whole parse for small documents,
+        // and `parse_tiny` exists to measure exactly that: an unconditional
+        // second pass here showed up as ~1-2% on the two benchmarks that
+        // construct a parser inside the measured loop, while the two that
+        // reuse one were untouched. That split is what identified it.
+        let any_declared_row = config.tables.iter().any(|t| t.row.is_some());
+
         // Phase 5a: mark declared row elements (`row:`). A declared row marks
         // *itself*, where the inferred rule below marks each configured child
         // of a table — the same bit, on a different node, which is what keeps
@@ -270,22 +282,24 @@ impl PathRegistry {
         //
         // Runs before 5b because resolving a row path can create trie nodes,
         // and 5b's `children` iteration must see the finished trie.
-        for table_config in &config.tables {
-            let Some(row_path) = table_config.row_path() else {
-                continue;
-            };
-            let table_node = registry.get_or_create_path(&table_config.xml_path);
-            let row_node = registry.get_or_create_path(&row_path);
-            if row_node != table_node {
-                registry.node_info[row_node.index()].ends_row = true;
+        if any_declared_row {
+            for table_config in &config.tables {
+                let Some(row_path) = table_config.row_path() else {
+                    continue;
+                };
+                let table_node = registry.get_or_create_path(&table_config.xml_path);
+                let row_node = registry.get_or_create_path(&row_path);
+                if row_node != table_node {
+                    registry.node_info[row_node.index()].ends_row = true;
+                }
             }
-            // `row: "."` deliberately marks nothing here. The row element *is*
-            // the table element, so it has to finalize before its own scope is
-            // popped — which is `end_table`'s job, reached only when a table
-            // element closes. Carrying it as a frame bit instead would have put
-            // 4 bytes on the stack entry of every element in the document to
-            // serve a case that can only arise on a table close.
         }
+        // `row: "."` deliberately marks nothing above. The row element *is* the
+        // table element, so it has to finalize before its own scope is popped —
+        // which is `end_table`'s job, reached only when a table element closes.
+        // Carrying it as a frame bit instead would have put 4 bytes on the
+        // stack entry of every element in the document to serve a case that can
+        // only arise on a table close.
 
         // Phase 5b: mark the nodes whose closing tag finalizes a row — every
         // element child of a table node. See `PathNodeInfo::ends_row` for why
@@ -304,7 +318,9 @@ impl PathRegistry {
             let Some(table_idx) = registry.node_info[node_idx].table_index else {
                 continue;
             };
-            if config.tables[table_idx].row.is_some() {
+            // Short-circuits to nothing when no table declared a row, leaving
+            // this loop the same work it did before `row:` existed.
+            if any_declared_row && config.tables[table_idx].row.is_some() {
                 continue;
             }
             // Move the child list aside rather than collecting it: marking goes

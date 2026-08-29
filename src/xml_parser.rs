@@ -30,7 +30,7 @@ use quick_xml::events::attributes::Attributes;
 use quick_xml::events::{BytesRef, Event};
 
 use crate::Config;
-use crate::config::{DType, FieldConfig, TableConfig, paths_equal};
+use crate::config::{DType, FieldConfig, TableConfig, paths_equal, resolve_row_path};
 use crate::errors::ConfigIssue;
 use crate::errors::Error;
 use crate::errors::ErrorLocation;
@@ -494,9 +494,12 @@ impl TableMeta {
         Self {
             name: tc.name.clone(),
             xml_path: tc.xml_path.clone(),
-            row_is_table_element: tc
-                .row_path()
-                .is_some_and(|row_path| paths_equal(&row_path, &tc.xml_path)),
+            // `row == "."` is checked before resolving, so the common declared
+            // form costs a string compare rather than a `format!` allocation,
+            // and a table with no `row:` costs one discriminant read.
+            row_is_table_element: tc.row.as_deref().is_some_and(|row| {
+                row == "." || paths_equal(&resolve_row_path(&tc.xml_path, row), &tc.xml_path)
+            }),
         }
     }
 }
