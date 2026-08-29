@@ -81,8 +81,12 @@ Inside `process_xml_events`, `process_xml_events_slice`, `handle_event`,
   decoding; element text is taken raw (spec-required difference).
 - With `validate_attributes: false`, duplicate attributes concatenate — a
   documented trusted-input trade-off.
-- Boolean parsing trims whitespace and accepts `true/false/1/0/yes/no/on/off/t/f/y/n`
-  case-insensitively; numeric parsing does not trim (that's `trim_text`'s job).
+- Numeric **and** boolean parsing trim surrounding whitespace before parsing,
+  independently of `trim_text`; `Utf8` does not, so a value is taken exactly as
+  the document spells it. Verified: with `trim_text: false`, `<v> 42 </v>`
+  parses to `42` and `<v> true </v>` to `true`, while a `Utf8` field keeps
+  `" hi "`. Booleans additionally accept
+  `true/false/1/0/yes/no/on/off/t/f/y/n` case-insensitively.
 - Tables with an empty `fields` list are structural only and excluded from
   the output map; index columns are named `<level>` (angle brackets included).
 
