@@ -126,6 +126,41 @@ cargo bench --bench parse_benchmark -- --baseline before 'parse_(tiny|small|wide
   If results look bad, re-bench the *unchanged* code against its own baseline
   first — a few percent of "regression" is often thermal noise. CI runs
   CodSpeed for authoritative numbers.
+- **CodSpeed counts instructions, not time.** Its summary says "will not alter
+  performance" until a delta crosses an alerting threshold, so read the
+  *detailed per-benchmark view* — a repeatable 1–2% there is real signal.
+  The two metrics can move in opposite directions: a change has measured 7%
+  *faster* in local wall-clock while CodSpeed counted more instructions. Do
+  not use a stopwatch to argue against an instruction count.
+
+### Reading the benchmark set as a diagnostic
+
+The suite is built so that *which* benchmarks move localizes the cause. Check
+the pattern before reading any code:
+
+| Pattern | Cause |
+|---|---|
+| Only the **non-reused** `parse_tiny` variants move; `reused_parser_*` are clean | `Parser::new` — validation, registry build, builder construction. The reused variants hoist it out of the measured loop, so the pair is a built-in bisector. |
+| **All four** `parse_tiny` variants move | The parse path, not setup. |
+| Everything moves uniformly across sizes, buffered but not zero-copy | Suspect lost inlining before real cost — see the symbol check below. |
+| **One** of `buffered` / `zero_copy` moves while the other doesn't | Usually codegen-unit placement, not real work: the two pumps are separate monomorphizations, and both call identical `Parser::new` code. `IMPROVEMENTS.md` SF-5 documents a prior instance. |
+| `parse_wide_fanout` alone | Per-element-open work (24 sibling fields). |
+
+**Prefer deterministic checks over timing.** Three regressions in a row were
+found this way, none by a stopwatch:
+
+```bash
+# Lost inlining — the cause of a 6% regression in Phase B. Want no output:
+nm -C target/release/deps/parse_benchmark-* | grep -E 'handle_event|close_element'
+
+# Hot-path struct growth — the cause of a 1–2% regression in Phase C.
+# `PathTracker` pushes a `StackEntry` per element, so a `bool` added there
+# costs 4 bytes per element. Guarded by `hot_path_frames_stay_small`.
+cargo test --lib hot_path_frames_stay_small
+```
+
+Outlining a *rare* path is a fix, not a regression: `end_table` is deliberately
+out of line so that `close_element` and `handle_event` stay fully inlined.
 
 ## Common Workflows
 
