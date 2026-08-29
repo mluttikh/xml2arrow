@@ -1,0 +1,8 @@
+<report>
+  <group>
+    <station><id>A</id><ms><m><v>1</v></m><m><v>2</v></m></ms></station>
+  </group>
+  <group>
+    <station><id>B</id><ms><m><v>3</v></m></ms></station>
+  </group>
+</report>

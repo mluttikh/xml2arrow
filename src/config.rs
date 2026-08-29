@@ -387,6 +387,97 @@ impl Config {
                 }
             }
 
+            // --- Declared links (`links:`) ---
+            if let Some(links) = &table.links {
+                if !table.levels.is_empty() {
+                    return Err(Error::InvalidConfig {
+                        reason: ConfigIssue::LinksAndLevels {
+                            table: table.name.clone(),
+                        },
+                    });
+                }
+                let scope = table.link_scope_path();
+                let mut column_names: HashSet<String> = table
+                    .fields
+                    .iter()
+                    .map(|field| field.name.clone())
+                    .collect();
+
+                for link in links {
+                    match (link.parent.as_deref(), link.index_of.as_deref()) {
+                        (Some(parent_name), None) => {
+                            let Some(parent) = self.tables.iter().find(|t| t.name == parent_name)
+                            else {
+                                return Err(Error::InvalidConfig {
+                                    reason: ConfigIssue::UnknownParentTable {
+                                        table: table.name.clone(),
+                                        parent: parent_name.to_string(),
+                                    },
+                                });
+                            };
+                            // R15: the parent's rows must *contain* this
+                            // table's, checked by name. This is the whole
+                            // advantage over `levels`, which took its values
+                            // from whatever happened to enclose the table and
+                            // so could silently mis-align.
+                            let parent_scope = parent.link_scope_path();
+                            if paths_equal(&parent_scope, &scope)
+                                || !path_is_under(&scope, &parent_scope)
+                            {
+                                return Err(Error::InvalidConfig {
+                                    reason: ConfigIssue::ParentNotAncestor {
+                                        table: table.name.clone(),
+                                        table_path: scope.clone(),
+                                        parent: parent_name.to_string(),
+                                        parent_path: parent_scope,
+                                    },
+                                });
+                            }
+                        }
+                        (None, Some(index_of)) => {
+                            // Restricted to an enclosing table's row element:
+                            // that table already counts exactly this, so the
+                            // ordinal costs nothing at parse time and is
+                            // identical to the legacy `<level>` value.
+                            let is_ancestor_table = self.tables.iter().any(|t| {
+                                let other = t.link_scope_path();
+                                paths_equal(&other, index_of)
+                                    && !paths_equal(&other, &scope)
+                                    && path_is_under(&scope, &other)
+                            });
+                            if !is_ancestor_table {
+                                return Err(Error::InvalidConfig {
+                                    reason: ConfigIssue::IndexOfNotAncestorTable {
+                                        table: table.name.clone(),
+                                        index_of: index_of.to_string(),
+                                    },
+                                });
+                            }
+                        }
+                        _ => {
+                            return Err(Error::InvalidConfig {
+                                reason: ConfigIssue::LinkKindAmbiguous {
+                                    table: table.name.clone(),
+                                },
+                            });
+                        }
+                    }
+
+                    // R20: a link column that shadowed a field would be a
+                    // silently wrong column, so collisions are rejected.
+                    if let Some(column) = link.column_name()
+                        && !column_names.insert(column.clone())
+                    {
+                        return Err(Error::InvalidConfig {
+                            reason: ConfigIssue::LinkColumnCollision {
+                                table: table.name.clone(),
+                                column,
+                            },
+                        });
+                    }
+                }
+            }
+
             // --- Field-level checks within this table ---
             let mut field_names = HashSet::with_capacity(table.fields.len());
             for field in &table.fields {
@@ -558,6 +649,78 @@ impl Config {
     }
 }
 
+/// One declared relationship between a table and an ancestor of it.
+///
+/// Exactly one of [`Link::parent`] and [`Link::index_of`] must be set — they
+/// are different kinds of column with different guarantees, and the difference
+/// matters enough that picking a winner silently would be wrong:
+///
+/// - **`parent`** produces a `UInt64` **join key**. Its value is the parent's
+///   *global* row ordinal, never reset, so `child._<parent>_id == parent._id`
+///   is a correct equi-join no matter how often container elements repeat or
+///   how the stream was batched.
+/// - **`index_of`** produces a `UInt32` **positional ordinal** that resets with
+///   its enclosing scope. It is value-identical to the legacy `levels` columns
+///   for the same path, which is its purpose: adopting `links:` need not change
+///   a single value. It is *not* a join key.
+///
+/// Marked `#[non_exhaustive]`: further link kinds arrive as new optional keys.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct Link {
+    /// Name of the ancestor table to link to, producing a `UInt64` foreign key.
+    ///
+    /// The referenced table's row element must be a proper ancestor of this
+    /// table's row element, checked by name at compile time — so the
+    /// misalignment that `levels` could express is unrepresentable here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// Path whose occurrences are counted, producing a `UInt32` ordinal.
+    ///
+    /// Must name an ancestor **table's** row element. That restriction is what
+    /// keeps the counter free: the ancestor table already maintains exactly
+    /// this counter to serve its `levels` columns, so no per-element
+    /// bookkeeping is added to the parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_of: Option<String>,
+    /// Column name. Defaults to `_<parent>_id` for a `parent` link and
+    /// `<element>_idx` for an `index_of` link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+impl Link {
+    /// The column name this link produces: the override, or the R20 default —
+    /// `_<parent>_id` for a parent link, `<element>_idx` for an ordinal.
+    #[must_use]
+    pub fn column_name(&self) -> Option<String> {
+        if let Some(name) = &self.name {
+            return Some(name.clone());
+        }
+        if let Some(parent) = &self.parent {
+            return Some(format!("_{parent}_id"));
+        }
+        let index_of = self.index_of.as_deref()?;
+        let element = path_segments(index_of).next_back().unwrap_or("root");
+        Some(format!("{element}_idx"))
+    }
+}
+
+/// Whether and how a table materializes its own key column.
+///
+/// A table referenced by a `parent:` link materializes one automatically, so
+/// both sides of every join exist; tables nobody references pay nothing.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+#[non_exhaustive]
+pub enum RowId {
+    /// `row_id: false` suppresses the column even when something references
+    /// this table; `row_id: true` forces it on.
+    Enabled(bool),
+    /// `row_id: my_key` renames it.
+    Named(String),
+}
+
 /// Configuration for an XML table to be parsed into an Arrow record batch.
 ///
 /// This struct defines how an XML structure should be interpreted as a table:
@@ -578,6 +741,11 @@ pub struct TableConfig {
     /// The levels of nesting for this table. This is used to create the indices for nested tables.
     /// For example if the `xml_path` is `/data/dataset/table/item/properties` the levels should
     /// be `["table", "properties"]`.
+    ///
+    /// Optional since 0.20: a table that declares [`TableConfig::links`] — or
+    /// that needs no parent columns at all — omits the key entirely rather than
+    /// writing `levels: []`. Existing configs are unaffected.
+    #[serde(default)]
     pub levels: Vec<String>,
     /// A vector of `FieldConfig` structs, each defining a field (column) in the table.
     pub fields: Vec<FieldConfig>,
@@ -604,6 +772,23 @@ pub struct TableConfig {
     /// absolute field paths and scoping all behave as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub row: Option<String>,
+    /// Declared relationships to ancestor tables, replacing [`TableConfig::levels`].
+    ///
+    /// A table uses one or the other, never both. `levels` names *labels* and
+    /// takes its values positionally from whatever ancestor tables happen to
+    /// enclose it; `links` names the relationship itself, so a misalignment is
+    /// a compile-time error rather than a column of plausible wrong numbers.
+    ///
+    /// See [`Link`] for the two kinds and their guarantees.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub links: Option<Vec<Link>>,
+    /// Whether this table materializes its own key column, and under what name.
+    ///
+    /// Defaults to materializing `_id` (`UInt64`, non-null) exactly when some
+    /// other table declares a `parent:` link to this one, so both sides of a
+    /// join always exist and unreferenced tables carry no extra column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_id: Option<RowId>,
 }
 
 impl TableConfig {
@@ -615,6 +800,8 @@ impl TableConfig {
             levels,
             fields,
             row: None,
+            links: None,
+            row_id: None,
         }
     }
 
@@ -630,6 +817,16 @@ impl TableConfig {
             .map(|row| resolve_row_path(&self.xml_path, row))
     }
 
+    /// The path whose occurrences scope this table's rows: the declared row
+    /// element, or `xml_path` when boundaries are inferred.
+    ///
+    /// This is what link ancestry is checked against, so that "is a proper
+    /// ancestor of" means the same thing whether or not a table declares `row`.
+    #[must_use]
+    pub(crate) fn link_scope_path(&self) -> String {
+        self.row_path().unwrap_or_else(|| self.xml_path.clone())
+    }
+
     /// Starts building a table configuration, adding levels and fields one at
     /// a time.
     ///
@@ -643,6 +840,8 @@ impl TableConfig {
             levels: Vec::new(),
             fields: Vec::new(),
             row: None,
+            links: None,
+            row_id: None,
         }
     }
 }
@@ -703,6 +902,8 @@ pub struct TableConfigBuilder {
     levels: Vec<String>,
     fields: Vec<FieldConfig>,
     row: Option<String>,
+    links: Option<Vec<Link>>,
+    row_id: Option<RowId>,
 }
 
 impl TableConfigBuilder {
@@ -725,6 +926,20 @@ impl TableConfigBuilder {
     #[must_use]
     pub fn row(mut self, row: impl Into<String>) -> Self {
         self.row = Some(row.into());
+        self
+    }
+
+    /// Declares the table's links to its ancestors, replacing `levels`.
+    #[must_use]
+    pub fn links(mut self, links: impl IntoIterator<Item = Link>) -> Self {
+        self.links = Some(links.into_iter().collect());
+        self
+    }
+
+    /// Sets whether this table materializes its own key column, and its name.
+    #[must_use]
+    pub fn row_id(mut self, row_id: RowId) -> Self {
+        self.row_id = Some(row_id);
         self
     }
 
@@ -755,6 +970,8 @@ impl TableConfigBuilder {
             levels: self.levels,
             fields: self.fields,
             row: self.row,
+            links: self.links,
+            row_id: self.row_id,
         }
     }
 }
@@ -1961,5 +2178,208 @@ mod tests {
         // without sprouting a `path: null`.
         assert!(!yaml.contains("xml_path: null"));
         assert!(!yaml.contains("path: null"));
+    }
+
+    // --- Declared links (`links:`) --------------------------------------------
+
+    /// Two tables where `inner`'s rows sit inside `outer`'s.
+    fn linked(links: Vec<Link>, levels: Vec<String>) -> Result<Config> {
+        let outer = TableConfig::builder("outer", "/a")
+            .row("station")
+            .field(
+                FieldConfigBuilder::new("id", "id", DType::Utf8)
+                    .build()
+                    .unwrap(),
+            )
+            .build();
+        let mut inner = TableConfig::builder("inner", "/a/station/ms")
+            .row("m")
+            .field(
+                FieldConfigBuilder::new("v", "v", DType::Int32)
+                    .build()
+                    .unwrap(),
+            )
+            .links(links)
+            .build();
+        inner.levels = levels;
+        Config::builder().table(outer).table(inner).build()
+    }
+
+    fn parent_link(parent: &str) -> Link {
+        Link {
+            parent: Some(parent.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_valid_parent_link_is_accepted() {
+        assert!(linked(vec![parent_link("outer")], vec![]).is_ok());
+    }
+
+    #[test]
+    fn links_and_levels_together_are_rejected() {
+        let config = linked(vec![parent_link("outer")], vec!["station".to_string()]);
+        assert!(matches!(
+            config,
+            Err(Error::InvalidConfig {
+                reason: ConfigIssue::LinksAndLevels { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn an_unknown_parent_table_is_rejected() {
+        let config = linked(vec![parent_link("nope")], vec![]);
+        assert!(matches!(
+            config,
+            Err(Error::InvalidConfig {
+                reason: ConfigIssue::UnknownParentTable { .. }
+            })
+        ));
+    }
+
+    /// R15: a parent must *enclose* the child. This is the whole advantage
+    /// over `levels`, which took values from whatever happened to enclose the
+    /// table and so could silently mis-align.
+    #[test]
+    fn a_parent_that_does_not_enclose_the_child_is_rejected() {
+        let sibling = TableConfig::builder("sibling", "/a/other").row("x").build();
+        let child = TableConfig::builder("child", "/a/station/ms")
+            .row("m")
+            .field(
+                FieldConfigBuilder::new("v", "v", DType::Int32)
+                    .build()
+                    .unwrap(),
+            )
+            .links(vec![parent_link("sibling")])
+            .build();
+        let config = Config::builder().table(sibling).table(child).build();
+        assert!(matches!(
+            config,
+            Err(Error::InvalidConfig {
+                reason: ConfigIssue::ParentNotAncestor { .. }
+            })
+        ));
+    }
+
+    /// A table cannot be its own parent, even though its path trivially
+    /// "contains" itself.
+    #[test]
+    fn a_self_parent_link_is_rejected() {
+        let table = TableConfig::builder("t", "/a")
+            .row("station")
+            .field(
+                FieldConfigBuilder::new("v", "v", DType::Int32)
+                    .build()
+                    .unwrap(),
+            )
+            .links(vec![parent_link("t")])
+            .build();
+        assert!(matches!(
+            Config::builder().table(table).build(),
+            Err(Error::InvalidConfig {
+                reason: ConfigIssue::ParentNotAncestor { .. }
+            })
+        ));
+    }
+
+    #[rstest]
+    #[case::both(Some("outer"), Some("/a/station"))]
+    #[case::neither(None, None)]
+    fn a_link_must_name_exactly_one_kind(
+        #[case] parent: Option<&str>,
+        #[case] index_of: Option<&str>,
+    ) {
+        let link = Link {
+            parent: parent.map(String::from),
+            index_of: index_of.map(String::from),
+            name: None,
+        };
+        assert!(matches!(
+            linked(vec![link], vec![]),
+            Err(Error::InvalidConfig {
+                reason: ConfigIssue::LinkKindAmbiguous { .. }
+            })
+        ));
+    }
+
+    /// `index_of` reads an enclosing table's existing counter, so a path that
+    /// names no such table is rejected rather than silently producing zeros.
+    #[test]
+    fn an_index_of_path_that_is_not_an_ancestor_table_is_rejected() {
+        let link = Link {
+            index_of: Some("/a/station/nothing".to_string()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            linked(vec![link], vec![]),
+            Err(Error::InvalidConfig {
+                reason: ConfigIssue::IndexOfNotAncestorTable { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn a_link_column_colliding_with_a_field_is_rejected() {
+        let link = Link {
+            parent: Some("outer".to_string()),
+            name: Some("v".to_string()),
+            ..Default::default()
+        };
+        let config = linked(vec![link], vec![]);
+        let Err(Error::InvalidConfig {
+            reason: ConfigIssue::LinkColumnCollision { column, .. },
+        }) = config
+        else {
+            panic!("expected LinkColumnCollision, got {config:?}");
+        };
+        assert_eq!(column, "v");
+    }
+
+    #[rstest]
+    #[case::parent_default(Some("stations"), None, None, "_stations_id")]
+    #[case::parent_named(Some("stations"), None, Some("fk"), "fk")]
+    #[case::index_of_default(None, Some("/report/stations/station"), None, "station_idx")]
+    #[case::index_of_named(None, Some("/report/stations/station"), Some("idx"), "idx")]
+    fn link_column_names_follow_the_documented_defaults(
+        #[case] parent: Option<&str>,
+        #[case] index_of: Option<&str>,
+        #[case] name: Option<&str>,
+        #[case] expected: &str,
+    ) {
+        let link = Link {
+            parent: parent.map(String::from),
+            index_of: index_of.map(String::from),
+            name: name.map(String::from),
+        };
+        assert_eq!(link.column_name().as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn links_survive_a_yaml_round_trip() {
+        let config = linked(vec![parent_link("outer")], vec![]).unwrap();
+        let yaml = yaml_serde::to_string(&config).unwrap();
+        let restored: Config = yaml_serde::from_str(&yaml).unwrap();
+        assert_eq!(restored, config);
+    }
+
+    /// `levels` became optional so a `links:` table need not write `levels: []`.
+    /// Existing configs that state it are unaffected.
+    #[test]
+    fn levels_may_be_omitted() {
+        let config: Config = yaml_serde::from_str(
+            r#"
+            tables:
+              - name: t
+                xml_path: /a
+                row: item
+                fields:
+                  - {name: v, path: v, data_type: Int32}
+            "#,
+        )
+        .unwrap();
+        assert!(config.tables[0].levels.is_empty());
+        assert!(config.validate().is_ok());
     }
 }

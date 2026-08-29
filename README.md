@@ -88,7 +88,15 @@ tables:
                                # "name" / "a/b": relative to xml_path.
                                # "/a/b/c": absolute (a LEADING SLASH is what
                                #   makes it absolute; "a/b" is still relative).
-    levels: [<level>, ...]     # Parent-link index columns — see "Nested tables"
+    levels: [<level>, ...]     # Parent-link index columns — see "Nested tables".
+                               # Optional; replaced by `links:` below.
+    links:                     # Declared relationships (optional; not with levels)
+      - parent: <table>        #   UInt64 join key → <table>._id
+        name: <column>         #   default: _<table>_id
+      - index_of: <path>       #   UInt32 positional ordinal (NOT a key);
+        name: <column>         #   default: <element>_idx. Same value as <level>.
+    row_id: <name|false>       # This table's own key column. Defaults to `_id`
+                               # exactly when another table links to it.
     fields:
       - name: <field_name>     # Arrow column name
         path: <field_path>     # Where the value lives. Same rule as `row:`:
@@ -145,6 +153,34 @@ tables:
 `path` and `xml_path` are two spellings of one location and compile to the same
 node, so switching an absolute `xml_path:` to `path:` is a key rename with no
 output change. Set exactly one of them per field.
+
+**Declared links (`links:`).** `levels` names *labels* and takes its values
+positionally from whatever ancestor tables happen to enclose a table, so a
+mismatch produces a column of plausible wrong numbers. `links:` names the
+relationship, which makes that a compile-time error — and adds a real join key:
+
+```yaml
+  - name: stations
+    xml_path: /report/group
+    row: station
+    fields: [...]
+  - name: measurements
+    xml_path: /report/group/station/ms
+    row: m
+    links:
+      - parent: stations       # UInt64 FK → stations._id
+```
+
+`parent:` values are **global** row ordinals, never reset, so
+`measurements._stations_id == stations._id` is a correct equi-join however often
+container elements repeat and however the output was batched. The referenced
+table materializes `_id` automatically; tables nobody references gain no column.
+
+`index_of:` is the other kind — a `UInt32` positional ordinal that resets with
+its scope. It is **value-identical to the legacy `<level>` column** for the same
+path, so it exists to let you adopt `links:` without changing a single number.
+It is not a join key: where a container repeats, two different parents both
+report `0`.
 
 **Supported data types:** `Boolean`, `Int8`, `UInt8`, `Int16`, `UInt16`, `Int32`,
 `UInt32`, `Int64`, `UInt64`, `Float32`, `Float64`, `Utf8`

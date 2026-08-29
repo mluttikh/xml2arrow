@@ -1,0 +1,9 @@
+# frozen snapshot — see tests/frozen_corpus.rs
+table: stations
+rows: 2
+columns:
+  1. _id: UInt64 (not null)
+  2. id: Utf8 (nullable)
+data:
+  "0" | "A"
+  "1" | "B"

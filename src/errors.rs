@@ -315,6 +315,39 @@ pub enum ConfigIssue {
         row: String,
         row_path: String,
     },
+    /// A table declared both `links` and a non-empty `levels`. They are two
+    /// ways to say the same thing, and `links` supersedes `levels`.
+    LinksAndLevels {
+        table: String,
+    },
+    /// A link set both `parent` and `index_of`, or neither. They produce
+    /// different column types with different guarantees, so exactly one.
+    LinkKindAmbiguous {
+        table: String,
+    },
+    /// A `parent:` link named a table that does not exist.
+    UnknownParentTable {
+        table: String,
+        parent: String,
+    },
+    /// A `parent:` link named a table that does not enclose this one. The FK
+    /// would read a counter for a scope that is not open.
+    ParentNotAncestor {
+        table: String,
+        table_path: String,
+        parent: String,
+        parent_path: String,
+    },
+    /// An `index_of:` path that is not an ancestor table's row element.
+    IndexOfNotAncestorTable {
+        table: String,
+        index_of: String,
+    },
+    /// A link column's name collides with a field or another link column.
+    LinkColumnCollision {
+        table: String,
+        column: String,
+    },
     /// A field set both `path` and `xml_path`. They are two spellings of the
     /// same thing; picking a winner silently would hide a real mistake.
     FieldPathConflict {
@@ -537,6 +570,35 @@ impl fmt::Display for ConfigIssue {
             } => write!(
                 f,
                 "Table '{table}' declares row '{row}' which resolves to '{row_path}', not under its xml_path '{table_path}'"
+            ),
+            ConfigIssue::LinksAndLevels { table } => write!(
+                f,
+                "Table '{table}' declares both 'links' and 'levels'; they are two ways to express the same relationships, so use one. 'links' replaces 'levels' and is removed in neither direction silently"
+            ),
+            ConfigIssue::LinkKindAmbiguous { table } => write!(
+                f,
+                "Table '{table}' has a link that does not set exactly one of 'parent' and 'index_of'. They produce different columns — a UInt64 join key and a UInt32 positional ordinal — so the choice cannot be inferred"
+            ),
+            ConfigIssue::UnknownParentTable { table, parent } => write!(
+                f,
+                "Table '{table}' links to parent '{parent}', which is not a configured table"
+            ),
+            ConfigIssue::ParentNotAncestor {
+                table,
+                table_path,
+                parent,
+                parent_path,
+            } => write!(
+                f,
+                "Table '{table}' (rows at '{table_path}') links to parent '{parent}' (rows at '{parent_path}'), which does not enclose it. A parent's rows must contain the child's, or the foreign key would reference a scope that is not open"
+            ),
+            ConfigIssue::IndexOfNotAncestorTable { table, index_of } => write!(
+                f,
+                "Table '{table}' has index_of '{index_of}', which is not the row element of an enclosing table. Counting an arbitrary path is not supported: the ordinal is read from the enclosing table's existing row counter, which is what makes it free and what makes it identical to the legacy '<level>' value"
+            ),
+            ConfigIssue::LinkColumnCollision { table, column } => write!(
+                f,
+                "Table '{table}' would produce two columns named '{column}'; set 'name:' on the link to disambiguate"
             ),
             ConfigIssue::FieldPathConflict { table, field } => write!(
                 f,
