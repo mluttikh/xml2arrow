@@ -530,6 +530,12 @@ struct TableBuilder {
     id_builder: Option<UInt64Builder>,
     /// Builders for declared `links:` columns, aligned with the compiled plan.
     link_builders: Vec<LinkBuilder>,
+    /// Whether this table has *any* declared-link column to write — its own key
+    /// or a link. Precomputed so row finalization branches once on a single
+    /// bool instead of testing an `Option` and a `Vec` length separately, and
+    /// so a table that declares nothing takes the same narrow `end_row` path it
+    /// took before links existed.
+    has_link_columns: bool,
     /// Builders for each field in the table, indexed by field position.
     field_builders: Vec<FieldBuilder>,
     /// The current row index for this table.
@@ -593,6 +599,7 @@ impl TableBuilder {
             meta: TableMeta::from_config(table_config),
             schema,
             index_builders,
+            has_link_columns: plan.row_id_column.is_some() || !plan.links.is_empty(),
             id_builder: plan
                 .row_id_column
                 .as_ref()
@@ -606,9 +613,32 @@ impl TableBuilder {
         }
     }
 
-    fn end_row(&mut self, indices: &[u32], link_values: &[u64]) -> Result<()> {
+    /// Appends this table's key and declared-link columns for the row about to
+    /// be saved.
+    ///
+    /// Separate from `end_row` — and called only when `has_link_columns` — so
+    /// the signature of the path every legacy table takes stays exactly what it
+    /// was. Order across builders does not matter: each column has its own, and
+    /// `build_table_schema` fixes the order they are read back in.
+    ///
+    /// Must run *before* `end_row`, which advances `global_row_index`: the key
+    /// written here is the ordinal this very row receives, and the same number
+    /// its children have already stored as their foreign key.
+    fn append_link_columns(&mut self, link_values: &[u64]) {
+        if self.field_builders.is_empty() {
+            return;
+        }
+        if let Some(id_builder) = &mut self.id_builder {
+            id_builder.append_value(self.global_row_index);
+        }
+        for (value, link_builder) in link_values.iter().zip(&mut self.link_builders) {
+            link_builder.append(*value);
+        }
+    }
+
+    fn end_row(&mut self, indices: &[u32]) -> Result<()> {
         // Append the current row's data to the arrays
-        self.save_row(indices, link_values)?;
+        self.save_row(indices)?;
         for field_builder in &mut self.field_builders {
             field_builder.has_value = false;
             field_builder.current_value.clear();
@@ -630,7 +660,7 @@ impl TableBuilder {
         }
     }
 
-    fn save_row(&mut self, indices: &[u32], link_values: &[u64]) -> Result<()> {
+    fn save_row(&mut self, indices: &[u32]) -> Result<()> {
         // Structural tables (empty `fields`) exist only to feed their
         // `row_index` counter to child tables; they are skipped by every
         // emission path. Appending their index values would grow builders
@@ -638,24 +668,12 @@ impl TableBuilder {
         // flush periodically, that would be the one unbounded allocation.
         // Only the `row_index` advance below is observable for them.
         if !self.field_builders.is_empty() {
-            // 1a. This table's own key, when something joins to it. Written
-            // *before* the increment below, so it is the ordinal this very row
-            // receives — the same number its children stored as their FK.
-            if let Some(id_builder) = &mut self.id_builder {
-                id_builder.append_value(self.global_row_index);
-            }
-
-            // 1b. Write the parent foreign keys.
+            // 1. Write the parent foreign keys.
             // The `indices` slice contains the row_index of each ancestor table,
             // in order of hierarchy. These align 1:1 with the `levels` defined
             // in this table's configuration.
             for (index, index_builder) in indices.iter().zip(&mut self.index_builders) {
                 index_builder.append_value(*index);
-            }
-
-            // 1c. Declared link columns, in configured order.
-            for (value, link_builder) in link_values.iter().zip(&mut self.link_builders) {
-                link_builder.append(*value);
             }
 
             // 2. Write the actual field values for this table.
@@ -1105,8 +1123,13 @@ impl XmlToArrowConverter {
             // is, every configuration written before this release — would pay
             // for an empty list. The overflow check rides along in the same
             // pass for the same reason.
-            self.link_values_buffer.clear();
-            if !self.table_builders[table_idx].link_builders.is_empty() {
+            // One test on a precomputed bool, rather than an `Option` check and
+            // a `Vec` length on every finalized row. A table that declares no
+            // links skips the collection *and* the append, and reaches
+            // `end_row` through exactly the signature it used before links
+            // existed.
+            if self.table_builders[table_idx].has_link_columns {
+                self.link_values_buffer.clear();
                 for spec in &link_plan(&self.compiled.link_plans, table_idx).links {
                     let ancestor = &self.table_builders[spec.ancestor_table_idx];
                     let value = match spec.kind {
@@ -1123,10 +1146,11 @@ impl XmlToArrowConverter {
                     };
                     self.link_values_buffer.push(value);
                 }
+                self.table_builders[table_idx].append_link_columns(&self.link_values_buffer);
             }
 
             let table = &mut self.table_builders[table_idx];
-            table.end_row(&self.parent_indices_buffer, &self.link_values_buffer)?;
+            table.end_row(&self.parent_indices_buffer)?;
             // Batch-threshold check, on the only path where a row finalizes.
             // Structural tables keep `rows_in_batch == 0`, so they can never
             // trip this even with tiny thresholds.
