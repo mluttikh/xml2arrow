@@ -64,7 +64,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # cargo-public-api renders the API from rustdoc JSON, which is nightly-only.
-      - uses: dtolnay/rust-toolchain@nightly
+      #
+      # The nightly is PINNED, and must stay pinned: rustdoc renders types by
+      # their current path, so a floating `nightly` changes the snapshot without
+      # the API changing at all. The first run of this job failed exactly that
+      # way — `std::io::error::Error` on one nightly, `core::io::error::Error`
+      # on a newer one, same type, same API. Bumping the pin is fine; do it
+      # deliberately and re-record `public-api.txt` in the same commit, using:
+      #
+      #     RUSTUP_TOOLCHAIN=<the pin> cargo public-api --simplified > public-api.txt
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-25
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:

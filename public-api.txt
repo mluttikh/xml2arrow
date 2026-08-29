@@ -264,7 +264,7 @@ impl core::panic::unwind_safe::UnwindSafe for xml2arrow::errors::ConversionKind
 pub xml2arrow::errors::Error::Arrow(arrow_schema::error::ArrowError)
 pub xml2arrow::errors::Error::InvalidConfig
 pub xml2arrow::errors::Error::InvalidConfig::reason: xml2arrow::errors::ConfigIssue
-pub xml2arrow::errors::Error::Io(std::io::error::Error)
+pub xml2arrow::errors::Error::Io(core::io::error::Error)
 pub xml2arrow::errors::Error::MissingRequiredField
 pub xml2arrow::errors::Error::MissingRequiredField::field: alloc::sync::Arc<str>
 pub xml2arrow::errors::Error::MissingRequiredField::location: alloc::boxed::Box<xml2arrow::errors::ErrorLocation>
@@ -297,6 +297,8 @@ pub xml2arrow::errors::Error::XmlParsing(quick_xml::errors::Error)
 pub xml2arrow::errors::Error::Yaml(yaml_serde::error::Error)
 impl core::convert::From<arrow_schema::error::ArrowError> for xml2arrow::errors::Error
 pub fn xml2arrow::errors::Error::from(arrow_schema::error::ArrowError) -> Self
+impl core::convert::From<core::io::error::Error> for xml2arrow::errors::Error
+pub fn xml2arrow::errors::Error::from(core::io::error::Error) -> Self
 impl core::convert::From<core::str::error::Utf8Error> for xml2arrow::errors::Error
 pub fn xml2arrow::errors::Error::from(core::str::error::Utf8Error) -> Self
 impl core::convert::From<quick_xml::encoding::EncodingError> for xml2arrow::errors::Error
@@ -305,8 +307,6 @@ impl core::convert::From<quick_xml::errors::Error> for xml2arrow::errors::Error
 pub fn xml2arrow::errors::Error::from(quick_xml::errors::Error) -> Self
 impl core::convert::From<quick_xml::events::attributes::AttrError> for xml2arrow::errors::Error
 pub fn xml2arrow::errors::Error::from(quick_xml::events::attributes::AttrError) -> Self
-impl core::convert::From<std::io::error::Error> for xml2arrow::errors::Error
-pub fn xml2arrow::errors::Error::from(std::io::error::Error) -> Self
 impl core::convert::From<yaml_serde::error::Error> for xml2arrow::errors::Error
 pub fn xml2arrow::errors::Error::from(yaml_serde::error::Error) -> Self
 impl core::error::Error for xml2arrow::errors::Error
@@ -458,7 +458,7 @@ impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::DType
 pub xml2arrow::Error::Arrow(arrow_schema::error::ArrowError)
 pub xml2arrow::Error::InvalidConfig
 pub xml2arrow::Error::InvalidConfig::reason: xml2arrow::errors::ConfigIssue
-pub xml2arrow::Error::Io(std::io::error::Error)
+pub xml2arrow::Error::Io(core::io::error::Error)
 pub xml2arrow::Error::MissingRequiredField
 pub xml2arrow::Error::MissingRequiredField::field: alloc::sync::Arc<str>
 pub xml2arrow::Error::MissingRequiredField::location: alloc::boxed::Box<xml2arrow::errors::ErrorLocation>
@@ -491,6 +491,8 @@ pub xml2arrow::Error::XmlParsing(quick_xml::errors::Error)
 pub xml2arrow::Error::Yaml(yaml_serde::error::Error)
 impl core::convert::From<arrow_schema::error::ArrowError> for xml2arrow::errors::Error
 pub fn xml2arrow::errors::Error::from(arrow_schema::error::ArrowError) -> Self
+impl core::convert::From<core::io::error::Error> for xml2arrow::errors::Error
+pub fn xml2arrow::errors::Error::from(core::io::error::Error) -> Self
 impl core::convert::From<core::str::error::Utf8Error> for xml2arrow::errors::Error
 pub fn xml2arrow::errors::Error::from(core::str::error::Utf8Error) -> Self
 impl core::convert::From<quick_xml::encoding::EncodingError> for xml2arrow::errors::Error
@@ -499,8 +501,6 @@ impl core::convert::From<quick_xml::errors::Error> for xml2arrow::errors::Error
 pub fn xml2arrow::errors::Error::from(quick_xml::errors::Error) -> Self
 impl core::convert::From<quick_xml::events::attributes::AttrError> for xml2arrow::errors::Error
 pub fn xml2arrow::errors::Error::from(quick_xml::events::attributes::AttrError) -> Self
-impl core::convert::From<std::io::error::Error> for xml2arrow::errors::Error
-pub fn xml2arrow::errors::Error::from(std::io::error::Error) -> Self
 impl core::convert::From<yaml_serde::error::Error> for xml2arrow::errors::Error
 pub fn xml2arrow::errors::Error::from(yaml_serde::error::Error) -> Self
 impl core::error::Error for xml2arrow::errors::Error
@@ -680,16 +680,16 @@ impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::FieldConfigB
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::FieldConfigBuilder
 pub struct xml2arrow::Parser
 impl xml2arrow::Parser
-pub fn xml2arrow::Parser::into_batches<R: std::io::BufRead>(self, R, xml2arrow::BatchOptions) -> xml2arrow::BatchStream<'static, xml2arrow::ReaderSource<R>>
-pub fn xml2arrow::Parser::into_single_table<R: std::io::BufRead>(self, R, xml2arrow::BatchOptions) -> xml2arrow::errors::Result<xml2arrow::SingleTableReader<'static, xml2arrow::ReaderSource<R>>>
+pub fn xml2arrow::Parser::into_batches<R: alloc::io::buf_read::BufRead>(self, R, xml2arrow::BatchOptions) -> xml2arrow::BatchStream<'static, xml2arrow::ReaderSource<R>>
+pub fn xml2arrow::Parser::into_single_table<R: alloc::io::buf_read::BufRead>(self, R, xml2arrow::BatchOptions) -> xml2arrow::errors::Result<xml2arrow::SingleTableReader<'static, xml2arrow::ReaderSource<R>>>
 pub fn xml2arrow::Parser::new(&xml2arrow::config::Config) -> xml2arrow::errors::Result<Self>
-pub fn xml2arrow::Parser::parse(&self, impl std::io::BufRead) -> xml2arrow::errors::Result<indexmap::map::IndexMap<alloc::string::String, arrow_array::record_batch::RecordBatch>>
-pub fn xml2arrow::Parser::parse_batches<R: std::io::BufRead>(&self, R, xml2arrow::BatchOptions) -> xml2arrow::BatchStream<'_, xml2arrow::ReaderSource<R>>
+pub fn xml2arrow::Parser::parse(&self, impl alloc::io::buf_read::BufRead) -> xml2arrow::errors::Result<indexmap::map::IndexMap<alloc::string::String, arrow_array::record_batch::RecordBatch>>
+pub fn xml2arrow::Parser::parse_batches<R: alloc::io::buf_read::BufRead>(&self, R, xml2arrow::BatchOptions) -> xml2arrow::BatchStream<'_, xml2arrow::ReaderSource<R>>
 pub fn xml2arrow::Parser::parse_batches_slice<'a>(&'a self, &'a [u8], xml2arrow::BatchOptions) -> xml2arrow::BatchStream<'a, xml2arrow::SliceSource<'a>>
-pub fn xml2arrow::Parser::parse_single_table<R: std::io::BufRead>(&self, R, xml2arrow::BatchOptions) -> xml2arrow::errors::Result<xml2arrow::SingleTableReader<'_, xml2arrow::ReaderSource<R>>>
+pub fn xml2arrow::Parser::parse_single_table<R: alloc::io::buf_read::BufRead>(&self, R, xml2arrow::BatchOptions) -> xml2arrow::errors::Result<xml2arrow::SingleTableReader<'_, xml2arrow::ReaderSource<R>>>
 pub fn xml2arrow::Parser::parse_single_table_slice<'a>(&'a self, &'a [u8], xml2arrow::BatchOptions) -> xml2arrow::errors::Result<xml2arrow::SingleTableReader<'a, xml2arrow::SliceSource<'a>>>
 pub fn xml2arrow::Parser::parse_slice(&self, &[u8]) -> xml2arrow::errors::Result<indexmap::map::IndexMap<alloc::string::String, arrow_array::record_batch::RecordBatch>>
-pub fn xml2arrow::Parser::parse_streaming<R, F>(&self, R, xml2arrow::BatchOptions, F) -> xml2arrow::errors::Result<()> where R: std::io::BufRead, F: core::ops::function::FnMut(&str, arrow_array::record_batch::RecordBatch) -> xml2arrow::errors::Result<()>
+pub fn xml2arrow::Parser::parse_streaming<R, F>(&self, R, xml2arrow::BatchOptions, F) -> xml2arrow::errors::Result<()> where R: alloc::io::buf_read::BufRead, F: core::ops::function::FnMut(&str, arrow_array::record_batch::RecordBatch) -> xml2arrow::errors::Result<()>
 pub fn xml2arrow::Parser::schema(&self, &str) -> core::option::Option<arrow_schema::schema::SchemaRef>
 pub fn xml2arrow::Parser::single_table_schema(&self) -> xml2arrow::errors::Result<arrow_schema::schema::SchemaRef>
 pub fn xml2arrow::Parser::warnings(&self) -> alloc::vec::Vec<xml2arrow::lint::Lint>
@@ -731,15 +731,15 @@ impl core::marker::Unpin for xml2arrow::config::ParserOptions
 impl core::marker::UnsafeUnpin for xml2arrow::config::ParserOptions
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::ParserOptions
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::ParserOptions
-pub struct xml2arrow::ReaderSource<R: std::io::BufRead>
-impl<R: std::io::BufRead> xml2arrow::EventSource for xml2arrow::ReaderSource<R>
-impl<R> core::marker::Freeze for xml2arrow::ReaderSource<R> where R: core::marker::Freeze
-impl<R> core::marker::Send for xml2arrow::ReaderSource<R> where R: core::marker::Send
-impl<R> core::marker::Sync for xml2arrow::ReaderSource<R> where R: core::marker::Sync
-impl<R> core::marker::Unpin for xml2arrow::ReaderSource<R> where R: core::marker::Unpin
-impl<R> core::marker::UnsafeUnpin for xml2arrow::ReaderSource<R> where R: core::marker::UnsafeUnpin
-impl<R> core::panic::unwind_safe::RefUnwindSafe for xml2arrow::ReaderSource<R> where R: core::panic::unwind_safe::RefUnwindSafe
-impl<R> core::panic::unwind_safe::UnwindSafe for xml2arrow::ReaderSource<R> where R: core::panic::unwind_safe::UnwindSafe
+pub struct xml2arrow::ReaderSource<R: alloc::io::buf_read::BufRead>
+impl<R: alloc::io::buf_read::BufRead> xml2arrow::EventSource for xml2arrow::ReaderSource<R>
+impl<R> core::marker::Freeze for xml2arrow::ReaderSource<R> where quick_xml::reader::Reader<R>: core::marker::Freeze
+impl<R> core::marker::Send for xml2arrow::ReaderSource<R> where quick_xml::reader::Reader<R>: core::marker::Send
+impl<R> core::marker::Sync for xml2arrow::ReaderSource<R> where quick_xml::reader::Reader<R>: core::marker::Sync
+impl<R> core::marker::Unpin for xml2arrow::ReaderSource<R> where quick_xml::reader::Reader<R>: core::marker::Unpin
+impl<R> core::marker::UnsafeUnpin for xml2arrow::ReaderSource<R> where quick_xml::reader::Reader<R>: core::marker::UnsafeUnpin
+impl<R> core::panic::unwind_safe::RefUnwindSafe for xml2arrow::ReaderSource<R> where quick_xml::reader::Reader<R>: core::panic::unwind_safe::RefUnwindSafe
+impl<R> core::panic::unwind_safe::UnwindSafe for xml2arrow::ReaderSource<R> where quick_xml::reader::Reader<R>: core::panic::unwind_safe::UnwindSafe
 pub struct xml2arrow::SingleTableReader<'p, S>
 impl<'p, S: xml2arrow::EventSource> arrow_array::record_batch::RecordBatchReader for xml2arrow::SingleTableReader<'p, S>
 pub fn xml2arrow::SingleTableReader<'p, S>::schema(&self) -> arrow_schema::schema::SchemaRef
@@ -749,13 +749,13 @@ pub fn xml2arrow::SingleTableReader<'p, S>::next(&mut self) -> core::option::Opt
 impl<'p, S: xml2arrow::EventSource> core::iter::traits::marker::FusedIterator for xml2arrow::SingleTableReader<'p, S>
 impl<S> core::fmt::Debug for xml2arrow::SingleTableReader<'_, S>
 pub fn xml2arrow::SingleTableReader<'_, S>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl<'p, S> core::marker::Freeze for xml2arrow::SingleTableReader<'p, S> where S: core::marker::Freeze
-impl<'p, S> core::marker::Send for xml2arrow::SingleTableReader<'p, S> where S: core::marker::Send
-impl<'p, S> core::marker::Sync for xml2arrow::SingleTableReader<'p, S> where S: core::marker::Sync
-impl<'p, S> core::marker::Unpin for xml2arrow::SingleTableReader<'p, S> where S: core::marker::Unpin
-impl<'p, S> core::marker::UnsafeUnpin for xml2arrow::SingleTableReader<'p, S> where S: core::marker::UnsafeUnpin
-impl<'p, S> core::panic::unwind_safe::RefUnwindSafe for xml2arrow::SingleTableReader<'p, S> where S: core::panic::unwind_safe::RefUnwindSafe
-impl<'p, S> core::panic::unwind_safe::UnwindSafe for xml2arrow::SingleTableReader<'p, S> where S: core::panic::unwind_safe::UnwindSafe
+impl<'p, S> core::marker::Freeze for xml2arrow::SingleTableReader<'p, S> where xml2arrow::BatchStream<'p, S>: core::marker::Freeze
+impl<'p, S> core::marker::Send for xml2arrow::SingleTableReader<'p, S> where xml2arrow::BatchStream<'p, S>: core::marker::Send
+impl<'p, S> core::marker::Sync for xml2arrow::SingleTableReader<'p, S> where xml2arrow::BatchStream<'p, S>: core::marker::Sync
+impl<'p, S> core::marker::Unpin for xml2arrow::SingleTableReader<'p, S> where xml2arrow::BatchStream<'p, S>: core::marker::Unpin
+impl<'p, S> core::marker::UnsafeUnpin for xml2arrow::SingleTableReader<'p, S> where xml2arrow::BatchStream<'p, S>: core::marker::UnsafeUnpin
+impl<'p, S> core::panic::unwind_safe::RefUnwindSafe for xml2arrow::SingleTableReader<'p, S> where xml2arrow::BatchStream<'p, S>: core::panic::unwind_safe::RefUnwindSafe
+impl<'p, S> core::panic::unwind_safe::UnwindSafe for xml2arrow::SingleTableReader<'p, S> where xml2arrow::BatchStream<'p, S>: core::panic::unwind_safe::UnwindSafe
 pub struct xml2arrow::SliceSource<'x>
 impl xml2arrow::EventSource for xml2arrow::SliceSource<'_>
 impl<'x> core::marker::Freeze for xml2arrow::SliceSource<'x>
@@ -825,7 +825,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::TableConfigB
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::TableConfigBuilder
 pub trait xml2arrow::EventSource: xml2arrow::xml_parser::sealed::Sealed
 impl xml2arrow::EventSource for xml2arrow::SliceSource<'_>
-impl<R: std::io::BufRead> xml2arrow::EventSource for xml2arrow::ReaderSource<R>
-pub fn xml2arrow::parse_xml(impl std::io::BufRead, &xml2arrow::config::Config) -> xml2arrow::errors::Result<indexmap::map::IndexMap<alloc::string::String, arrow_array::record_batch::RecordBatch>>
+impl<R: alloc::io::buf_read::BufRead> xml2arrow::EventSource for xml2arrow::ReaderSource<R>
+pub fn xml2arrow::parse_xml(impl alloc::io::buf_read::BufRead, &xml2arrow::config::Config) -> xml2arrow::errors::Result<indexmap::map::IndexMap<alloc::string::String, arrow_array::record_batch::RecordBatch>>
 pub fn xml2arrow::parse_xml_slice(&[u8], &xml2arrow::config::Config) -> xml2arrow::errors::Result<indexmap::map::IndexMap<alloc::string::String, arrow_array::record_batch::RecordBatch>>
 pub type xml2arrow::Result<T> = core::result::Result<T, xml2arrow::errors::Error>

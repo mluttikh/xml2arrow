@@ -202,8 +202,10 @@ cargo clippy -- -D warnings                 # CI-enforced
 cargo clippy --features python -- -D warnings   # CI-enforced
 cargo check --features python               # python bindings still compile
 
-# Public API changed on purpose? Re-record the snapshot and commit the diff:
-cargo public-api --simplified > public-api.txt   # CI-enforced (nightly)
+# Public API changed on purpose? Re-record the snapshot and commit the diff.
+# The nightly is pinned to match CI — a different one renders the same types
+# under different paths and produces a spurious diff:
+RUSTUP_TOOLCHAIN=nightly-2026-08-25 cargo public-api --simplified > public-api.txt
 ```
 
 Before declaring work done:
