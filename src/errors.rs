@@ -315,6 +315,25 @@ pub enum ConfigIssue {
         row: String,
         row_path: String,
     },
+    /// A field set both `path` and `xml_path`. They are two spellings of the
+    /// same thing; picking a winner silently would hide a real mistake.
+    FieldPathConflict {
+        table: String,
+        field: String,
+    },
+    /// A field set neither `path` nor `xml_path`, so it names no location.
+    FieldPathMissing {
+        table: String,
+        field: String,
+    },
+    /// A field used a relative `path` on a table that declares no `row:`.
+    /// A relative field path is relative to the row element, so without one
+    /// there is nothing to resolve against.
+    RelativeFieldPathWithoutRow {
+        table: String,
+        field: String,
+        path: String,
+    },
     /// A root table (`xml_path: /`) declared a `row:` resolving to itself.
     /// The implicit document root never closes, so no row could ever be
     /// finalized and the table would silently produce nothing.
@@ -518,6 +537,18 @@ impl fmt::Display for ConfigIssue {
             } => write!(
                 f,
                 "Table '{table}' declares row '{row}' which resolves to '{row_path}', not under its xml_path '{table_path}'"
+            ),
+            ConfigIssue::FieldPathConflict { table, field } => write!(
+                f,
+                "Field '{field}' in table '{table}' sets both 'path' and 'xml_path'; they are two spellings of the same location, so set exactly one ('path' is the one that survives to 1.0)"
+            ),
+            ConfigIssue::FieldPathMissing { table, field } => write!(
+                f,
+                "Field '{field}' in table '{table}' sets neither 'path' nor 'xml_path', so it names no location"
+            ),
+            ConfigIssue::RelativeFieldPathWithoutRow { table, field, path } => write!(
+                f,
+                "Field '{field}' in table '{table}' has a relative path '{path}', but the table declares no 'row:' to resolve it against. Either declare a row element or write the field path absolutely (leading '/')"
             ),
             ConfigIssue::RowIsRootTable { table } => write!(
                 f,

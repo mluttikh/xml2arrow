@@ -1,0 +1,7 @@
+# frozen snapshot — see tests/frozen_corpus.rs
+table: stations
+rows: 1
+columns:
+  1. id: Utf8 (nullable)
+data:
+  "s1"

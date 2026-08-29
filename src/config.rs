@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::HashSet,
     fs::File,
     io::{BufReader, BufWriter},
@@ -188,6 +189,38 @@ pub(crate) fn resolve_row_path(xml_path: &str, row: &str) -> String {
     format!("{}/{}", xml_path.trim_end_matches('/'), row)
 }
 
+/// Resolves a field's declared location to an absolute path.
+///
+/// Borrows for the absolute spellings — which is every field written before
+/// `path:` existed, and most written after — so the common case adds no
+/// allocation to `Parser::new`. Only a genuinely relative path builds a
+/// `String`.
+///
+/// Returns `None` when the field is relative but its table declares no `row:`,
+/// which [`Config::validate`] rejects; callers past validation can expect
+/// `Some`.
+pub(crate) fn resolve_field_path<'a>(
+    table: &TableConfig,
+    field: &'a FieldConfig,
+) -> Option<Cow<'a, str>> {
+    if let Some(xml_path) = field.xml_path.as_deref() {
+        return Some(Cow::Borrowed(xml_path));
+    }
+    let path = field.path.as_deref()?;
+    if path.starts_with('/') {
+        return Some(Cow::Borrowed(path));
+    }
+    // Relative: to the row element, not to `xml_path`. A field is part of a
+    // row, so the row is the only base that makes `sensor/@id` mean the same
+    // thing wherever the table sits in the document.
+    let row_path = table.row_path()?;
+    Some(Cow::Owned(format!(
+        "{}/{}",
+        row_path.trim_end_matches('/'),
+        path
+    )))
+}
+
 /// Returns true when two paths resolve to the same registry node, i.e. their
 /// normalized segment sequences are identical regardless of spelling
 /// ("/data", "data" and "/data/" are all the same path).
@@ -372,25 +405,60 @@ impl Config {
                         },
                     });
                 }
-                if field.xml_path.is_empty() {
+                // `path` and `xml_path` are two spellings of one thing, so
+                // exactly one must be present. Accepting both would mean
+                // silently picking a winner.
+                match (field.path.as_deref(), field.xml_path.as_deref()) {
+                    (Some(_), Some(_)) => {
+                        return Err(Error::InvalidConfig {
+                            reason: ConfigIssue::FieldPathConflict {
+                                table: table.name.clone(),
+                                field: field.name.clone(),
+                            },
+                        });
+                    }
+                    (None, None) => {
+                        return Err(Error::InvalidConfig {
+                            reason: ConfigIssue::FieldPathMissing {
+                                table: table.name.clone(),
+                                field: field.name.clone(),
+                            },
+                        });
+                    }
+                    (Some(p), None) | (None, Some(p)) if p.trim().is_empty() => {
+                        return Err(Error::InvalidConfig {
+                            reason: ConfigIssue::EmptyFieldXmlPath {
+                                table: table.name.clone(),
+                                field: field.name.clone(),
+                            },
+                        });
+                    }
+                    _ => {}
+                }
+
+                // A relative `path` is relative to the row element, so without
+                // a declared row there is nothing to resolve against. Caught
+                // here rather than resolving to something plausible-looking.
+                let Some(field_path) = resolve_field_path(table, field) else {
                     return Err(Error::InvalidConfig {
-                        reason: ConfigIssue::EmptyFieldXmlPath {
+                        reason: ConfigIssue::RelativeFieldPathWithoutRow {
                             table: table.name.clone(),
                             field: field.name.clone(),
+                            path: field.path.clone().unwrap_or_default(),
                         },
                     });
-                }
+                };
 
                 // Field path must be under the table path, compared per
                 // segment (the root table "/" has no segments and thus
                 // accepts any field path).
-                if !path_is_under(&field.xml_path, &table.xml_path) {
+                if !path_is_under(&field_path, &table.xml_path) {
                     return Err(Error::InvalidConfig {
                         reason: ConfigIssue::FieldPathNotUnderTable {
                             table: table.name.clone(),
                             table_path: table.xml_path.clone(),
                             field: field.name.clone(),
-                            field_path: field.xml_path.clone(),
+                            field_path: field_path.into_owned(),
                         },
                     });
                 }
@@ -476,7 +544,12 @@ impl Config {
     pub fn requires_attribute_parsing(&self) -> bool {
         for table in &self.tables {
             for field in &table.fields {
-                if field.xml_path.contains('@') {
+                if field
+                    .path
+                    .as_deref()
+                    .or(field.xml_path.as_deref())
+                    .is_some_and(|p| p.contains('@'))
+                {
                     return true;
                 }
             }
@@ -698,8 +771,32 @@ impl TableConfigBuilder {
 pub struct FieldConfig {
     /// The name of the field (and the name of the resulting Arrow column).
     pub name: String,
-    /// The XML path to the element or attribute.
-    pub xml_path: String,
+    /// Where the value lives, relative to the table's row element or absolute.
+    ///
+    /// Exactly one of `path` and [`FieldConfig::xml_path`] must be set; they
+    /// are two spellings of the same thing, and `path` is the one that
+    /// survives — `xml_path` is removed in 1.0.
+    ///
+    /// Resolution follows the same rule as [`TableConfig::row`], so there is
+    /// one path rule in the whole configuration:
+    ///
+    /// - **a leading `/` makes it absolute** — `/report/data/item/v`;
+    /// - anything else is **relative to the table's row element** —
+    ///   `v`, `sensor/reading` — which requires the table to declare `row:`,
+    ///   since without one there is no element to be relative to.
+    ///
+    /// Prefix the last segment with `@` for an attribute (`@id`, `sensor/@id`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// The absolute XML path to the element or attribute.
+    ///
+    /// The original spelling, kept working for every existing configuration.
+    /// [`FieldConfig::path`] replaces it: renaming the key is a mechanical
+    /// change, because an absolute value means the same under either name.
+    ///
+    /// Removed in 1.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xml_path: Option<String>,
     /// The data type of the field. This determines the Arrow data type of the resulting column.
     pub data_type: DType,
     /// Whether the field is nullable (can contain null values). Defaults to false.
@@ -753,7 +850,8 @@ impl FieldConfig {
 #[derive(Default)]
 pub struct FieldConfigBuilder {
     name: String,
-    xml_path: String,
+    path: Option<String>,
+    xml_path: Option<String>,
     data_type: DType,
     nullable: bool,
     scale: Option<f64>,
@@ -768,17 +866,23 @@ impl FieldConfigBuilder {
     /// # Arguments
     ///
     /// * `name` - The name of the field.
-    /// * `xml_path` - The XML path that points to the location of the field data in the XML document.
+    /// * `path` - Where the value lives: absolute (`/report/data/item/v`) or,
+    ///   when the table declares `row:`, relative to that row element (`v`).
+    ///   See [`FieldConfig::path`].
     /// * `data_type` - The data type of the field.
     ///
     /// # Returns
     ///
     /// A new `FieldConfigBuilder` instance with the provided properties.
+    ///
+    /// This populates [`FieldConfig::path`] rather than the deprecated
+    /// [`FieldConfig::xml_path`]. An absolute path means the same under either
+    /// key, so existing callers are unaffected.
     #[must_use]
-    pub fn new(name: &str, xml_path: &str, data_type: DType) -> Self {
+    pub fn new(name: &str, path: &str, data_type: DType) -> Self {
         Self {
             name: name.to_string(),
-            xml_path: xml_path.to_string(),
+            path: Some(path.to_string()),
             data_type,
             ..Default::default()
         }
@@ -849,6 +953,7 @@ impl FieldConfigBuilder {
     pub fn build(self) -> Result<FieldConfig> {
         let cfg = FieldConfig {
             name: self.name,
+            path: self.path,
             xml_path: self.xml_path,
             data_type: self.data_type,
             nullable: self.nullable,
@@ -1228,7 +1333,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(field.name, "test_field");
-        assert_eq!(field.xml_path, "/path/to/field");
+        // The builder populates `path`, the spelling that survives to 1.0.
+        // An absolute value means the same under either key.
+        assert_eq!(field.path.as_deref(), Some("/path/to/field"));
+        assert_eq!(field.xml_path, None);
         assert_eq!(field.data_type, DType::Float64);
         assert!(field.nullable);
         assert_eq!(field.scale, Some(0.001));
@@ -1709,5 +1817,149 @@ mod tests {
         .unwrap();
         assert_eq!(config.tables[0].row, None);
         assert!(!yaml_serde::to_string(&config).unwrap().contains("row"));
+    }
+
+    // --- Relative field paths (`path:`) ---------------------------------------
+
+    #[rstest]
+    // Absolute spellings borrow rather than allocate — the common case must not
+    // add per-field allocation to `Parser::new`.
+    #[case::legacy_xml_path(
+        "/report/data",
+        Some("item"),
+        None,
+        Some("/report/data/item/v"),
+        "/report/data/item/v"
+    )]
+    #[case::absolute_path(
+        "/report/data",
+        Some("item"),
+        Some("/report/data/item/v"),
+        None,
+        "/report/data/item/v"
+    )]
+    #[case::relative_to_row("/report/data", Some("item"), Some("v"), None, "/report/data/item/v")]
+    #[case::relative_nested(
+        "/report/data",
+        Some("item"),
+        Some("sensor/@id"),
+        None,
+        "/report/data/item/sensor/@id"
+    )]
+    #[case::relative_to_row_dot(
+        "/report/header",
+        Some("."),
+        Some("title"),
+        None,
+        "/report/header/title"
+    )]
+    #[case::relative_multi_segment_row(
+        "/report",
+        Some("data/item"),
+        Some("v"),
+        None,
+        "/report/data/item/v"
+    )]
+    fn field_paths_resolve(
+        #[case] table_path: &str,
+        #[case] row: Option<&str>,
+        #[case] path: Option<&str>,
+        #[case] xml_path: Option<&str>,
+        #[case] expected: &str,
+    ) {
+        let mut table = TableConfig::new("t", table_path, vec![], vec![]);
+        table.row = row.map(String::from);
+        let mut field = FieldConfigBuilder::new("v", "unused", DType::Int32)
+            .build()
+            .unwrap();
+        field.path = path.map(String::from);
+        field.xml_path = xml_path.map(String::from);
+        assert_eq!(resolve_field_path(&table, &field).unwrap(), expected);
+    }
+
+    /// The absolute spellings must borrow: a `String` per field per
+    /// `Parser::new` is exactly the kind of setup cost `parse_tiny` measures.
+    #[test]
+    fn absolute_field_paths_resolve_without_allocating() {
+        let table = TableConfig::new("t", "/a", vec![], vec![]);
+        let field = FieldConfigBuilder::new("v", "/a/item/v", DType::Int32)
+            .build()
+            .unwrap();
+        assert!(matches!(
+            resolve_field_path(&table, &field),
+            Some(Cow::Borrowed(_))
+        ));
+    }
+
+    fn field_config(path: Option<&str>, xml_path: Option<&str>) -> FieldConfig {
+        let mut field = FieldConfigBuilder::new("v", "unused", DType::Int32)
+            .build()
+            .unwrap();
+        field.path = path.map(String::from);
+        field.xml_path = xml_path.map(String::from);
+        field
+    }
+
+    fn config_with_field(row: Option<&str>, field: FieldConfig) -> Result<Config> {
+        let mut table = TableConfig::new("t", "/a", vec![], vec![field]);
+        table.row = row.map(String::from);
+        Config::builder().table(table).build()
+    }
+
+    #[test]
+    fn setting_both_path_and_xml_path_is_rejected() {
+        let config = config_with_field(Some("item"), field_config(Some("v"), Some("/a/item/v")));
+        assert!(matches!(
+            config,
+            Err(Error::InvalidConfig {
+                reason: ConfigIssue::FieldPathConflict { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn setting_neither_path_nor_xml_path_is_rejected() {
+        let config = config_with_field(Some("item"), field_config(None, None));
+        assert!(matches!(
+            config,
+            Err(Error::InvalidConfig {
+                reason: ConfigIssue::FieldPathMissing { .. }
+            })
+        ));
+    }
+
+    /// A relative field path is relative to the *row*, so a table without one
+    /// has nothing to resolve against. Rejected rather than resolved to
+    /// something plausible that silently captures nothing.
+    #[test]
+    fn a_relative_path_without_a_declared_row_is_rejected() {
+        let config = config_with_field(None, field_config(Some("v"), None));
+        let Err(Error::InvalidConfig {
+            reason: ConfigIssue::RelativeFieldPathWithoutRow { field, path, .. },
+        }) = config
+        else {
+            panic!("expected RelativeFieldPathWithoutRow, got {config:?}");
+        };
+        assert_eq!(field, "v");
+        assert_eq!(path, "v");
+    }
+
+    /// An *absolute* path needs no row, so the same table is fine.
+    #[test]
+    fn an_absolute_path_without_a_declared_row_is_accepted() {
+        let config = config_with_field(None, field_config(Some("/a/item/v"), None));
+        assert!(config.is_ok(), "got {config:?}");
+    }
+
+    #[test]
+    fn field_paths_survive_a_yaml_round_trip() {
+        let config = config_with_field(Some("item"), field_config(Some("v"), None)).unwrap();
+        let yaml = yaml_serde::to_string(&config).unwrap();
+        let restored: Config = yaml_serde::from_str(&yaml).unwrap();
+        assert_eq!(restored, config);
+        // Neither key is emitted when unset, so a legacy config round-trips
+        // without sprouting a `path: null`.
+        assert!(!yaml.contains("xml_path: null"));
+        assert!(!yaml.contains("path: null"));
     }
 }

@@ -91,9 +91,14 @@ tables:
     levels: [<level>, ...]     # Parent-link index columns — see "Nested tables"
     fields:
       - name: <field_name>     # Arrow column name
-        xml_path: <field_path> # Path to the element or attribute holding the value.
-                               # Prefix the last segment with @ for attributes
-                               # (e.g. /library/book/@id)
+        path: <field_path>     # Where the value lives. Same rule as `row:`:
+                               #   "/a/b/c" is absolute (LEADING SLASH),
+                               #   "v" / "sensor/@id" is relative to the row
+                               #     element, and needs `row:` on the table.
+                               # Prefix the last segment with @ for attributes.
+        xml_path: <field_path> # The older name for the same thing, absolute
+                               # only. Set exactly one of `path`/`xml_path`;
+                               # `xml_path` is removed in 1.0.
         data_type: <type>      # Arrow data type — see supported types below
         nullable: <true|false> # Whether the field can be null (default: false)
                                # If false, a missing/empty value is an error —
@@ -121,6 +126,25 @@ paths and scoping all behave as before, and a table that omits `row:` keeps the
 inferred rule even when a sibling table declares one. `Config::lint()` reports
 tables whose boundaries are inferred from more than one child element, with the
 suggested `row:` line in the message — see [Checking a config for surprises](#checking-a-config-for-surprises).
+
+**Relative field paths.** Once a table declares `row:`, its fields can be
+written relative to that row element, which removes the repetition of spelling
+the full path on every column:
+
+```yaml
+tables:
+  - name: readings
+    xml_path: /report/stations/station/readings
+    row: reading
+    fields:
+      - {name: seq,   path: "@seq",         data_type: Int32}
+      - {name: value, path: value,          data_type: Int32}
+      - {name: unit,  path: sensor/@unit,   data_type: Utf8}
+```
+
+`path` and `xml_path` are two spellings of one location and compile to the same
+node, so switching an absolute `xml_path:` to `path:` is a key rename with no
+output change. Set exactly one of them per field.
 
 **Supported data types:** `Boolean`, `Int8`, `UInt8`, `Int16`, `UInt16`, `Int32`,
 `UInt32`, `Int64`, `UInt64`, `Float32`, `Float64`, `Utf8`

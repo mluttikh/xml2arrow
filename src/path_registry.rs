@@ -24,7 +24,7 @@
 
 use fxhash::FxHashMap;
 
-use crate::config::Config;
+use crate::config::{Config, resolve_field_path};
 
 /// Threshold at which a node's child list switches from a linear-scan `Vec`
 /// to an `FxHashMap`. Chosen empirically: at small fan-out the linear scan
@@ -242,7 +242,15 @@ impl PathRegistry {
         // tables that share a path shape).
         for (table_idx, table_config) in config.tables.iter().enumerate() {
             for (field_idx, field_config) in table_config.fields.iter().enumerate() {
-                let node_id = registry.get_or_create_path(&field_config.xml_path);
+                // Resolved, so a relative `path:` and the absolute spelling of
+                // the same location land on one node — which is what makes the
+                // two forms provably equivalent rather than merely intended to
+                // be. `None` cannot reach here: validation rejects a relative
+                // path with no row to resolve against.
+                let Some(field_path) = resolve_field_path(table_config, field_config) else {
+                    continue;
+                };
+                let node_id = registry.get_or_create_path(&field_path);
                 registry.node_info[node_id.index()]
                     .field_indices
                     .push((table_idx, field_idx));

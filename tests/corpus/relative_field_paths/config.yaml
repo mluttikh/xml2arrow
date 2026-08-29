@@ -1,0 +1,19 @@
+# Fields written relative to the declared row. Every path here has an absolute
+# equivalent that resolves to the same trie node, which is the whole content of
+# the change: `path:` is ergonomics, not semantics. Covers the three shapes —
+# a child element, an attribute of the row, and a nested element and attribute.
+tables:
+  - name: readings
+    xml_path: /report/stations/station/readings
+    row: reading
+    levels: [stations]
+    fields:
+      - {name: seq, path: "@seq", data_type: Int32, nullable: true}
+      - {name: value, path: value, data_type: Int32, nullable: true}
+      - {name: sensor, path: sensor, data_type: Utf8, nullable: true}
+      - {name: unit, path: sensor/@unit, data_type: Utf8, nullable: true}
+  - name: stations
+    xml_path: /report/stations
+    levels: []
+    fields:
+      - {name: id, xml_path: /report/stations/station/@id, data_type: Utf8, nullable: true}

@@ -86,8 +86,9 @@ pub xml2arrow::config::FieldConfig::data_type: xml2arrow::config::DType
 pub xml2arrow::config::FieldConfig::name: alloc::string::String
 pub xml2arrow::config::FieldConfig::nullable: bool
 pub xml2arrow::config::FieldConfig::offset: core::option::Option<f64>
+pub xml2arrow::config::FieldConfig::path: core::option::Option<alloc::string::String>
 pub xml2arrow::config::FieldConfig::scale: core::option::Option<f64>
-pub xml2arrow::config::FieldConfig::xml_path: alloc::string::String
+pub xml2arrow::config::FieldConfig::xml_path: core::option::Option<alloc::string::String>
 impl xml2arrow::config::FieldConfig
 pub fn xml2arrow::config::FieldConfig::validate(&self) -> xml2arrow::errors::Result<()>
 impl core::clone::Clone for xml2arrow::config::FieldConfig
@@ -218,11 +219,21 @@ pub xml2arrow::errors::ConfigIssue::EmptyRowPath::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::EmptyTableName
 pub xml2arrow::errors::ConfigIssue::EmptyTableXmlPath
 pub xml2arrow::errors::ConfigIssue::EmptyTableXmlPath::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::FieldPathConflict
+pub xml2arrow::errors::ConfigIssue::FieldPathConflict::field: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::FieldPathConflict::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::FieldPathMissing
+pub xml2arrow::errors::ConfigIssue::FieldPathMissing::field: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::FieldPathMissing::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::FieldPathNotUnderTable
 pub xml2arrow::errors::ConfigIssue::FieldPathNotUnderTable::field: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::FieldPathNotUnderTable::field_path: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::FieldPathNotUnderTable::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::FieldPathNotUnderTable::table_path: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::RelativeFieldPathWithoutRow
+pub xml2arrow::errors::ConfigIssue::RelativeFieldPathWithoutRow::field: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::RelativeFieldPathWithoutRow::path: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::RelativeFieldPathWithoutRow::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::RowIsRootTable
 pub xml2arrow::errors::ConfigIssue::RowIsRootTable::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::RowPathCrossesTable
@@ -640,8 +651,9 @@ pub xml2arrow::FieldConfig::data_type: xml2arrow::config::DType
 pub xml2arrow::FieldConfig::name: alloc::string::String
 pub xml2arrow::FieldConfig::nullable: bool
 pub xml2arrow::FieldConfig::offset: core::option::Option<f64>
+pub xml2arrow::FieldConfig::path: core::option::Option<alloc::string::String>
 pub xml2arrow::FieldConfig::scale: core::option::Option<f64>
-pub xml2arrow::FieldConfig::xml_path: alloc::string::String
+pub xml2arrow::FieldConfig::xml_path: core::option::Option<alloc::string::String>
 impl xml2arrow::config::FieldConfig
 pub fn xml2arrow::config::FieldConfig::validate(&self) -> xml2arrow::errors::Result<()>
 impl core::clone::Clone for xml2arrow::config::FieldConfig
