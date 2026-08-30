@@ -564,6 +564,10 @@ Nothing below requires action.
   field may accumulate across text, CDATA and entity events.
 - **`Config::lint()` / `Parser::warnings()`** return advisory findings. The
   library never prints, and lints never change how a document parses.
+- **`Config::from_yaml_str`**, the counterpart to `Config::from_yaml_file` for
+  callers that already hold the YAML — an embedded default, a config fetched
+  over the network, or a test that would rather not touch the filesystem. It
+  validates like the file version does.
 - **`From<ConfigIssue> for Error`**, so a tool that builds or checks configs
   can turn an issue into the error the library would have raised, with `?` or
   `.into()`, instead of writing `Error::InvalidConfig { reason }` by hand.

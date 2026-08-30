@@ -829,6 +829,43 @@ impl Config {
         Ok(config)
     }
 
+    /// Parses a `Config` from a YAML string, validating it.
+    ///
+    /// The counterpart to [`Config::from_yaml_file`] for callers that already
+    /// hold the YAML — an embedded default, a config fetched over the network,
+    /// a string built by a tool, or a test that would rather not touch the
+    /// filesystem. Validation runs here too, so a config obtained this way is
+    /// always structurally valid.
+    ///
+    /// ```rust
+    /// use xml2arrow::Config;
+    ///
+    /// let config = Config::from_yaml_str(r#"
+    /// tables:
+    ///   - name: items
+    ///     xml_path: /data
+    ///     row: item
+    ///     fields:
+    ///       - {name: value, path: value, data_type: Int32}
+    /// "#)?;
+    /// assert_eq!(config.tables.len(), 1);
+    /// # Ok::<(), xml2arrow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// *   [`Error::Yaml`]: the string is not valid YAML, or does not describe
+    ///     a configuration.
+    /// *   [`Error::InvalidConfig`]: the configuration parsed but failed
+    ///     [`Config::validate`].
+    /// *   [`Error::UnsupportedConversion`]: a scale or offset on a field whose
+    ///     type does not support one.
+    pub fn from_yaml_str(yaml: &str) -> Result<Self> {
+        let config: Config = yaml_serde::from_str(yaml).map_err(Error::Yaml)?;
+        config.validate()?;
+        Ok(config)
+    }
+
     /// Writes the `Config` struct to a YAML file.
     ///
     /// This function serializes the `Config` struct to YAML format and writes it to a file at the given path.
@@ -1749,6 +1786,59 @@ mod tests {
         let result = Config::from_yaml_file(PathBuf::from("not_existing.yaml"));
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::Io(_)));
+    }
+
+    /// The string constructor must agree with the file one on all three
+    /// outcomes, not just the happy path: same config from the same YAML, and
+    /// the same error for YAML that is malformed or that describes an invalid
+    /// configuration. A second parser that validated differently would be a
+    /// second set of rules.
+    #[test]
+    fn from_yaml_str_matches_from_yaml_file() {
+        let yaml = r"
+tables:
+  - name: items
+    xml_path: /data
+    row: item
+    fields:
+      - {name: value, path: value, data_type: Int32}
+";
+        let temp_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(temp_file.path(), yaml).unwrap();
+
+        let from_file = Config::from_yaml_file(temp_file.path()).unwrap();
+        let from_str = Config::from_yaml_str(yaml).unwrap();
+        assert_eq!(from_file, from_str);
+    }
+
+    #[test]
+    fn from_yaml_str_rejects_malformed_yaml() {
+        assert!(matches!(
+            Config::from_yaml_str("tables: [oh no: {"),
+            Err(Error::Yaml(_))
+        ));
+    }
+
+    /// Validation runs here too, so a config obtained this way is as
+    /// trustworthy as one loaded from a file.
+    #[test]
+    fn from_yaml_str_validates() {
+        let err = Config::from_yaml_str(
+            r"
+tables:
+  - name: items
+    xml_path: /data
+    fields:
+      - {name: value, xml_path: /elsewhere/value, data_type: Int32}
+",
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            Error::InvalidConfig {
+                reason: ConfigIssue::FieldPathNotUnderTable { .. }
+            }
+        ));
     }
 
     #[test]
