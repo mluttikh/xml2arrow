@@ -60,6 +60,17 @@ The YAML configuration defines which parts of the XML document become tables and
 how their fields are typed. The full schema is:
 
 ```yaml
+version: 2                     # Optional. Asserts the config is fully migrated —
+                               # every table declares `row:` and uses `links:`
+                               # rather than `levels:`, every field uses `path:`
+                               # — and in exchange takes the defaults 1.0 will
+                               # make mandatory. Omitted means today's behavior.
+defaults:                      # Optional. Value policies applied to every field
+  trim: <true|false>           # that does not set its own; same keys as a
+  on_missing: <policy>         # field's, listed under `fields:` below.
+  on_invalid: <policy>
+  on_repeat: <policy>
+  null_values: [<str>]
 parser_options:
   trim_text: <true|false>      # Trim whitespace from text nodes (default: false)
   stop_at_paths: [<xml_path>]  # Stop parsing after these closing tags (optional,
@@ -99,8 +110,10 @@ tables:
     links:                     # Declared relationships (optional; not with levels)
       - parent: <table>        #   UInt64 join key → <table>._id
         name: <column>         #   default: _<table>_id
-      - index_of: <path>       #   UInt32 positional ordinal (NOT a key);
-        name: <column>         #   default: <element>_idx. Same value as <level>.
+      - index_of: <path>       #   UInt32 positional ordinal (NOT a key).
+        name: <column>         #   Must name an enclosing table's ROW element,
+                               #   not its xml_path. Default column name:
+                               #   <element>_idx. Same value as <level>.
     row_id: <name|false>       # This table's own key column. Defaults to `_id`
                                # exactly when another table links to it.
     fields:
@@ -172,53 +185,9 @@ node, so switching an absolute `xml_path:` to `path:` is a key rename with no
 output change. Set exactly one of them per field.
 
 **Declared links (`links:`).** `levels` names *labels* and takes its values
-positionally from whatever ancestor tables happen to enclose a table, so a
-mismatch produces a column of plausible wrong numbers. `links:` names the
-relationship, which makes that a compile-time error — and adds a real join key:
-
-```yaml
-  - name: stations
-    xml_path: /report/group
-    row: station
-    fields: [...]
-  - name: measurements
-    xml_path: /report/group/station/ms
-    row: m
-    links:
-      - parent: stations       # UInt64 FK → stations._id
-```
-
-`parent:` values are **global** row ordinals, never reset, so
-`measurements._stations_id == stations._id` is a correct equi-join however often
-container elements repeat and however the output was batched. The referenced
-table materializes `_id` automatically; tables nobody references gain no column.
-
-**Naming the key columns.** Both are derived from the referenced table's
-`name` — `_id` on that table, `_<name>_id` on the one linking to it — and both
-can be set explicitly:
-
-```yaml
-  - name: stations
-    row_id: station_id            # this table's own key
-  - name: measurements
-    links:
-      - parent: stations
-        name: station_id          # the foreign key
-```
-
-Worth doing whenever the derived names are not what you want downstream; the
-derived form interpolates the table's `name` exactly as written, so a table
-whose name is not a plain identifier produces a column that is not one either.
-
-Collisions are never resolved silently: if two links, or a link and a field,
-would produce the same column, the config is rejected at load with a message
-naming `name:` as the fix.
-
-`index_of:` is the other kind — a `UInt32` positional ordinal that resets with
-its scope. It is **value-identical to the legacy `<level>` column** for the same
-path, so it exists to let you adopt `links:` without changing a single number.
-It is not a join key: where a container repeats, two different parents both
-report `0`.
+positionally; `links:` names the relationship, which turns a mismatch into a
+load-time error and adds a real join key. The two are compared, with what
+each produces, in [Linking nested tables](#2-linking-nested-tables) below.
 
 **Value policies.** Every policy above is optional and **absent means current
 behavior**, including the type-dependent quirks — setting one opts out of a
@@ -334,10 +303,33 @@ the counter resets with its scope. That is the difference that matters:
 > plausible table, wrong data. This is a frozen corpus case, not a
 > hypothetical.
 
-If you are adopting `links:` on an existing config and want the numbers to stay
-byte-identical, use `index_of:` rather than `parent:` — it is value-identical to
-the `<level>` column for the same path (see the `links:` notes in section 1). It
-is an ordinal, not a key, and carries the same caveat as `levels`.
+**Naming the key columns.** Both are derived from the referenced table's
+`name` — `_id` on that table, `_<name>_id` on the one linking to it — and both
+can be set explicitly:
+
+```yaml
+  - name: stations
+    row_id: station_id            # this table's own key
+  - name: measurements
+    links:
+      - parent: stations
+        name: station_id          # the foreign key
+```
+
+Worth doing whenever the derived names are not what you want downstream; the
+derived form interpolates the table's `name` exactly as written, so a table
+whose name is not a plain identifier produces a column that is not one either.
+
+Collisions are never resolved silently: if two links, or a link and a field,
+would produce the same column, the config is rejected at load with a message
+naming `name:` as the fix.
+
+**`index_of:` — the third option, for adopting `links:` without changing a
+number.** A `UInt32` positional ordinal that resets with its scope, and
+**value-identical to the legacy `<level>` column** for the same path. Use it
+when you want to move off `levels` while keeping the output byte-identical. It
+is an ordinal, not a join key, and carries exactly the caveat above: where a
+container repeats, two different parents both report `0`.
 
 *A table defined purely to establish hierarchy — one with an empty `fields`
 list — acts only as a boundary and is excluded from the output map.*
