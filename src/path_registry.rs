@@ -96,8 +96,11 @@ impl PathNodeInfo {
     }
 
     /// Returns true if this path has any associated fields.
+    ///
+    /// Test-only: the parser reads `field_indices` directly, since it needs
+    /// the indices themselves on the same branch.
+    #[cfg(test)]
     #[inline]
-    #[allow(dead_code)]
     pub fn has_fields(&self) -> bool {
         !self.field_indices.is_empty()
     }
@@ -415,13 +418,6 @@ impl PathRegistry {
     pub fn get_table_index(&self, node_id: PathNodeId) -> Option<usize> {
         self.node_info[node_id.index()].table_index
     }
-
-    /// Returns the root node info.
-    #[inline]
-    #[allow(dead_code)]
-    pub fn root_info(&self) -> &PathNodeInfo {
-        &self.node_info[0]
-    }
 }
 
 /// One frame on the `PathTracker` stack — a single open XML element.
@@ -579,25 +575,18 @@ impl PathTracker {
         }
     }
 
-    /// Returns the current node ID, or ROOT if unknown.
-    #[inline]
-    #[allow(dead_code)]
-    pub fn current_or_root(&self) -> PathNodeId {
-        self.node_stack
-            .last()
-            .map_or(PathNodeId::ROOT, |e| e.node_id)
-    }
-
     /// Returns true if the current path is known (exists in the registry).
+    ///
+    /// Test-only: the parser branches on the `StackEntry` it already holds
+    /// rather than re-reading the top of the stack.
+    #[cfg(test)]
     #[inline]
-    #[allow(dead_code)]
     pub fn is_current_known(&self) -> bool {
         self.node_stack.last().is_some_and(|e| e.is_known)
     }
 
     /// Returns the depth of the current path (number of segments from root).
     #[inline]
-    #[allow(dead_code)]
     pub fn depth(&self) -> usize {
         self.node_stack.len().saturating_sub(1)
     }
