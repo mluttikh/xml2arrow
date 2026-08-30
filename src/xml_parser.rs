@@ -220,6 +220,19 @@ impl ResolvedPolicy {
         }
     }
 
+    /// [`ResolvedPolicy::prepare`], but `None` outright when the row captured
+    /// nothing for this field.
+    ///
+    /// The two ways to have no value — the element never appeared, and it
+    /// appeared holding nothing usable — converge here, so every caller past
+    /// this point has one case to handle instead of two. `Utf8` is the one
+    /// type that must tell them apart (an empty capture is a present `""`,
+    /// not a missing value) and so calls `prepare` directly.
+    #[inline]
+    fn prepare_if<'v>(&self, has_value: bool, value: &'v [u8]) -> Option<&'v [u8]> {
+        if has_value { self.prepare(value) } else { None }
+    }
+
     /// Applies `trim` and `null_values`, returning `None` when the value counts
     /// as missing.
     #[inline]
@@ -375,6 +388,28 @@ macro_rules! append_missing {
     }};
 }
 
+/// Builds the "this text is not a value of that type" error.
+///
+/// Three sites raised it with the same five fields — the two integer and
+/// float macros, expanded once per numeric `DType`, plus booleans — so this
+/// is a dozen copies of the construction in the compiled output rather than
+/// three in the source.
+///
+/// `#[cold]` and out of line for the reason the other error builders here are:
+/// the value path runs once per field per row, and code it will almost never
+/// execute still costs it instruction-cache footprint and inlining budget.
+#[cold]
+#[inline(never)]
+fn invalid_value_error(meta: &FieldMeta, value: &[u8], kind: ParseKind) -> Error {
+    Error::ParseError {
+        field: meta.name.clone(),
+        path: meta.xml_path.clone(),
+        value: String::from_utf8_lossy(value).into_owned(),
+        kind,
+        location: Box::default(),
+    }
+}
+
 /// Handles a value that could not be parsed as its declared type.
 macro_rules! append_invalid {
     ($builder:expr, $fc:expr, $err:expr) => {{
@@ -387,15 +422,7 @@ macro_rules! append_invalid {
 
 macro_rules! append_int {
     ($builder:expr, $value:expr, $has_value:expr, $field_config:expr, $ty:ty, $type_name:expr) => {{
-        // `prepare` applies this field's `trim` and `null_values` and reports
-        // "nothing usable here" as `None`, so absent, blank and null-literal
-        // values all converge on one path.
-        let prepared = if $has_value {
-            $field_config.policy.prepare($value)
-        } else {
-            None
-        };
-        if let Some(trimmed) = prepared {
+        if let Some(trimmed) = $field_config.policy.prepare_if($has_value, $value) {
             // NOT `atoi::atoi`: that parses the longest digit *prefix* and
             // silently discards the rest — "3x" became 3 and "1.5" became 1.
             // The checked radix-10 primitive reports how many bytes it
@@ -412,16 +439,14 @@ macro_rules! append_int {
                         Err(e) => append_invalid!(
                             $builder,
                             $field_config,
-                            Error::ParseError {
-                                field: $field_config.name.clone(),
-                                path: $field_config.xml_path.clone(),
-                                value: String::from_utf8_lossy($value).into_owned(),
-                                kind: ParseKind::InvalidNumber {
+                            invalid_value_error(
+                                $field_config,
+                                $value,
+                                ParseKind::InvalidNumber {
                                     type_name: $type_name,
                                     reason: e.to_string(),
-                                },
-                                location: Box::default(),
-                            }
+                                }
+                            )
                         ),
                     }
                 }
@@ -444,15 +469,7 @@ macro_rules! append_int {
 /// whitespace is ignored, whitespace-only counts as missing.
 macro_rules! append_float {
     ($builder:expr, $value:expr, $has_value:expr, $field_config:expr, $has_transform:expr, $ty:ty, $type_name:expr) => {{
-        // `prepare` applies this field's `trim` and `null_values` and reports
-        // "nothing usable here" as `None`, so absent, blank and null-literal
-        // values all converge on one path.
-        let prepared = if $has_value {
-            $field_config.policy.prepare($value)
-        } else {
-            None
-        };
-        if let Some(trimmed) = prepared {
+        if let Some(trimmed) = $field_config.policy.prepare_if($has_value, $value) {
             match fast_float2::parse::<$ty, _>(trimmed) {
                 Ok(mut val) => {
                     if $has_transform {
@@ -470,16 +487,14 @@ macro_rules! append_float {
                 Err(e) => append_invalid!(
                     $builder,
                     $field_config,
-                    Error::ParseError {
-                        field: $field_config.name.clone(),
-                        path: $field_config.xml_path.clone(),
-                        value: String::from_utf8_lossy($value).into_owned(),
-                        kind: ParseKind::InvalidNumber {
+                    invalid_value_error(
+                        $field_config,
+                        $value,
+                        ParseKind::InvalidNumber {
                             type_name: $type_name,
                             reason: e.to_string(),
-                        },
-                        location: Box::default(),
-                    }
+                        }
+                    )
                 ),
             }
         } else {
@@ -584,25 +599,14 @@ impl FieldBuilder {
                 append_float!(b, value, has_value, fc, has_transform, f64, "f64")
             }
             TypedArrayBuilder::Boolean(b) => {
-                let prepared = if has_value {
-                    fc.policy.prepare(value)
-                } else {
-                    None
-                };
-                if let Some(bytes) = prepared {
+                if let Some(bytes) = fc.policy.prepare_if(has_value, value) {
                     match parse_boolean_token(bytes) {
                         Ok(Some(val)) => b.append_value(val),
                         Ok(None) => append_missing!(b, fc),
                         Err(()) => append_invalid!(
                             b,
                             fc,
-                            Error::ParseError {
-                                field: fc.name.clone(),
-                                path: fc.xml_path.clone(),
-                                value: String::from_utf8_lossy(value).into_owned(),
-                                kind: ParseKind::InvalidBoolean,
-                                location: Box::default(),
-                            }
+                            invalid_value_error(fc, value, ParseKind::InvalidBoolean)
                         ),
                     }
                 } else {
@@ -1270,21 +1274,19 @@ fn duplicate_value_error(
     table_idx: usize,
     field_idx: usize,
 ) -> Error {
-    {
-        let table_builder = &table_builders[table_idx];
-        let field_builder = &table_builder.field_builders[field_idx];
-        Error::ParseError {
-            field: field_builder.meta.name.clone(),
-            path: field_builder.meta.xml_path.clone(),
-            value: String::from_utf8_lossy(&field_builder.current_value).into_owned(),
-            kind: ParseKind::DuplicateValue,
-            // Raised mid-row, so `save_row`'s annotation never sees it: the
-            // in-progress row will occupy the table's current counter.
-            location: Box::new(ErrorLocation {
-                row: Some(table_builder.row_index),
-                position: None,
-            }),
-        }
+    let table_builder = &table_builders[table_idx];
+    let field_builder = &table_builder.field_builders[field_idx];
+    Error::ParseError {
+        field: field_builder.meta.name.clone(),
+        path: field_builder.meta.xml_path.clone(),
+        value: String::from_utf8_lossy(&field_builder.current_value).into_owned(),
+        kind: ParseKind::DuplicateValue,
+        // Raised mid-row, so `save_row`'s annotation never sees it: the
+        // in-progress row will occupy the table's current counter.
+        location: Box::new(ErrorLocation {
+            row: Some(table_builder.row_index),
+            position: None,
+        }),
     }
 }
 
