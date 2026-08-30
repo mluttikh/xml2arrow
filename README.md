@@ -705,8 +705,12 @@ tables:
  └──────────────┴──────────────────────┴─────────────┴───────────────┴───────────┘
 ```
 
-The `<station>` index in the `measurements` table links each measurement to its
-parent station by row position, enabling a join on `stations.<station> = measurements.<station>`.
+The `_stations_id` column in the `measurements` table is each measurement's
+parent station, and `_id` on `stations` is the key it refers to — both
+materialized by the `links: - parent: stations` line in the config. The values
+are global row ordinals rather than per-scope counters, so
+`measurements._stations_id == stations._id` stays a correct join however often
+`<monitoring_stations>` repeats.
 
 ---
 
