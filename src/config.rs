@@ -252,6 +252,28 @@ pub(crate) fn paths_equal(a: &str, b: &str) -> bool {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[non_exhaustive]
 pub struct Config {
+    /// Which generation of configuration semantics this file is written
+    /// against. Absent — or `1` — is every release before this one.
+    ///
+    /// `2` is an **assertion, not a switch**. It does not select a different
+    /// engine; it says "this config is fully migrated", and validation holds it
+    /// to that: every table declares [`TableConfig::row`], no table uses
+    /// `levels`, and every field uses `path` rather than the deprecated
+    /// `xml_path`. A config that has not finished migrating is rejected at load
+    /// with a message naming what is left, rather than parsing under semantics
+    /// its author did not intend.
+    ///
+    /// In exchange it opts into the value defaults 1.0 will make mandatory,
+    /// a full release cycle early: `trim` on for every type, and a missing
+    /// non-nullable value an error whatever the column's type — the two places
+    /// where the historical defaults differ by type rather than by intent.
+    /// Both are overridable per field, and deleting the line reverts
+    /// everything.
+    ///
+    /// Declaring `2` therefore has one purpose: to find out, at load time and
+    /// on your own schedule, whether you are ready for 1.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
     /// A vector of `TableConfig` structs, each defining a table to be extracted from the XML.
     pub tables: Vec<TableConfig>,
     /// Parser options.
@@ -286,6 +308,11 @@ impl Config {
     /// - Field `xml_path` must be a descendant of (or equal to) the parent table's
     ///   `xml_path`, compared per path segment. The root table `/` allows any field path.
     /// - Scale/offset may only be used with Float32 and Float64 fields.
+    /// - When [`Config::version`] declares `2`, the config must be fully
+    ///   migrated: every table declares `row:`, none uses `levels:`, every
+    ///   field uses `path:` rather than `xml_path:`, and a table nested inside
+    ///   another declares `links:`. These are checked last, so a config that is
+    ///   both broken and unmigrated reports the breakage first.
     ///
     /// # Errors
     ///
@@ -596,7 +623,99 @@ impl Config {
                 field.validate()?;
             }
         }
+
+        // Last, so that a config which is broken *and* not yet migrated hears
+        // about the breakage first: "this path is not under its table" is a
+        // bug, while "this table still uses levels" is unfinished migration.
+        self.validate_declared_version()?;
         Ok(())
+    }
+
+    /// Enforces what [`Config::version`] asserts.
+    ///
+    /// Every check here is a *migration* check, not a correctness one: each of
+    /// these configs parses perfectly well without the `version:` line. What
+    /// they cannot do is parse under 1.0 semantics, which is the single thing
+    /// declaring `2` claims. Rejecting is therefore the whole feature — a
+    /// `version: 2` that quietly tolerated `levels` would assert nothing.
+    ///
+    /// Reported one at a time rather than collected. The fixes are mechanical
+    /// and usually repetitive, so the first one tells you what the rest of the
+    /// pass looks like, and the migrator applies them in bulk anyway.
+    fn validate_declared_version(&self) -> Result<()> {
+        let Some(version) = self.version else {
+            return Ok(());
+        };
+        match version {
+            1 => return Ok(()),
+            2 => {}
+            other => {
+                return Err(Error::InvalidConfig {
+                    reason: ConfigIssue::UnsupportedConfigVersion { version: other },
+                });
+            }
+        }
+
+        for table in &self.tables {
+            if table.row.is_none() {
+                return Err(Error::InvalidConfig {
+                    reason: ConfigIssue::InferredRowInVersion2 {
+                        table: table.name.clone(),
+                    },
+                });
+            }
+            if !table.levels.is_empty() {
+                return Err(Error::InvalidConfig {
+                    reason: ConfigIssue::LevelsInVersion2 {
+                        table: table.name.clone(),
+                    },
+                });
+            }
+            for field in &table.fields {
+                if field.xml_path.is_some() {
+                    return Err(Error::InvalidConfig {
+                        reason: ConfigIssue::FieldXmlPathInVersion2 {
+                            table: table.name.clone(),
+                            field: field.name.clone(),
+                        },
+                    });
+                }
+            }
+            // A table with no ancestor has nothing to relate to, so `links` is
+            // rightly absent. One nested inside another and declaring none has
+            // dropped the relationship `levels` used to carry positionally —
+            // silently, and only for the tables where it matters.
+            if table.links.as_ref().is_none_or(Vec::is_empty)
+                && let Some(enclosing) = self.enclosing_table_of(table)
+            {
+                return Err(Error::InvalidConfig {
+                    reason: ConfigIssue::NestedTableWithoutLinksInVersion2 {
+                        table: table.name.clone(),
+                        enclosing_table: enclosing.name.clone(),
+                    },
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// The innermost other table whose scope contains `table`, if any.
+    ///
+    /// "Innermost" matters for the error message only: any enclosing table
+    /// makes the missing link a problem, but naming the nearest one names the
+    /// table the reader is most likely to link to.
+    fn enclosing_table_of(&self, table: &TableConfig) -> Option<&TableConfig> {
+        let scope = table.link_scope_path();
+        self.tables
+            .iter()
+            .filter(|candidate| {
+                if candidate.name == table.name {
+                    return false;
+                }
+                let candidate_scope = candidate.link_scope_path();
+                !paths_equal(&candidate_scope, &scope) && path_is_under(&scope, &candidate_scope)
+            })
+            .max_by_key(|candidate| path_segments(&candidate.link_scope_path()).count())
     }
 
     /// Creates a `Config` struct from a YAML configuration file.
@@ -1032,6 +1151,7 @@ impl TableConfig {
 /// `Config` produced here is guaranteed to satisfy [`Config::validate`].
 #[derive(Debug, Default)]
 pub struct ConfigBuilder {
+    version: Option<u32>,
     tables: Vec<TableConfig>,
     parser_options: ParserOptions,
     defaults: Option<ValuePolicies>,
@@ -1066,6 +1186,15 @@ impl ConfigBuilder {
         self
     }
 
+    /// Declares which generation of configuration semantics this config is
+    /// written against. See [`Config::version`]; passing `2` makes
+    /// [`ConfigBuilder::build`] reject a config that is not fully migrated.
+    #[must_use]
+    pub fn version(mut self, version: u32) -> Self {
+        self.version = Some(version);
+        self
+    }
+
     /// Validates and returns the configuration.
     ///
     /// # Errors
@@ -1074,6 +1203,7 @@ impl ConfigBuilder {
     /// for any violation listed on [`Config::validate`].
     pub fn build(self) -> Result<Config> {
         let config = Config {
+            version: self.version,
             tables: self.tables,
             parser_options: self.parser_options,
             defaults: self.defaults,
@@ -1463,6 +1593,7 @@ mod tests {
     fn test_config_yaml_roundtrip_preserves_values(
         #[values(
             Config {
+                version: None,
                 parser_options: Default::default(),
                 defaults: None,
                 tables: vec![
@@ -1485,6 +1616,7 @@ mod tests {
                 ],
             },
             Config {
+                version: None,
                 parser_options: Default::default(),
                 defaults: None,
                 tables: vec![]
@@ -1525,6 +1657,7 @@ mod tests {
     #[test]
     fn test_yaml_write_invalid_path_returns_error() {
         let config = Config {
+            version: None,
             tables: vec![],
             parser_options: Default::default(),
             defaults: None,
@@ -1792,6 +1925,7 @@ mod tests {
     #[test]
     fn test_duplicate_table_names_rejected() {
         let config = Config {
+            version: None,
             parser_options: Default::default(),
             defaults: None,
             tables: vec![
@@ -1807,6 +1941,7 @@ mod tests {
     #[test]
     fn test_empty_table_name_rejected() {
         let config = Config {
+            version: None,
             parser_options: Default::default(),
             defaults: None,
             tables: vec![TableConfig::new("", "/root", vec![], vec![])],
@@ -1819,6 +1954,7 @@ mod tests {
     #[test]
     fn test_empty_table_xml_path_rejected() {
         let config = Config {
+            version: None,
             parser_options: Default::default(),
             defaults: None,
             tables: vec![TableConfig::new("items", "", vec![], vec![])],
@@ -1831,6 +1967,7 @@ mod tests {
     #[test]
     fn test_duplicate_field_names_in_same_table_rejected() {
         let config = Config {
+            version: None,
             parser_options: Default::default(),
             defaults: None,
             tables: vec![TableConfig::new(
@@ -1855,6 +1992,7 @@ mod tests {
     #[test]
     fn test_same_field_name_in_different_tables_allowed() {
         let config = Config {
+            version: None,
             parser_options: Default::default(),
             defaults: None,
             tables: vec![
@@ -1886,6 +2024,7 @@ mod tests {
     #[test]
     fn test_empty_field_name_rejected() {
         let config = Config {
+            version: None,
             parser_options: Default::default(),
             defaults: None,
             tables: vec![TableConfig::new(
@@ -1907,6 +2046,7 @@ mod tests {
     #[test]
     fn test_empty_field_xml_path_rejected() {
         let config = Config {
+            version: None,
             parser_options: Default::default(),
             defaults: None,
             tables: vec![TableConfig::new(
@@ -1928,6 +2068,7 @@ mod tests {
     #[test]
     fn test_field_path_not_under_table_path_rejected() {
         let config = Config {
+            version: None,
             parser_options: Default::default(),
             defaults: None,
             tables: vec![TableConfig::new(
@@ -1951,6 +2092,7 @@ mod tests {
         // "/root/items_other" starts with "/root/item" as a *string* but is
         // not under it as a *path* — the check must be segment-aware.
         let config = Config {
+            version: None,
             parser_options: Default::default(),
             defaults: None,
             tables: vec![TableConfig::new(
@@ -1973,6 +2115,7 @@ mod tests {
     fn test_field_path_equal_to_table_path_accepted() {
         // A field can capture the table element's own text content.
         let config = Config {
+            version: None,
             parser_options: Default::default(),
             defaults: None,
             tables: vec![TableConfig::new(
@@ -1994,6 +2137,7 @@ mod tests {
         // The path registry stores one table per node; a duplicate path
         // would silently starve the earlier table of rows.
         let config = Config {
+            version: None,
             parser_options: Default::default(),
             defaults: None,
             tables: vec![
@@ -2013,6 +2157,7 @@ mod tests {
         // "/data", "data" and "/data/" all resolve to the same registry
         // node, so they must count as duplicates regardless of spelling.
         let config = Config {
+            version: None,
             parser_options: Default::default(),
             defaults: None,
             tables: vec![
@@ -2027,6 +2172,7 @@ mod tests {
     #[test]
     fn test_field_path_under_table_path_accepted() {
         let config = Config {
+            version: None,
             parser_options: Default::default(),
             defaults: None,
             tables: vec![TableConfig::new(
@@ -2046,6 +2192,7 @@ mod tests {
     #[test]
     fn test_root_table_allows_any_field_path() {
         let config = Config {
+            version: None,
             parser_options: Default::default(),
             defaults: None,
             tables: vec![TableConfig::new(
@@ -2065,6 +2212,7 @@ mod tests {
     #[test]
     fn test_valid_config_passes_all_checks() {
         let config = Config {
+            version: None,
             parser_options: Default::default(),
             defaults: None,
             tables: vec![
@@ -2743,5 +2891,184 @@ mod tests {
         // Unset keys must not appear, so a config that sets no policy stays as
         // it was written.
         assert!(!yaml.contains("on_invalid"));
+    }
+
+    /// `version: 2` is an assertion about the config, so every one of these
+    /// cases is a config that parses perfectly well *without* the line. What
+    /// is being tested is that declaring it and not meaning it fails loudly.
+    mod version_2 {
+        use super::*;
+
+        /// The shape a fully migrated table has: a declared row, links instead
+        /// of levels, and `path` instead of `xml_path`.
+        fn migrated_root() -> TableConfig {
+            TableConfig::builder("stations", "/report/stations")
+                .row("station")
+                .field(
+                    FieldConfigBuilder::new("id", "@id", DType::Utf8)
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+        }
+
+        #[test]
+        fn a_fully_migrated_config_is_accepted() {
+            let config = Config::builder().version(2).table(migrated_root()).build();
+            assert!(config.is_ok(), "{config:?}");
+        }
+
+        /// Absent stays the default it has always been, and `1` is the same
+        /// thing said out loud — neither imposes any of the checks below.
+        #[rstest]
+        #[case(None)]
+        #[case(Some(1))]
+        fn version_1_and_absent_impose_nothing(#[case] version: Option<u32>) {
+            let legacy = TableConfig::new(
+                "t",
+                "/report/stations",
+                vec!["station".into()],
+                vec![
+                    FieldConfigBuilder::new("id", "/report/stations/station/@id", DType::Utf8)
+                        .build()
+                        .unwrap(),
+                ],
+            );
+            let mut config = Config::builder().table(legacy).build().unwrap();
+            config.version = version;
+            assert!(config.validate().is_ok());
+        }
+
+        /// Guessing which semantics an unknown version meant is exactly wrong
+        /// for the one key whose job is to pin them.
+        #[test]
+        fn an_unknown_version_is_rejected() {
+            let mut config = Config::builder().table(migrated_root()).build().unwrap();
+            config.version = Some(3);
+            assert!(matches!(
+                config.validate(),
+                Err(Error::InvalidConfig {
+                    reason: ConfigIssue::UnsupportedConfigVersion { version: 3 }
+                })
+            ));
+        }
+
+        /// The field path is absolute here on purpose: dropping `row:` from a
+        /// table whose fields are relative fails earlier, and for a different
+        /// reason (`RelativeFieldPathWithoutRow`), which would leave this test
+        /// asserting nothing about `version: 2`. `path:` stays dual-form under
+        /// v2 — it is `xml_path:` that is out, not absolute values.
+        #[test]
+        fn an_inferred_row_is_rejected() {
+            let table = TableConfig::builder("stations", "/report/stations")
+                .field(
+                    FieldConfigBuilder::new("id", "/report/stations/station/@id", DType::Utf8)
+                        .build()
+                        .unwrap(),
+                )
+                .build();
+            let config = Config::builder().version(2).table(table).build();
+            assert!(matches!(
+                config,
+                Err(Error::InvalidConfig {
+                    reason: ConfigIssue::InferredRowInVersion2 { .. }
+                })
+            ));
+        }
+
+        #[test]
+        fn levels_are_rejected() {
+            let mut table = migrated_root();
+            table.levels = vec!["station".into()];
+            let config = Config::builder().version(2).table(table).build();
+            assert!(matches!(
+                config,
+                Err(Error::InvalidConfig {
+                    reason: ConfigIssue::LevelsInVersion2 { .. }
+                })
+            ));
+        }
+
+        #[test]
+        fn a_field_spelled_xml_path_is_rejected() {
+            let mut table = migrated_root();
+            table.fields[0].path = None;
+            table.fields[0].xml_path = Some("/report/stations/station/@id".into());
+            let config = Config::builder().version(2).table(table).build();
+            assert!(matches!(
+                config,
+                Err(Error::InvalidConfig {
+                    reason: ConfigIssue::FieldXmlPathInVersion2 { .. }
+                })
+            ));
+        }
+
+        /// The one check that is about meaning rather than spelling: a nested
+        /// table with no links has dropped the relationship `levels` carried,
+        /// and nothing in the output would say so.
+        #[test]
+        fn a_nested_table_without_links_is_rejected() {
+            let child = TableConfig::builder("measurements", "/report/stations/station/ms")
+                .row("m")
+                .field(
+                    FieldConfigBuilder::new("v", "v", DType::Int32)
+                        .build()
+                        .unwrap(),
+                )
+                .build();
+            let config = Config::builder()
+                .version(2)
+                .table(migrated_root())
+                .table(child)
+                .build();
+            assert!(matches!(
+                config,
+                Err(Error::InvalidConfig {
+                    reason: ConfigIssue::NestedTableWithoutLinksInVersion2 { .. }
+                })
+            ));
+        }
+
+        /// A table nobody encloses has nothing to link to, so absent `links`
+        /// is right rather than missing.
+        #[test]
+        fn a_top_level_table_needs_no_links() {
+            let sibling = TableConfig::builder("other", "/report/other")
+                .row("x")
+                .field(
+                    FieldConfigBuilder::new("v", "v", DType::Int32)
+                        .build()
+                        .unwrap(),
+                )
+                .build();
+            let config = Config::builder()
+                .version(2)
+                .table(migrated_root())
+                .table(sibling)
+                .build();
+            assert!(config.is_ok(), "{config:?}");
+        }
+
+        /// The key survives a YAML round trip, and stays absent when unset —
+        /// a config that never opted in must not acquire a version by being
+        /// written back out.
+        #[test]
+        fn the_version_key_round_trips_and_stays_absent_when_unset() {
+            let config = Config::builder()
+                .version(2)
+                .table(migrated_root())
+                .build()
+                .unwrap();
+            let yaml = yaml_serde::to_string(&config).unwrap();
+            assert!(yaml.contains("version: 2"));
+            assert_eq!(yaml_serde::from_str::<Config>(&yaml).unwrap(), config);
+
+            let unversioned = Config::builder().table(migrated_root()).build().unwrap();
+            assert!(
+                !yaml_serde::to_string(&unversioned)
+                    .unwrap()
+                    .contains("version")
+            );
+        }
     }
 }

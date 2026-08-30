@@ -461,7 +461,77 @@ column behave the same either way — this is the single most useful policy here
 
 ---
 
-## 7. Deprecated, still working
+## 7. Optional: assert you are done with `version: 2`
+
+Sections 3 through 6 are each independently optional, which is the point — but
+it also means there is no moment where you find out you have finished. A config
+can be half migrated indefinitely and never say so.
+
+`version: 2` is that moment. It is an **assertion, not a switch**:
+
+```yaml
+version: 2
+```
+
+The parser holds the config to it at load, and rejects anything left over:
+
+| Left over | Message names |
+|---|---|
+| a table with no `row:` | the table |
+| a table still using `levels:` | the table |
+| a field still spelled `xml_path:` | the table and the field |
+| a nested table with no `links:` | the table and the one enclosing it |
+
+Nothing there is a *correctness* problem — every one of those configs parses
+perfectly well without the `version:` line. What they cannot do is parse under
+1.0 semantics, which is the single thing declaring `2` claims.
+
+### What you get in exchange
+
+The two value defaults 1.0 will make mandatory, a full release cycle early.
+Both are places where the historical default was chosen by the column's Arrow
+type rather than by anything you asked for:
+
+| | v1 | v2 |
+|---|---|---|
+| `trim` | on for numbers and booleans, off for `Utf8` | on for every type |
+| a missing non-nullable value | `""` for `Utf8`, an error for anything else | an error for every type |
+
+Same document, same config but for the one line:
+
+```xml
+<item><s> hi </s><n> 42 </n></item>
+```
+
+| Column | v1 | v2 |
+|---|---|---|
+| `s` (`Utf8`) | `" hi "` | `"hi"` |
+| `n` (`Int32`) | `42` | `42` |
+
+And with `<s>` absent entirely, a non-nullable `s` is `""` under v1 and a
+`MissingRequiredField` error under v2 — so "does an absent element stop the
+parse?" stops depending on which type the column happens to be.
+
+### Reverting
+
+Delete the line. That is the whole procedure: `version: 2` sets *defaults*, so
+any field that states what it wants still gets it —
+
+```yaml
+- {name: s, path: s, data_type: Utf8, trim: false}
+- {name: note, path: note, data_type: Utf8, on_missing: empty}
+```
+
+— and per-field opt-outs survive the flag going away, because they were never
+about the flag.
+
+`version: 1` and omitting the key are the same thing: every release so far.
+An unrecognised version is rejected rather than guessed at, since pinning
+semantics is the one job this key has.
+
+---
+
+## 8. Deprecated, still working
 
 All three keep working until 1.0.
 
@@ -478,7 +548,7 @@ parse many" design — measurably faster for anything beyond a single document.
 
 ---
 
-## 8. New, purely additive
+## 9. New, purely additive
 
 Nothing below requires action.
 

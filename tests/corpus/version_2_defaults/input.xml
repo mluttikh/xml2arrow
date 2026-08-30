@@ -1,0 +1,16 @@
+<report>
+  <stations>
+    <station site=" alpha ">
+      <note> has a note </note>
+      <measurements>
+        <m seq=" 1 "><value> 1.5 </value></m>
+        <m seq=" 2 "><value> 2.5 </value></m>
+      </measurements>
+    </station>
+    <station site=" beta ">
+      <measurements>
+        <m seq=" 3 "><value> 3.5 </value></m>
+      </measurements>
+    </station>
+  </stations>
+</report>

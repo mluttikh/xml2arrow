@@ -132,6 +132,7 @@ impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::RowId
 pub xml2arrow::config::Config::defaults: core::option::Option<xml2arrow::config::ValuePolicies>
 pub xml2arrow::config::Config::parser_options: xml2arrow::config::ParserOptions
 pub xml2arrow::config::Config::tables: alloc::vec::Vec<xml2arrow::config::TableConfig>
+pub xml2arrow::config::Config::version: core::option::Option<u32>
 impl xml2arrow::config::Config
 pub fn xml2arrow::config::Config::builder() -> xml2arrow::config::ConfigBuilder
 pub fn xml2arrow::config::Config::from_yaml_file(impl core::convert::AsRef<std::path::Path>) -> xml2arrow::errors::Result<Self>
@@ -165,6 +166,7 @@ pub fn xml2arrow::config::ConfigBuilder::defaults(self, xml2arrow::config::Value
 pub fn xml2arrow::config::ConfigBuilder::parser_options(self, xml2arrow::config::ParserOptions) -> Self
 pub fn xml2arrow::config::ConfigBuilder::table(self, xml2arrow::config::TableConfig) -> Self
 pub fn xml2arrow::config::ConfigBuilder::tables(self, impl core::iter::traits::collect::IntoIterator<Item = xml2arrow::config::TableConfig>) -> Self
+pub fn xml2arrow::config::ConfigBuilder::version(self, u32) -> Self
 impl core::default::Default for xml2arrow::config::ConfigBuilder
 pub fn xml2arrow::config::ConfigBuilder::default() -> xml2arrow::config::ConfigBuilder
 impl core::fmt::Debug for xml2arrow::config::ConfigBuilder
@@ -385,6 +387,9 @@ pub xml2arrow::errors::ConfigIssue::FieldPathNotUnderTable::field: alloc::string
 pub xml2arrow::errors::ConfigIssue::FieldPathNotUnderTable::field_path: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::FieldPathNotUnderTable::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::FieldPathNotUnderTable::table_path: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::FieldXmlPathInVersion2
+pub xml2arrow::errors::ConfigIssue::FieldXmlPathInVersion2::field: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::FieldXmlPathInVersion2::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::InapplicablePolicy
 pub xml2arrow::errors::ConfigIssue::InapplicablePolicy::field: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::InapplicablePolicy::policy: &'static str
@@ -393,6 +398,10 @@ pub xml2arrow::errors::ConfigIssue::InapplicablePolicy::table: alloc::string::St
 pub xml2arrow::errors::ConfigIssue::IndexOfNotAncestorTable
 pub xml2arrow::errors::ConfigIssue::IndexOfNotAncestorTable::index_of: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::IndexOfNotAncestorTable::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::InferredRowInVersion2
+pub xml2arrow::errors::ConfigIssue::InferredRowInVersion2::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::LevelsInVersion2
+pub xml2arrow::errors::ConfigIssue::LevelsInVersion2::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::LinkColumnCollision
 pub xml2arrow::errors::ConfigIssue::LinkColumnCollision::column: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::LinkColumnCollision::table: alloc::string::String
@@ -400,6 +409,9 @@ pub xml2arrow::errors::ConfigIssue::LinkKindAmbiguous
 pub xml2arrow::errors::ConfigIssue::LinkKindAmbiguous::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::LinksAndLevels
 pub xml2arrow::errors::ConfigIssue::LinksAndLevels::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::NestedTableWithoutLinksInVersion2
+pub xml2arrow::errors::ConfigIssue::NestedTableWithoutLinksInVersion2::enclosing_table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::NestedTableWithoutLinksInVersion2::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::ParentNotAncestor
 pub xml2arrow::errors::ConfigIssue::ParentNotAncestor::parent: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::ParentNotAncestor::parent_path: alloc::string::String
@@ -426,6 +438,8 @@ pub xml2arrow::errors::ConfigIssue::SingleTableRequired::output_tables: usize
 pub xml2arrow::errors::ConfigIssue::UnknownParentTable
 pub xml2arrow::errors::ConfigIssue::UnknownParentTable::parent: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::UnknownParentTable::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::UnsupportedConfigVersion
+pub xml2arrow::errors::ConfigIssue::UnsupportedConfigVersion::version: u32
 impl core::fmt::Debug for xml2arrow::errors::ConfigIssue
 pub fn xml2arrow::errors::ConfigIssue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::fmt::Display for xml2arrow::errors::ConfigIssue
@@ -875,6 +889,7 @@ impl<'p, S> core::panic::unwind_safe::UnwindSafe for xml2arrow::BatchStream<'p, 
 pub xml2arrow::Config::defaults: core::option::Option<xml2arrow::config::ValuePolicies>
 pub xml2arrow::Config::parser_options: xml2arrow::config::ParserOptions
 pub xml2arrow::Config::tables: alloc::vec::Vec<xml2arrow::config::TableConfig>
+pub xml2arrow::Config::version: core::option::Option<u32>
 impl xml2arrow::config::Config
 pub fn xml2arrow::config::Config::builder() -> xml2arrow::config::ConfigBuilder
 pub fn xml2arrow::config::Config::from_yaml_file(impl core::convert::AsRef<std::path::Path>) -> xml2arrow::errors::Result<Self>
@@ -908,6 +923,7 @@ pub fn xml2arrow::config::ConfigBuilder::defaults(self, xml2arrow::config::Value
 pub fn xml2arrow::config::ConfigBuilder::parser_options(self, xml2arrow::config::ParserOptions) -> Self
 pub fn xml2arrow::config::ConfigBuilder::table(self, xml2arrow::config::TableConfig) -> Self
 pub fn xml2arrow::config::ConfigBuilder::tables(self, impl core::iter::traits::collect::IntoIterator<Item = xml2arrow::config::TableConfig>) -> Self
+pub fn xml2arrow::config::ConfigBuilder::version(self, u32) -> Self
 impl core::default::Default for xml2arrow::config::ConfigBuilder
 pub fn xml2arrow::config::ConfigBuilder::default() -> xml2arrow::config::ConfigBuilder
 impl core::fmt::Debug for xml2arrow::config::ConfigBuilder
