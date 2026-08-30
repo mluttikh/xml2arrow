@@ -814,11 +814,15 @@ impl std::error::Error for Error {
 // --- Python exception hierarchy ---------------------------------------------
 //
 // The mapping from `Error` variants to concrete Python exception types lives
-// here to keep the two sides from drifting. Adding a new `Error` variant
-// without updating `From<Error> for PyErr` fails to compile below; the
-// `pyerr_mapping_is_exhaustive` test in the `python`-feature test module then
-// round-trips one sample of every variant to catch accidental mapping
-// regressions (e.g. two variants silently mapped to the same exception).
+// here to keep the two sides from drifting, and two guards in this file's test
+// module hold it there. `exhaustiveness_guard` matches every variant
+// explicitly, so adding one without updating this mapping fails to build;
+// `sample_of_each_variant` supplies one instance of each, so a variant that
+// compiles but maps to the wrong exception is still caught.
+//
+// Both matter more than they look: CI only *clippy-checks* the `python`
+// feature, it does not run its tests, so the compile-time half is the part
+// that actually gates a merge.
 
 #[cfg(feature = "python")]
 create_exception!(
