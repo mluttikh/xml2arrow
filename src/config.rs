@@ -386,23 +386,19 @@ impl Config {
         table_names: &mut HashSet<&'c String>,
     ) -> Result<()> {
         if table.name.is_empty() {
-            return Err(Error::InvalidConfig {
-                reason: ConfigIssue::EmptyTableName,
-            });
+            return Err(ConfigIssue::EmptyTableName.into());
         }
         if !table_names.insert(&table.name) {
-            return Err(Error::InvalidConfig {
-                reason: ConfigIssue::DuplicateTableName {
-                    name: table.name.clone(),
-                },
-            });
+            return Err(ConfigIssue::DuplicateTableName {
+                name: table.name.clone(),
+            }
+            .into());
         }
         if table.xml_path.is_empty() {
-            return Err(Error::InvalidConfig {
-                reason: ConfigIssue::EmptyTableXmlPath {
-                    table: table.name.clone(),
-                },
-            });
+            return Err(ConfigIssue::EmptyTableXmlPath {
+                table: table.name.clone(),
+            }
+            .into());
         }
         // Duplicate-path detection compares normalized segments so that
         // "/data", "data" and "/data/" — which all resolve to the same
@@ -411,13 +407,12 @@ impl Config {
         // per-table allocations; table counts are small.
         for earlier_table in &self.tables[..table_idx] {
             if paths_equal(&earlier_table.xml_path, &table.xml_path) {
-                return Err(Error::InvalidConfig {
-                    reason: ConfigIssue::DuplicateTableXmlPath {
-                        table_a: earlier_table.name.clone(),
-                        table_b: table.name.clone(),
-                        xml_path: table.xml_path.clone(),
-                    },
-                });
+                return Err(ConfigIssue::DuplicateTableXmlPath {
+                    table_a: earlier_table.name.clone(),
+                    table_b: table.name.clone(),
+                    xml_path: table.xml_path.clone(),
+                }
+                .into());
             }
         }
         Ok(())
@@ -430,22 +425,20 @@ impl Config {
     fn validate_declared_row(&self, table: &TableConfig) -> Result<()> {
         if let Some(row) = &table.row {
             if row.trim().is_empty() {
-                return Err(Error::InvalidConfig {
-                    reason: ConfigIssue::EmptyRowPath {
-                        table: table.name.clone(),
-                    },
-                });
+                return Err(ConfigIssue::EmptyRowPath {
+                    table: table.name.clone(),
+                }
+                .into());
             }
             let row_path = resolve_row_path(&table.xml_path, row);
             if !path_is_under(&row_path, &table.xml_path) {
-                return Err(Error::InvalidConfig {
-                    reason: ConfigIssue::RowPathNotUnderTable {
-                        table: table.name.clone(),
-                        table_path: table.xml_path.clone(),
-                        row: row.clone(),
-                        row_path,
-                    },
-                });
+                return Err(ConfigIssue::RowPathNotUnderTable {
+                    table: table.name.clone(),
+                    table_path: table.xml_path.clone(),
+                    row: row.clone(),
+                    row_path,
+                }
+                .into());
             }
             // The implicit document root is never closed by the parser —
             // `PathTracker`'s bottom frame is never popped — so a root
@@ -457,11 +450,10 @@ impl Config {
             if paths_equal(&row_path, &table.xml_path)
                 && path_segments(&table.xml_path).next().is_none()
             {
-                return Err(Error::InvalidConfig {
-                    reason: ConfigIssue::RowIsRootTable {
-                        table: table.name.clone(),
-                    },
-                });
+                return Err(ConfigIssue::RowIsRootTable {
+                    table: table.name.clone(),
+                }
+                .into());
             }
             // A row is finalized against the *innermost open table*, so a
             // second table sitting strictly between this one and its row
@@ -474,14 +466,13 @@ impl Config {
                 if path_is_strictly_under(&other.xml_path, &table.xml_path)
                     && path_is_strictly_under(&row_path, &other.xml_path)
                 {
-                    return Err(Error::InvalidConfig {
-                        reason: ConfigIssue::RowPathCrossesTable {
-                            table: table.name.clone(),
-                            row_path,
-                            nested_table: other.name.clone(),
-                            nested_table_path: other.xml_path.clone(),
-                        },
-                    });
+                    return Err(ConfigIssue::RowPathCrossesTable {
+                        table: table.name.clone(),
+                        row_path,
+                        nested_table: other.name.clone(),
+                        nested_table_path: other.xml_path.clone(),
+                    }
+                    .into());
                 }
             }
         }
@@ -494,11 +485,10 @@ impl Config {
     fn validate_declared_links(&self, table: &TableConfig) -> Result<()> {
         if let Some(links) = &table.links {
             if !table.levels.is_empty() {
-                return Err(Error::InvalidConfig {
-                    reason: ConfigIssue::LinksAndLevels {
-                        table: table.name.clone(),
-                    },
-                });
+                return Err(ConfigIssue::LinksAndLevels {
+                    table: table.name.clone(),
+                }
+                .into());
             }
             let scope = table.link_scope_path();
             let mut column_names: HashSet<String> = table
@@ -512,12 +502,11 @@ impl Config {
                     (Some(parent_name), None) => {
                         let Some(parent) = self.tables.iter().find(|t| t.name == parent_name)
                         else {
-                            return Err(Error::InvalidConfig {
-                                reason: ConfigIssue::UnknownParentTable {
-                                    table: table.name.clone(),
-                                    parent: parent_name.to_string(),
-                                },
-                            });
+                            return Err(ConfigIssue::UnknownParentTable {
+                                table: table.name.clone(),
+                                parent: parent_name.to_string(),
+                            }
+                            .into());
                         };
                         // The parent's rows must *contain* this
                         // table's, checked by name. This is the whole
@@ -526,14 +515,13 @@ impl Config {
                         // so could silently mis-align.
                         let parent_scope = parent.link_scope_path();
                         if !path_is_strictly_under(&scope, &parent_scope) {
-                            return Err(Error::InvalidConfig {
-                                reason: ConfigIssue::ParentNotAncestor {
-                                    table: table.name.clone(),
-                                    table_path: scope.clone(),
-                                    parent: parent_name.to_string(),
-                                    parent_path: parent_scope,
-                                },
-                            });
+                            return Err(ConfigIssue::ParentNotAncestor {
+                                table: table.name.clone(),
+                                table_path: scope.clone(),
+                                parent: parent_name.to_string(),
+                                parent_path: parent_scope,
+                            }
+                            .into());
                         }
                     }
                     (None, Some(index_of)) => {
@@ -546,20 +534,18 @@ impl Config {
                             paths_equal(&other, index_of) && path_is_strictly_under(&scope, &other)
                         });
                         if !is_ancestor_table {
-                            return Err(Error::InvalidConfig {
-                                reason: ConfigIssue::IndexOfNotAncestorTable {
-                                    table: table.name.clone(),
-                                    index_of: index_of.to_string(),
-                                },
-                            });
+                            return Err(ConfigIssue::IndexOfNotAncestorTable {
+                                table: table.name.clone(),
+                                index_of: index_of.to_string(),
+                            }
+                            .into());
                         }
                     }
                     _ => {
-                        return Err(Error::InvalidConfig {
-                            reason: ConfigIssue::LinkKindAmbiguous {
-                                table: table.name.clone(),
-                            },
-                        });
+                        return Err(ConfigIssue::LinkKindAmbiguous {
+                            table: table.name.clone(),
+                        }
+                        .into());
                     }
                 }
 
@@ -568,12 +554,11 @@ impl Config {
                 if let Some(column) = link.column_name()
                     && !column_names.insert(column.clone())
                 {
-                    return Err(Error::InvalidConfig {
-                        reason: ConfigIssue::LinkColumnCollision {
-                            table: table.name.clone(),
-                            column,
-                        },
-                    });
+                    return Err(ConfigIssue::LinkColumnCollision {
+                        table: table.name.clone(),
+                        column,
+                    }
+                    .into());
                 }
             }
         }
@@ -588,47 +573,42 @@ impl Config {
         let mut field_names = HashSet::with_capacity(table.fields.len());
         for field in &table.fields {
             if field.name.is_empty() {
-                return Err(Error::InvalidConfig {
-                    reason: ConfigIssue::EmptyFieldName {
-                        table: table.name.clone(),
-                    },
-                });
+                return Err(ConfigIssue::EmptyFieldName {
+                    table: table.name.clone(),
+                }
+                .into());
             }
             if !field_names.insert(&field.name) {
-                return Err(Error::InvalidConfig {
-                    reason: ConfigIssue::DuplicateFieldName {
-                        table: table.name.clone(),
-                        field: field.name.clone(),
-                    },
-                });
+                return Err(ConfigIssue::DuplicateFieldName {
+                    table: table.name.clone(),
+                    field: field.name.clone(),
+                }
+                .into());
             }
             // `path` and `xml_path` are two spellings of one thing, so
             // exactly one must be present. Accepting both would mean
             // silently picking a winner.
             match (field.path.as_deref(), field.xml_path.as_deref()) {
                 (Some(_), Some(_)) => {
-                    return Err(Error::InvalidConfig {
-                        reason: ConfigIssue::FieldPathConflict {
-                            table: table.name.clone(),
-                            field: field.name.clone(),
-                        },
-                    });
+                    return Err(ConfigIssue::FieldPathConflict {
+                        table: table.name.clone(),
+                        field: field.name.clone(),
+                    }
+                    .into());
                 }
                 (None, None) => {
-                    return Err(Error::InvalidConfig {
-                        reason: ConfigIssue::FieldPathMissing {
-                            table: table.name.clone(),
-                            field: field.name.clone(),
-                        },
-                    });
+                    return Err(ConfigIssue::FieldPathMissing {
+                        table: table.name.clone(),
+                        field: field.name.clone(),
+                    }
+                    .into());
                 }
                 (Some(p), None) | (None, Some(p)) if p.trim().is_empty() => {
-                    return Err(Error::InvalidConfig {
-                        reason: ConfigIssue::EmptyFieldXmlPath {
-                            table: table.name.clone(),
-                            field: field.name.clone(),
-                        },
-                    });
+                    return Err(ConfigIssue::EmptyFieldXmlPath {
+                        table: table.name.clone(),
+                        field: field.name.clone(),
+                    }
+                    .into());
                 }
                 _ => {}
             }
@@ -637,27 +617,25 @@ impl Config {
             // a declared row there is nothing to resolve against. Caught
             // here rather than resolving to something plausible-looking.
             let Some(field_path) = resolve_field_path(table, field) else {
-                return Err(Error::InvalidConfig {
-                    reason: ConfigIssue::RelativeFieldPathWithoutRow {
-                        table: table.name.clone(),
-                        field: field.name.clone(),
-                        path: field.path.clone().unwrap_or_default(),
-                    },
-                });
+                return Err(ConfigIssue::RelativeFieldPathWithoutRow {
+                    table: table.name.clone(),
+                    field: field.name.clone(),
+                    path: field.path.clone().unwrap_or_default(),
+                }
+                .into());
             };
 
             // Field path must be under the table path, compared per
             // segment (the root table "/" has no segments and thus
             // accepts any field path).
             if !path_is_under(&field_path, &table.xml_path) {
-                return Err(Error::InvalidConfig {
-                    reason: ConfigIssue::FieldPathNotUnderTable {
-                        table: table.name.clone(),
-                        table_path: table.xml_path.clone(),
-                        field: field.name.clone(),
-                        field_path: field_path.into_owned(),
-                    },
-                });
+                return Err(ConfigIssue::FieldPathNotUnderTable {
+                    table: table.name.clone(),
+                    table_path: table.xml_path.clone(),
+                    field: field.name.clone(),
+                    field_path: field_path.into_owned(),
+                }
+                .into());
             }
 
             // A policy that cannot apply is rejected rather than quietly
@@ -683,14 +661,13 @@ impl Config {
                 None
             };
             if let Some((policy, reason)) = inapplicable {
-                return Err(Error::InvalidConfig {
-                    reason: ConfigIssue::InapplicablePolicy {
-                        table: table.name.clone(),
-                        field: field.name.clone(),
-                        policy,
-                        reason,
-                    },
-                });
+                return Err(ConfigIssue::InapplicablePolicy {
+                    table: table.name.clone(),
+                    field: field.name.clone(),
+                    policy,
+                    reason,
+                }
+                .into());
             }
 
             field.validate()?;
@@ -717,35 +694,30 @@ impl Config {
             1 => return Ok(()),
             2 => {}
             other => {
-                return Err(Error::InvalidConfig {
-                    reason: ConfigIssue::UnsupportedConfigVersion { version: other },
-                });
+                return Err(ConfigIssue::UnsupportedConfigVersion { version: other }.into());
             }
         }
 
         for table in &self.tables {
             if table.row.is_none() {
-                return Err(Error::InvalidConfig {
-                    reason: ConfigIssue::InferredRowInVersion2 {
-                        table: table.name.clone(),
-                    },
-                });
+                return Err(ConfigIssue::InferredRowInVersion2 {
+                    table: table.name.clone(),
+                }
+                .into());
             }
             if !table.levels.is_empty() {
-                return Err(Error::InvalidConfig {
-                    reason: ConfigIssue::LevelsInVersion2 {
-                        table: table.name.clone(),
-                    },
-                });
+                return Err(ConfigIssue::LevelsInVersion2 {
+                    table: table.name.clone(),
+                }
+                .into());
             }
             for field in &table.fields {
                 if field.xml_path.is_some() {
-                    return Err(Error::InvalidConfig {
-                        reason: ConfigIssue::FieldXmlPathInVersion2 {
-                            table: table.name.clone(),
-                            field: field.name.clone(),
-                        },
-                    });
+                    return Err(ConfigIssue::FieldXmlPathInVersion2 {
+                        table: table.name.clone(),
+                        field: field.name.clone(),
+                    }
+                    .into());
                 }
             }
             // A table with no ancestor has nothing to relate to, so `links` is
@@ -755,12 +727,11 @@ impl Config {
             if table.links.as_ref().is_none_or(Vec::is_empty)
                 && let Some(enclosing) = self.enclosing_table_of(table)
             {
-                return Err(Error::InvalidConfig {
-                    reason: ConfigIssue::NestedTableWithoutLinksInVersion2 {
-                        table: table.name.clone(),
-                        enclosing_table: enclosing.name.clone(),
-                    },
-                });
+                return Err(ConfigIssue::NestedTableWithoutLinksInVersion2 {
+                    table: table.name.clone(),
+                    enclosing_table: enclosing.name.clone(),
+                }
+                .into());
             }
         }
         Ok(())

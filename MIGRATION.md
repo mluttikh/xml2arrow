@@ -564,3 +564,6 @@ Nothing below requires action.
   field may accumulate across text, CDATA and entity events.
 - **`Config::lint()` / `Parser::warnings()`** return advisory findings. The
   library never prints, and lints never change how a document parses.
+- **`From<ConfigIssue> for Error`**, so a tool that builds or checks configs
+  can turn an issue into the error the library would have raised, with `?` or
+  `.into()`, instead of writing `Error::InvalidConfig { reason }` by hand.
