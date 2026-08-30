@@ -242,43 +242,78 @@ field is `nullable`, an error otherwise. Trailing garbage after a number
 truncation. One exception to the missing-value rule: a missing non-nullable
 `Utf8` field yields an empty string `""` rather than an error.
 
-### 2. Nested tables and `levels`
+### 2. Linking nested tables
 
-When your XML has a parent–child relationship between tables, `levels` creates the
-index columns that link child rows back to their parent rows. Each string in the
-list names an element at a nesting boundary above the row element, and generates
-a zero-based `UInt32` column named `<level>` in the output.
+When one table's rows sit inside another's, the child needs a column saying
+which parent row it belongs to. There are two mechanisms, and they are not
+equivalent.
 
-*Note: If a table is defined purely to establish a structural hierarchy (i.e., it
-has levels defined but an empty fields list), it acts only as a boundary and will
-be excluded from the final output map.*
-
-For example, given stations that each have multiple measurements:
-
-```xml
-<report>
-  <monitoring_stations>
-    <monitoring_station>   <!-- boundary → produces <station> index -->
-      <measurements>
-        <measurement>      <!-- row element for the measurements table -->
-          ...
-        </measurement>
-      </measurements>
-    </monitoring_station>
-  </monitoring_stations>
-</report>
-```
+**`links:` — a real join key (recommended).** Name the relationship, and the
+child gets a `UInt64` foreign key pointing at the parent's `_id`:
 
 ```yaml
-- name: measurements
-  xml_path: /report/monitoring_stations/monitoring_station/measurements
-  levels: [station, measurement]
-  fields: [...]
+  - name: stations
+    xml_path: /report/monitoring_stations
+    row: monitoring_station
+    fields: [...]
+
+  - name: measurements
+    xml_path: /report/monitoring_stations/monitoring_station/measurements
+    row: measurement
+    links:
+      - parent: stations        # UInt64 join key -> stations._id
+    fields: [...]
 ```
 
-This produces a `<station>` column (which parent station each measurement belongs
-to) and a `<measurement>` column (the per-station row counter), letting you join
-the `measurements` table back to the `stations` table on `<station>`.
+```python
+measurements.join(stations, left_on="_stations_id", right_on="_id")
+```
+
+The values are **global** row ordinals, never reset, so that join is correct
+however often container elements repeat and however the output was batched.
+The referenced table materializes `_id` automatically; tables nobody
+references gain no column.
+
+**`levels:` — positional index columns (legacy).** Each string names an element
+at a nesting boundary above the row element and produces a zero-based `UInt32`
+column named `<level>`:
+
+```yaml
+  - name: measurements
+    xml_path: /report/monitoring_stations/monitoring_station/measurements
+    levels: [station, measurement]
+    fields: [...]
+```
+
+This still works and is not going away before 1.0, but it takes its values
+*positionally* from whatever ancestor tables happen to enclose the table, and
+the counter resets with its scope. That is the difference that matters:
+
+> Two stations in separate containers, three measurements between them:
+>
+> ```xml
+> <group><station><id>A</id><ms><m>1</m><m>2</m></ms></station></group>
+> <group><station><id>B</id><ms><m>3</m></ms></station></group>
+> ```
+>
+> | measurement | `parent:` key | positional `<station>` |
+> |---|---|---|
+> | 1 | 0 | 0 |
+> | 2 | 0 | 0 |
+> | 3 | **1** | **0** |
+>
+> The positional column resets with its scope, so it reports `0` for *both*
+> stations. Joining on it silently attributes B's measurement to A — a
+> plausible table, wrong data. This is a frozen corpus case, not a
+> hypothetical.
+
+If you are adopting `links:` on an existing config and want the numbers to stay
+byte-identical, use `index_of:` rather than `parent:` — it is value-identical to
+the `<level>` column for the same path (see the `links:` notes in section 1). It
+is an ordinal, not a key, and carries the same caveat as `levels`.
+
+*A table defined purely to establish hierarchy — one with an empty `fields`
+list — acts only as a boundary and is excluded from the output map.*
 
 ### 3. Parse the XML
 
@@ -355,7 +390,7 @@ for path in xml_files {
 Each call allocates fresh Arrow builders, so batches from one document never
 leak into the next. A `Parser` can also serve several streams concurrently.
 
-> **Deprecated since 0.20** (see [MIGRATION.md](MIGRATION.md#4-deprecated-still-working)): the free functions `parse_xml` and
+> **Deprecated since 0.20** (see [MIGRATION.md](MIGRATION.md#8-deprecated-still-working)): the free functions `parse_xml` and
 > `parse_xml_slice` do exactly `Parser::new(&config)?.parse(..)` /
 > `.parse_slice(..)`, paying the compilation cost on *every* call. They still
 > work, and will be removed in 1.0.
