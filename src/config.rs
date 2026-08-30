@@ -318,316 +318,353 @@ impl Config {
     ///
     /// Returns an error if any of the above constraints are violated.
     pub fn validate(&self) -> Result<()> {
-        let empty_policies = ValuePolicies::default();
-        // --- Table-level checks ---
+        // One pass per table rather than one pass per concern, so the first
+        // error a broken config reports is the first problem in document
+        // order rather than the first problem of whichever kind is checked
+        // earliest. The four helpers below are in the order a reader meets
+        // them in the YAML.
         let mut table_names = HashSet::with_capacity(self.tables.len());
         for (table_idx, table) in self.tables.iter().enumerate() {
-            if table.name.is_empty() {
-                return Err(Error::InvalidConfig {
-                    reason: ConfigIssue::EmptyTableName,
-                });
-            }
-            if !table_names.insert(&table.name) {
-                return Err(Error::InvalidConfig {
-                    reason: ConfigIssue::DuplicateTableName {
-                        name: table.name.clone(),
-                    },
-                });
-            }
-            if table.xml_path.is_empty() {
-                return Err(Error::InvalidConfig {
-                    reason: ConfigIssue::EmptyTableXmlPath {
-                        table: table.name.clone(),
-                    },
-                });
-            }
-            // Duplicate-path detection compares normalized segments so that
-            // "/data", "data" and "/data/" — which all resolve to the same
-            // registry node — count as duplicates. A pairwise scan (rather
-            // than a hash set of built keys) keeps `Parser::new` free of
-            // per-table allocations; table counts are small.
-            for earlier_table in &self.tables[..table_idx] {
-                if paths_equal(&earlier_table.xml_path, &table.xml_path) {
-                    return Err(Error::InvalidConfig {
-                        reason: ConfigIssue::DuplicateTableXmlPath {
-                            table_a: earlier_table.name.clone(),
-                            table_b: table.name.clone(),
-                            xml_path: table.xml_path.clone(),
-                        },
-                    });
-                }
-            }
-
-            // --- Declared row boundary (`row:`) ---
-            if let Some(row) = &table.row {
-                if row.trim().is_empty() {
-                    return Err(Error::InvalidConfig {
-                        reason: ConfigIssue::EmptyRowPath {
-                            table: table.name.clone(),
-                        },
-                    });
-                }
-                let row_path = resolve_row_path(&table.xml_path, row);
-                if !path_is_under(&row_path, &table.xml_path) {
-                    return Err(Error::InvalidConfig {
-                        reason: ConfigIssue::RowPathNotUnderTable {
-                            table: table.name.clone(),
-                            table_path: table.xml_path.clone(),
-                            row: row.clone(),
-                            row_path,
-                        },
-                    });
-                }
-                // The implicit document root is never closed by the parser —
-                // `PathTracker`'s bottom frame is never popped — so a root
-                // table whose row resolves to itself could never finalize one.
-                // Rejected rather than silently returning an empty table, and
-                // rejected loudly because *inference* handles this shape fine:
-                // adding `row: "."` here would turn a working config into an
-                // empty one.
-                if paths_equal(&row_path, &table.xml_path)
-                    && path_segments(&table.xml_path).next().is_none()
-                {
-                    return Err(Error::InvalidConfig {
-                        reason: ConfigIssue::RowIsRootTable {
-                            table: table.name.clone(),
-                        },
-                    });
-                }
-                // A row is finalized against the *innermost open table*, so a
-                // second table sitting strictly between this one and its row
-                // element would receive the row instead — silently, with a
-                // plausible-looking batch as the only evidence. Reject it.
-                // A table whose path *equals* the row path is fine: its scope
-                // is popped before the row is finalized, so the row still
-                // lands here.
-                for other in &self.tables {
-                    let other_is_strictly_inside = path_is_under(&other.xml_path, &table.xml_path)
-                        && !paths_equal(&other.xml_path, &table.xml_path);
-                    let row_is_strictly_inside_other = path_is_under(&row_path, &other.xml_path)
-                        && !paths_equal(&row_path, &other.xml_path);
-                    if other_is_strictly_inside && row_is_strictly_inside_other {
-                        return Err(Error::InvalidConfig {
-                            reason: ConfigIssue::RowPathCrossesTable {
-                                table: table.name.clone(),
-                                row_path,
-                                nested_table: other.name.clone(),
-                                nested_table_path: other.xml_path.clone(),
-                            },
-                        });
-                    }
-                }
-            }
-
-            // --- Declared links (`links:`) ---
-            if let Some(links) = &table.links {
-                if !table.levels.is_empty() {
-                    return Err(Error::InvalidConfig {
-                        reason: ConfigIssue::LinksAndLevels {
-                            table: table.name.clone(),
-                        },
-                    });
-                }
-                let scope = table.link_scope_path();
-                let mut column_names: HashSet<String> = table
-                    .fields
-                    .iter()
-                    .map(|field| field.name.clone())
-                    .collect();
-
-                for link in links {
-                    match (link.parent.as_deref(), link.index_of.as_deref()) {
-                        (Some(parent_name), None) => {
-                            let Some(parent) = self.tables.iter().find(|t| t.name == parent_name)
-                            else {
-                                return Err(Error::InvalidConfig {
-                                    reason: ConfigIssue::UnknownParentTable {
-                                        table: table.name.clone(),
-                                        parent: parent_name.to_string(),
-                                    },
-                                });
-                            };
-                            // The parent's rows must *contain* this
-                            // table's, checked by name. This is the whole
-                            // advantage over `levels`, which took its values
-                            // from whatever happened to enclose the table and
-                            // so could silently mis-align.
-                            let parent_scope = parent.link_scope_path();
-                            if paths_equal(&parent_scope, &scope)
-                                || !path_is_under(&scope, &parent_scope)
-                            {
-                                return Err(Error::InvalidConfig {
-                                    reason: ConfigIssue::ParentNotAncestor {
-                                        table: table.name.clone(),
-                                        table_path: scope.clone(),
-                                        parent: parent_name.to_string(),
-                                        parent_path: parent_scope,
-                                    },
-                                });
-                            }
-                        }
-                        (None, Some(index_of)) => {
-                            // Restricted to an enclosing table's row element:
-                            // that table already counts exactly this, so the
-                            // ordinal costs nothing at parse time and is
-                            // identical to the legacy `<level>` value.
-                            let is_ancestor_table = self.tables.iter().any(|t| {
-                                let other = t.link_scope_path();
-                                paths_equal(&other, index_of)
-                                    && !paths_equal(&other, &scope)
-                                    && path_is_under(&scope, &other)
-                            });
-                            if !is_ancestor_table {
-                                return Err(Error::InvalidConfig {
-                                    reason: ConfigIssue::IndexOfNotAncestorTable {
-                                        table: table.name.clone(),
-                                        index_of: index_of.to_string(),
-                                    },
-                                });
-                            }
-                        }
-                        _ => {
-                            return Err(Error::InvalidConfig {
-                                reason: ConfigIssue::LinkKindAmbiguous {
-                                    table: table.name.clone(),
-                                },
-                            });
-                        }
-                    }
-
-                    // A link column that shadowed a field would be a silently
-                    // wrong column, so collisions are rejected.
-                    if let Some(column) = link.column_name()
-                        && !column_names.insert(column.clone())
-                    {
-                        return Err(Error::InvalidConfig {
-                            reason: ConfigIssue::LinkColumnCollision {
-                                table: table.name.clone(),
-                                column,
-                            },
-                        });
-                    }
-                }
-            }
-
-            // --- Field-level checks within this table ---
-            let mut field_names = HashSet::with_capacity(table.fields.len());
-            for field in &table.fields {
-                if field.name.is_empty() {
-                    return Err(Error::InvalidConfig {
-                        reason: ConfigIssue::EmptyFieldName {
-                            table: table.name.clone(),
-                        },
-                    });
-                }
-                if !field_names.insert(&field.name) {
-                    return Err(Error::InvalidConfig {
-                        reason: ConfigIssue::DuplicateFieldName {
-                            table: table.name.clone(),
-                            field: field.name.clone(),
-                        },
-                    });
-                }
-                // `path` and `xml_path` are two spellings of one thing, so
-                // exactly one must be present. Accepting both would mean
-                // silently picking a winner.
-                match (field.path.as_deref(), field.xml_path.as_deref()) {
-                    (Some(_), Some(_)) => {
-                        return Err(Error::InvalidConfig {
-                            reason: ConfigIssue::FieldPathConflict {
-                                table: table.name.clone(),
-                                field: field.name.clone(),
-                            },
-                        });
-                    }
-                    (None, None) => {
-                        return Err(Error::InvalidConfig {
-                            reason: ConfigIssue::FieldPathMissing {
-                                table: table.name.clone(),
-                                field: field.name.clone(),
-                            },
-                        });
-                    }
-                    (Some(p), None) | (None, Some(p)) if p.trim().is_empty() => {
-                        return Err(Error::InvalidConfig {
-                            reason: ConfigIssue::EmptyFieldXmlPath {
-                                table: table.name.clone(),
-                                field: field.name.clone(),
-                            },
-                        });
-                    }
-                    _ => {}
-                }
-
-                // A relative `path` is relative to the row element, so without
-                // a declared row there is nothing to resolve against. Caught
-                // here rather than resolving to something plausible-looking.
-                let Some(field_path) = resolve_field_path(table, field) else {
-                    return Err(Error::InvalidConfig {
-                        reason: ConfigIssue::RelativeFieldPathWithoutRow {
-                            table: table.name.clone(),
-                            field: field.name.clone(),
-                            path: field.path.clone().unwrap_or_default(),
-                        },
-                    });
-                };
-
-                // Field path must be under the table path, compared per
-                // segment (the root table "/" has no segments and thus
-                // accepts any field path).
-                if !path_is_under(&field_path, &table.xml_path) {
-                    return Err(Error::InvalidConfig {
-                        reason: ConfigIssue::FieldPathNotUnderTable {
-                            table: table.name.clone(),
-                            table_path: table.xml_path.clone(),
-                            field: field.name.clone(),
-                            field_path: field_path.into_owned(),
-                        },
-                    });
-                }
-
-                // A policy that cannot apply is rejected rather than quietly
-                // ignored: `on_missing: null` on a non-nullable column has no
-                // valid outcome, and silently falling back to the default
-                // would leave the config saying one thing and the data doing
-                // another.
-                let effective = field
-                    .policies
-                    .over(self.defaults.as_ref().unwrap_or(&empty_policies));
-                let inapplicable =
-                    if effective.on_missing == Some(OnMissing::Null) && !field.nullable {
-                        Some(("on_missing: null", "the column is not nullable"))
-                    } else if effective.on_missing == Some(OnMissing::Empty)
-                        && field.data_type != DType::Utf8
-                    {
-                        Some((
-                            "on_missing: empty",
-                            "only Utf8 has an empty value; use null or error",
-                        ))
-                    } else if effective.on_invalid == Some(OnInvalid::Null) && !field.nullable {
-                        Some(("on_invalid: null", "the column is not nullable"))
-                    } else {
-                        None
-                    };
-                if let Some((policy, reason)) = inapplicable {
-                    return Err(Error::InvalidConfig {
-                        reason: ConfigIssue::InapplicablePolicy {
-                            table: table.name.clone(),
-                            field: field.name.clone(),
-                            policy,
-                            reason,
-                        },
-                    });
-                }
-
-                field.validate()?;
-            }
+            self.validate_table_identity(table, table_idx, &mut table_names)?;
+            self.validate_declared_row(table)?;
+            self.validate_declared_links(table)?;
+            self.validate_table_fields(table)?;
         }
 
         // Last, so that a config which is broken *and* not yet migrated hears
         // about the breakage first: "this path is not under its table" is a
         // bug, while "this table still uses levels" is unfinished migration.
         self.validate_declared_version()?;
+        Ok(())
+    }
+
+    /// A table must be nameable and addressable: a non-empty name unique
+    /// across the config, and a non-empty `xml_path` no earlier table claims.
+    ///
+    /// `table_names` accumulates across the caller's loop, which is why it is
+    /// threaded through rather than rebuilt here.
+    fn validate_table_identity<'c>(
+        &'c self,
+        table: &'c TableConfig,
+        table_idx: usize,
+        table_names: &mut HashSet<&'c String>,
+    ) -> Result<()> {
+        if table.name.is_empty() {
+            return Err(Error::InvalidConfig {
+                reason: ConfigIssue::EmptyTableName,
+            });
+        }
+        if !table_names.insert(&table.name) {
+            return Err(Error::InvalidConfig {
+                reason: ConfigIssue::DuplicateTableName {
+                    name: table.name.clone(),
+                },
+            });
+        }
+        if table.xml_path.is_empty() {
+            return Err(Error::InvalidConfig {
+                reason: ConfigIssue::EmptyTableXmlPath {
+                    table: table.name.clone(),
+                },
+            });
+        }
+        // Duplicate-path detection compares normalized segments so that
+        // "/data", "data" and "/data/" — which all resolve to the same
+        // registry node — count as duplicates. A pairwise scan (rather
+        // than a hash set of built keys) keeps `Parser::new` free of
+        // per-table allocations; table counts are small.
+        for earlier_table in &self.tables[..table_idx] {
+            if paths_equal(&earlier_table.xml_path, &table.xml_path) {
+                return Err(Error::InvalidConfig {
+                    reason: ConfigIssue::DuplicateTableXmlPath {
+                        table_a: earlier_table.name.clone(),
+                        table_b: table.name.clone(),
+                        xml_path: table.xml_path.clone(),
+                    },
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks a declared `row:` — that it names something, resolves inside its
+    /// own table, and that no other table would intercept the rows it
+    /// delimits. A table that leaves row boundaries inferred has nothing to
+    /// check.
+    fn validate_declared_row(&self, table: &TableConfig) -> Result<()> {
+        if let Some(row) = &table.row {
+            if row.trim().is_empty() {
+                return Err(Error::InvalidConfig {
+                    reason: ConfigIssue::EmptyRowPath {
+                        table: table.name.clone(),
+                    },
+                });
+            }
+            let row_path = resolve_row_path(&table.xml_path, row);
+            if !path_is_under(&row_path, &table.xml_path) {
+                return Err(Error::InvalidConfig {
+                    reason: ConfigIssue::RowPathNotUnderTable {
+                        table: table.name.clone(),
+                        table_path: table.xml_path.clone(),
+                        row: row.clone(),
+                        row_path,
+                    },
+                });
+            }
+            // The implicit document root is never closed by the parser —
+            // `PathTracker`'s bottom frame is never popped — so a root
+            // table whose row resolves to itself could never finalize one.
+            // Rejected rather than silently returning an empty table, and
+            // rejected loudly because *inference* handles this shape fine:
+            // adding `row: "."` here would turn a working config into an
+            // empty one.
+            if paths_equal(&row_path, &table.xml_path)
+                && path_segments(&table.xml_path).next().is_none()
+            {
+                return Err(Error::InvalidConfig {
+                    reason: ConfigIssue::RowIsRootTable {
+                        table: table.name.clone(),
+                    },
+                });
+            }
+            // A row is finalized against the *innermost open table*, so a
+            // second table sitting strictly between this one and its row
+            // element would receive the row instead — silently, with a
+            // plausible-looking batch as the only evidence. Reject it.
+            // A table whose path *equals* the row path is fine: its scope
+            // is popped before the row is finalized, so the row still
+            // lands here.
+            for other in &self.tables {
+                let other_is_strictly_inside = path_is_under(&other.xml_path, &table.xml_path)
+                    && !paths_equal(&other.xml_path, &table.xml_path);
+                let row_is_strictly_inside_other = path_is_under(&row_path, &other.xml_path)
+                    && !paths_equal(&row_path, &other.xml_path);
+                if other_is_strictly_inside && row_is_strictly_inside_other {
+                    return Err(Error::InvalidConfig {
+                        reason: ConfigIssue::RowPathCrossesTable {
+                            table: table.name.clone(),
+                            row_path,
+                            nested_table: other.name.clone(),
+                            nested_table_path: other.xml_path.clone(),
+                        },
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks declared `links:` — that each names exactly one kind, refers to
+    /// a table that genuinely encloses this one, and contributes a column name
+    /// nothing else has claimed.
+    fn validate_declared_links(&self, table: &TableConfig) -> Result<()> {
+        if let Some(links) = &table.links {
+            if !table.levels.is_empty() {
+                return Err(Error::InvalidConfig {
+                    reason: ConfigIssue::LinksAndLevels {
+                        table: table.name.clone(),
+                    },
+                });
+            }
+            let scope = table.link_scope_path();
+            let mut column_names: HashSet<String> = table
+                .fields
+                .iter()
+                .map(|field| field.name.clone())
+                .collect();
+
+            for link in links {
+                match (link.parent.as_deref(), link.index_of.as_deref()) {
+                    (Some(parent_name), None) => {
+                        let Some(parent) = self.tables.iter().find(|t| t.name == parent_name)
+                        else {
+                            return Err(Error::InvalidConfig {
+                                reason: ConfigIssue::UnknownParentTable {
+                                    table: table.name.clone(),
+                                    parent: parent_name.to_string(),
+                                },
+                            });
+                        };
+                        // The parent's rows must *contain* this
+                        // table's, checked by name. This is the whole
+                        // advantage over `levels`, which took its values
+                        // from whatever happened to enclose the table and
+                        // so could silently mis-align.
+                        let parent_scope = parent.link_scope_path();
+                        if paths_equal(&parent_scope, &scope)
+                            || !path_is_under(&scope, &parent_scope)
+                        {
+                            return Err(Error::InvalidConfig {
+                                reason: ConfigIssue::ParentNotAncestor {
+                                    table: table.name.clone(),
+                                    table_path: scope.clone(),
+                                    parent: parent_name.to_string(),
+                                    parent_path: parent_scope,
+                                },
+                            });
+                        }
+                    }
+                    (None, Some(index_of)) => {
+                        // Restricted to an enclosing table's row element:
+                        // that table already counts exactly this, so the
+                        // ordinal costs nothing at parse time and is
+                        // identical to the legacy `<level>` value.
+                        let is_ancestor_table = self.tables.iter().any(|t| {
+                            let other = t.link_scope_path();
+                            paths_equal(&other, index_of)
+                                && !paths_equal(&other, &scope)
+                                && path_is_under(&scope, &other)
+                        });
+                        if !is_ancestor_table {
+                            return Err(Error::InvalidConfig {
+                                reason: ConfigIssue::IndexOfNotAncestorTable {
+                                    table: table.name.clone(),
+                                    index_of: index_of.to_string(),
+                                },
+                            });
+                        }
+                    }
+                    _ => {
+                        return Err(Error::InvalidConfig {
+                            reason: ConfigIssue::LinkKindAmbiguous {
+                                table: table.name.clone(),
+                            },
+                        });
+                    }
+                }
+
+                // A link column that shadowed a field would be a silently
+                // wrong column, so collisions are rejected.
+                if let Some(column) = link.column_name()
+                    && !column_names.insert(column.clone())
+                {
+                    return Err(Error::InvalidConfig {
+                        reason: ConfigIssue::LinkColumnCollision {
+                            table: table.name.clone(),
+                            column,
+                        },
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks one table's fields: nameable, addressable by exactly one of
+    /// `path`/`xml_path`, resolving inside the table, and carrying no policy
+    /// that cannot apply to the column it is set on.
+    fn validate_table_fields(&self, table: &TableConfig) -> Result<()> {
+        let empty_policies = ValuePolicies::default();
+        let mut field_names = HashSet::with_capacity(table.fields.len());
+        for field in &table.fields {
+            if field.name.is_empty() {
+                return Err(Error::InvalidConfig {
+                    reason: ConfigIssue::EmptyFieldName {
+                        table: table.name.clone(),
+                    },
+                });
+            }
+            if !field_names.insert(&field.name) {
+                return Err(Error::InvalidConfig {
+                    reason: ConfigIssue::DuplicateFieldName {
+                        table: table.name.clone(),
+                        field: field.name.clone(),
+                    },
+                });
+            }
+            // `path` and `xml_path` are two spellings of one thing, so
+            // exactly one must be present. Accepting both would mean
+            // silently picking a winner.
+            match (field.path.as_deref(), field.xml_path.as_deref()) {
+                (Some(_), Some(_)) => {
+                    return Err(Error::InvalidConfig {
+                        reason: ConfigIssue::FieldPathConflict {
+                            table: table.name.clone(),
+                            field: field.name.clone(),
+                        },
+                    });
+                }
+                (None, None) => {
+                    return Err(Error::InvalidConfig {
+                        reason: ConfigIssue::FieldPathMissing {
+                            table: table.name.clone(),
+                            field: field.name.clone(),
+                        },
+                    });
+                }
+                (Some(p), None) | (None, Some(p)) if p.trim().is_empty() => {
+                    return Err(Error::InvalidConfig {
+                        reason: ConfigIssue::EmptyFieldXmlPath {
+                            table: table.name.clone(),
+                            field: field.name.clone(),
+                        },
+                    });
+                }
+                _ => {}
+            }
+
+            // A relative `path` is relative to the row element, so without
+            // a declared row there is nothing to resolve against. Caught
+            // here rather than resolving to something plausible-looking.
+            let Some(field_path) = resolve_field_path(table, field) else {
+                return Err(Error::InvalidConfig {
+                    reason: ConfigIssue::RelativeFieldPathWithoutRow {
+                        table: table.name.clone(),
+                        field: field.name.clone(),
+                        path: field.path.clone().unwrap_or_default(),
+                    },
+                });
+            };
+
+            // Field path must be under the table path, compared per
+            // segment (the root table "/" has no segments and thus
+            // accepts any field path).
+            if !path_is_under(&field_path, &table.xml_path) {
+                return Err(Error::InvalidConfig {
+                    reason: ConfigIssue::FieldPathNotUnderTable {
+                        table: table.name.clone(),
+                        table_path: table.xml_path.clone(),
+                        field: field.name.clone(),
+                        field_path: field_path.into_owned(),
+                    },
+                });
+            }
+
+            // A policy that cannot apply is rejected rather than quietly
+            // ignored: `on_missing: null` on a non-nullable column has no
+            // valid outcome, and silently falling back to the default
+            // would leave the config saying one thing and the data doing
+            // another.
+            let effective = field
+                .policies
+                .over(self.defaults.as_ref().unwrap_or(&empty_policies));
+            let inapplicable = if effective.on_missing == Some(OnMissing::Null) && !field.nullable {
+                Some(("on_missing: null", "the column is not nullable"))
+            } else if effective.on_missing == Some(OnMissing::Empty)
+                && field.data_type != DType::Utf8
+            {
+                Some((
+                    "on_missing: empty",
+                    "only Utf8 has an empty value; use null or error",
+                ))
+            } else if effective.on_invalid == Some(OnInvalid::Null) && !field.nullable {
+                Some(("on_invalid: null", "the column is not nullable"))
+            } else {
+                None
+            };
+            if let Some((policy, reason)) = inapplicable {
+                return Err(Error::InvalidConfig {
+                    reason: ConfigIssue::InapplicablePolicy {
+                        table: table.name.clone(),
+                        field: field.name.clone(),
+                        policy,
+                        reason,
+                    },
+                });
+            }
+
+            field.validate()?;
+        }
         Ok(())
     }
 
