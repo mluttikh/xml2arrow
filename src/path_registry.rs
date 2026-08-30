@@ -225,10 +225,35 @@ impl PathRegistry {
     /// We do all string parsing here, so the runtime parser never touches raw
     /// strings for configured paths. This is the main performance lever.
     pub fn from_config(config: &Config) -> Self {
+        // Sized up front rather than grown. Both vectors gain exactly one entry
+        // per new node, so starting at capacity 1 walks the whole doubling
+        // ladder — five reallocations, and five trips through malloc, for a
+        // config of a couple of dozen nodes. Profiling a parse that builds its
+        // parser put `RawVec<PathNodeInfo>::grow_one` at 4.9% of the entire
+        // benchmark, which is the kind of cost `Parser::new` cannot afford:
+        // for a small document it *is* most of the parse.
+        //
+        // A *hint*, not a bound, and cheap on purpose: every table and every
+        // field contributes at most one leaf, and the internal nodes above them
+        // are shared, so in configs where fields hang off a handful of table
+        // paths this lands within a node or two of the truth. The obvious
+        // tighter estimate — summing each path's segment count — was measured
+        // and was worse: it over-counted the benchmark config by 3.8x (146
+        // against 38 real nodes) and had to walk every path string to do it,
+        // which cost more than the reallocations it removed.
+        let node_hint = 1
+            + config.tables.len()
+            + config
+                .tables
+                .iter()
+                .map(|tc| tc.fields.len())
+                .sum::<usize>();
         let mut registry = Self {
-            children: vec![NodeChildren::new()],      // Root node
-            node_info: vec![PathNodeInfo::default()], // Root info
+            children: Vec::with_capacity(node_hint),
+            node_info: Vec::with_capacity(node_hint),
         };
+        registry.children.push(NodeChildren::new()); // Root node
+        registry.node_info.push(PathNodeInfo::default()); // Root info
 
         // Phase 1: register table paths
         // The table boundary must be known so the parser can push/pop row scopes.
@@ -606,6 +631,91 @@ impl PathTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The registry's two vectors are sized from a hint, and the hint is only
+    /// worth having if it lands near the node count for configs people
+    /// actually write. This pins that across the shapes that reach the trie by
+    /// different routes: absolute field paths, relative ones resolved against
+    /// `row:`, shared prefixes, and stop paths (registered in a later phase).
+    ///
+    /// The assertion is deliberately a range, not equality. The hint counts
+    /// leaves and ignores shared internal nodes, so it can land a node or two
+    /// either side; what must not happen is it being *wildly* off, which would
+    /// mean either the doubling ladder is back or the registry is allocating
+    /// several times what it needs.
+    #[test]
+    fn the_node_hint_lands_near_the_real_node_count() {
+        let configs = [
+            // Shared prefixes: many fields, few distinct ancestors.
+            r"
+            tables:
+              - name: m
+                xml_path: /root/data
+                levels: []
+                fields:
+                  - {name: a, xml_path: /root/data/item/a, data_type: Int32}
+                  - {name: b, xml_path: /root/data/item/b, data_type: Int32}
+                  - {name: c, xml_path: /root/data/item/@c, data_type: Utf8}
+            ",
+            // Relative paths, resolved against `row:` before registration.
+            r#"
+            tables:
+              - name: m
+                xml_path: /root/data
+                row: /root/data/item
+                levels: []
+                fields:
+                  - {name: a, path: a, data_type: Int32}
+                  - {name: b, path: deep/nested/b, data_type: Int32}
+                  - {name: c, path: "@c", data_type: Utf8}
+            "#,
+            // Stop paths reach the trie in phase 4, after fields.
+            r"
+            parser_options:
+              stop_at_paths: [/root/data/trailer, /root/other/thing]
+            tables:
+              - name: m
+                xml_path: /root/data
+                levels: []
+                fields:
+                  - {name: a, xml_path: /root/data/item/a, data_type: Int32}
+            ",
+            // Nested tables sharing an ancestor chain.
+            r"
+            tables:
+              - name: outer
+                xml_path: /a/b
+                levels: []
+                fields:
+                  - {name: x, xml_path: /a/b/x, data_type: Int32}
+              - name: inner
+                xml_path: /a/b/c/d
+                levels: [outer]
+                fields:
+                  - {name: y, xml_path: /a/b/c/d/e/y, data_type: Int32}
+            ",
+        ];
+
+        for yaml in configs {
+            let config = config_from_yaml!(yaml);
+            let hint = 1
+                + config.tables.len()
+                + config
+                    .tables
+                    .iter()
+                    .map(|tc| tc.fields.len())
+                    .sum::<usize>();
+            let registry = PathRegistry::from_config(&config);
+            let nodes = registry.children.len();
+            assert!(
+                hint * 3 >= nodes && nodes * 3 >= hint,
+                "hint {hint} is not within 3x of the {nodes} nodes built for:\n{yaml}"
+            );
+            // Same length by construction; a divergence means a push was added
+            // to one vector and not the other.
+            assert_eq!(nodes, registry.node_info.len());
+        }
+    }
 
     /// The row-boundary rule, checked at the level it is now decided: which
     /// nodes carry `ends_row`. Evaluated per event it read "the closing element
