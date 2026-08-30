@@ -131,9 +131,20 @@ impl TypedArrayBuilder {
 /// which is consumed once at construction). Storing only what the runtime reads
 /// keeps the builder narrower and decouples it from future additions to
 /// `FieldConfig`.
+///
+/// `Clone` is what makes it worth resolving once: every parse copies one of
+/// these into a fresh `FieldBuilder`, and every field of it is either a
+/// refcounted handle or a `Copy` scalar, so the copy allocates nothing.
+#[derive(Clone)]
 struct FieldMeta {
-    name: String,
-    xml_path: String,
+    /// `Arc<str>` rather than `String` for two reasons that point the same way:
+    /// this whole struct is cloned into a fresh `FieldBuilder` on every parse,
+    /// and every error naming a field already wants an `Arc<str>`. Both the
+    /// per-parse clone and an error's `field:`/`path:` become refcount bumps
+    /// instead of allocations, and the struct is 16 bytes smaller besides —
+    /// which matters because `save_row` walks one per field per row.
+    name: Arc<str>,
+    xml_path: Arc<str>,
     scale: Option<f64>,
     offset: Option<f64>,
     /// Value handling, resolved once at build time.
@@ -229,10 +240,8 @@ impl FieldMeta {
     /// wants the location in the document, not `v`.
     fn from_config(table: &TableConfig, fc: &FieldConfig, policy: &ResolvedPolicy) -> Self {
         Self {
-            name: fc.name.clone(),
-            xml_path: resolve_field_path(table, fc)
-                .unwrap_or_default()
-                .into_owned(),
+            name: Arc::from(fc.name.as_str()),
+            xml_path: Arc::from(resolve_field_path(table, fc).unwrap_or_default().as_ref()),
             scale: fc.scale,
             offset: fc.offset,
             policy: policy.clone(),
@@ -353,8 +362,8 @@ macro_rules! append_missing {
             OnMissing::Null => $builder.append_null(),
             OnMissing::Empty | OnMissing::Error => {
                 return Err(Error::MissingRequiredField {
-                    field: Arc::from($fc.name.as_str()),
-                    path: Arc::from($fc.xml_path.as_str()),
+                    field: $fc.name.clone(),
+                    path: $fc.xml_path.clone(),
                     location: Box::default(),
                 });
             }
@@ -400,8 +409,8 @@ macro_rules! append_int {
                             $builder,
                             $field_config,
                             Error::ParseError {
-                                field: Arc::from($field_config.name.as_str()),
-                                path: Arc::from($field_config.xml_path.as_str()),
+                                field: $field_config.name.clone(),
+                                path: $field_config.xml_path.clone(),
                                 value: String::from_utf8_lossy($value).into_owned(),
                                 kind: ParseKind::InvalidNumber {
                                     type_name: $type_name,
@@ -458,8 +467,8 @@ macro_rules! append_float {
                     $builder,
                     $field_config,
                     Error::ParseError {
-                        field: Arc::from($field_config.name.as_str()),
-                        path: Arc::from($field_config.xml_path.as_str()),
+                        field: $field_config.name.clone(),
+                        path: $field_config.xml_path.clone(),
                         value: String::from_utf8_lossy($value).into_owned(),
                         kind: ParseKind::InvalidNumber {
                             type_name: $type_name,
@@ -476,16 +485,11 @@ macro_rules! append_float {
 }
 
 impl FieldBuilder {
-    fn new(
-        table_config: &TableConfig,
-        field_config: &FieldConfig,
-        policy: &ResolvedPolicy,
-        max_value_bytes: usize,
-    ) -> Self {
+    fn new(field_config: &FieldConfig, meta: &FieldMeta, max_value_bytes: usize) -> Self {
         let array_builder = TypedArrayBuilder::from_dtype(field_config.data_type);
-        let has_transform = field_config.scale.is_some() || field_config.offset.is_some();
+        let has_transform = meta.scale.is_some() || meta.offset.is_some();
         Self {
-            meta: FieldMeta::from_config(table_config, field_config, policy),
+            meta: meta.clone(),
             array_builder,
             has_value: false,
             skip_rest_of_row: false,
@@ -553,8 +557,8 @@ impl FieldBuilder {
                         OnMissing::Empty => b.append_value(""),
                         OnMissing::Error => {
                             return Err(Error::MissingRequiredField {
-                                field: Arc::from(fc.name.as_str()),
-                                path: Arc::from(fc.xml_path.as_str()),
+                                field: fc.name.clone(),
+                                path: fc.xml_path.clone(),
                                 location: Box::default(),
                             });
                         }
@@ -589,8 +593,8 @@ impl FieldBuilder {
                             b,
                             fc,
                             Error::ParseError {
-                                field: Arc::from(fc.name.as_str()),
-                                path: Arc::from(fc.xml_path.as_str()),
+                                field: fc.name.clone(),
+                                path: fc.xml_path.clone(),
                                 value: String::from_utf8_lossy(value).into_owned(),
                                 kind: ParseKind::InvalidBoolean,
                                 location: Box::default(),
@@ -611,8 +615,8 @@ impl FieldBuilder {
     #[inline(never)]
     fn value_too_large_error(&self) -> Error {
         Error::ValueTooLarge {
-            field: Arc::from(self.meta.name.as_str()),
-            path: Arc::from(self.meta.xml_path.as_str()),
+            field: self.meta.name.clone(),
+            path: self.meta.xml_path.clone(),
             limit: self.max_value_bytes,
             location: Box::default(),
         }
@@ -729,7 +733,7 @@ impl TableBuilder {
         table_config: &TableConfig,
         plan: &TableLinkPlan,
         schema: Arc<Schema>,
-        policies: &[ResolvedPolicy],
+        field_metas: &[FieldMeta],
         max_value_bytes: usize,
     ) -> Self {
         let mut index_builders = Vec::with_capacity(table_config.levels.len());
@@ -740,13 +744,8 @@ impl TableBuilder {
             .map(|spec| LinkBuilder::from_kind(spec.kind))
             .collect();
         let mut field_builders = Vec::with_capacity(table_config.fields.len());
-        for (field_config, policy) in table_config.fields.iter().zip(policies) {
-            field_builders.push(FieldBuilder::new(
-                table_config,
-                field_config,
-                policy,
-                max_value_bytes,
-            ));
+        for (field_config, meta) in table_config.fields.iter().zip(field_metas) {
+            field_builders.push(FieldBuilder::new(field_config, meta, max_value_bytes));
         }
         Self {
             meta: TableMeta::from_config(table_config),
@@ -1083,33 +1082,48 @@ impl XmlToArrowConverter {
     fn new(parser: &Parser, max_rows_per_batch: usize, max_bytes_per_batch: usize) -> Self {
         let config = &parser.inner.config;
         let max_value_bytes = config.parser_options.max_value_bytes.unwrap_or(usize::MAX);
+        let max_links = parser
+            .inner
+            .link_plans
+            .iter()
+            .map(|plan| plan.links.len())
+            .max()
+            .unwrap_or(0);
         let mut table_builders = Vec::with_capacity(config.tables.len());
-        // `field_policies` is flat in table order, so walking the tables in
-        // order also walks it — no per-table index to store or look up.
-        let mut policies = parser.inner.field_policies.as_slice();
+        // `field_metas` is flat in table order, so walking the tables in order
+        // also walks it — no per-table index to store or look up.
+        let mut field_metas = parser.inner.field_metas.as_slice();
         for (table_idx, (table_config, schema)) in config
             .tables
             .iter()
             .zip(&parser.inner.table_schemas)
             .enumerate()
         {
-            let (table_policies, rest) = policies.split_at(table_config.fields.len());
-            policies = rest;
+            let (table_metas, rest) = field_metas.split_at(table_config.fields.len());
+            field_metas = rest;
             table_builders.push(TableBuilder::new(
                 table_config,
                 link_plan(&parser.inner.link_plans, table_idx),
                 schema.clone(),
-                table_policies,
+                table_metas,
                 max_value_bytes,
             ));
         }
 
         let mut converter = Self {
             table_builders,
-            builder_stack: Vec::new(),
+            // Sized rather than grown: the profile showed `builder_stack`
+            // reallocating inside this constructor on every parse, because
+            // `start_table` pushes the root table into a zero-capacity Vec. Its
+            // depth — and `parent_indices_buffer`'s length, which mirrors it —
+            // is bounded by the number of tables, which is small and known here.
+            builder_stack: Vec::with_capacity(config.tables.len()),
             compiled: Arc::clone(&parser.inner),
-            parent_indices_buffer: Vec::new(),
-            link_values_buffer: Vec::new(),
+            parent_indices_buffer: Vec::with_capacity(config.tables.len()),
+            // `with_capacity(0)` does not allocate, so a config that declares
+            // no links pays nothing for this and one that does grows once per
+            // parser instead of once per parse.
+            link_values_buffer: Vec::with_capacity(max_links),
             validate_attributes: config.parser_options.validate_attributes,
             error_on_unmatched_fields: config.parser_options.error_on_unmatched_fields,
             strip_namespaces: config.parser_options.strip_namespaces,
@@ -1256,8 +1270,8 @@ fn duplicate_value_error(
         let table_builder = &table_builders[table_idx];
         let field_builder = &table_builder.field_builders[field_idx];
         Error::ParseError {
-            field: Arc::from(field_builder.meta.name.as_str()),
-            path: Arc::from(field_builder.meta.xml_path.as_str()),
+            field: field_builder.meta.name.clone(),
+            path: field_builder.meta.xml_path.clone(),
             value: String::from_utf8_lossy(&field_builder.current_value).into_owned(),
             kind: ParseKind::DuplicateValue,
             // Raised mid-row, so `save_row`'s annotation never sees it: the
@@ -1439,8 +1453,8 @@ impl XmlToArrowConverter {
                     .filter(|field_builder| !field_builder.ever_matched)
                     .map(|field_builder| UnmatchedField {
                         table: table_builder.meta.name.clone(),
-                        field: field_builder.meta.name.clone(),
-                        xml_path: field_builder.meta.xml_path.clone(),
+                        field: field_builder.meta.name.to_string(),
+                        xml_path: field_builder.meta.xml_path.to_string(),
                     })
             })
             .collect();
@@ -1534,17 +1548,19 @@ struct Compiled {
     /// [`TableBatch`]es carry a clone; `Arc<str>` keeps that per-batch cost
     /// to a refcount bump.
     table_names: Vec<Arc<str>>,
-    /// Every field's value policy, resolved once and stored flat in
-    /// `config.tables` order — table 0's fields, then table 1's, and so on.
+    /// Every field's resolved metadata — name, absolute path, transform and
+    /// value policy — stored flat in `config.tables` order: table 0's fields,
+    /// then table 1's, and so on.
     ///
-    /// Resolving layers a field's policies over the config-wide `defaults` over
-    /// a type-dependent default. That chain is fixed by the config, so walking
-    /// it belongs here and not in `FieldBuilder::new`, which runs for every
-    /// field of every table on *every* document. One flat `Vec` rather than a
-    /// `Vec` per table: the per-parse setup cost dominates parses of small
-    /// documents, and this way compiling a config adds one allocation to it
-    /// rather than one per table.
-    field_policies: Vec<ResolvedPolicy>,
+    /// All of it is fixed by the config, yet `XmlToArrowConverter::new` rebuilds
+    /// a `FieldBuilder` per field of every table on *every* document. Computing
+    /// it here turns that per-parse work — layering policies over `defaults`
+    /// over a type default, resolving a relative path, and copying two strings
+    /// — into a clone of three refcounted handles and 32 bytes of `Option<f64>`.
+    ///
+    /// One flat `Vec` rather than a `Vec` per table, so compiling a config adds
+    /// a single allocation rather than one per table.
+    field_metas: Vec<FieldMeta>,
 }
 
 impl Clone for Parser {
@@ -1750,11 +1766,11 @@ impl Parser {
             .map(|tc| Arc::from(tc.name.as_str()))
             .collect();
         let defaults = config.defaults.as_ref();
-        let field_policies = config
+        let field_metas = config
             .tables
             .iter()
-            .flat_map(|tc| &tc.fields)
-            .map(|fc| ResolvedPolicy::resolve(fc, defaults))
+            .flat_map(|tc| tc.fields.iter().map(move |fc| (tc, fc)))
+            .map(|(tc, fc)| FieldMeta::from_config(tc, fc, &ResolvedPolicy::resolve(fc, defaults)))
             .collect();
 
         Ok(Self {
@@ -1765,7 +1781,7 @@ impl Parser {
                 link_plans,
                 table_schemas,
                 table_names,
-                field_policies,
+                field_metas,
             }),
         })
     }
@@ -2399,8 +2415,8 @@ fn handle_general_ref(
         None => {
             if let Some((meta, row_index)) = xml_to_arrow_converter.active_field_meta(node_id) {
                 return Err(Error::ParseError {
-                    field: Arc::from(meta.name.as_str()),
-                    path: Arc::from(meta.xml_path.as_str()),
+                    field: meta.name.clone(),
+                    path: meta.xml_path.clone(),
                     value: String::from_utf8_lossy(&text).into_owned(),
                     kind: ParseKind::UnresolvedEntity,
                     // Raised mid-row; see `duplicate_value_error`.
@@ -9366,7 +9382,10 @@ mod tests {
     /// Per-field value policies first cost 24 bytes here by storing an
     /// `Option<Vec<String>>` of null literals inline: 24 bytes in every field
     /// builder to describe a list that is absent in almost every config.
-    /// Boxing it behind a thin pointer took the growth from +24 to +8.
+    /// Boxing it behind a thin pointer took the growth from +24 to +8, and
+    /// holding the field's two names as `Arc<str>` rather than `String` then
+    /// gave back 16 more — leaving `FieldBuilder` smaller than it was before
+    /// policies existed.
     ///
     /// The numbers are not sacred; the review is. If a change moves them, say
     /// in the commit message what bought the bytes.
@@ -9377,7 +9396,7 @@ mod tests {
             16,
             "policies live inside every FieldBuilder; see this test's comment"
         );
-        assert_eq!(std::mem::size_of::<FieldMeta>(), 96);
-        assert_eq!(std::mem::size_of::<FieldBuilder>(), 248);
+        assert_eq!(std::mem::size_of::<FieldMeta>(), 80);
+        assert_eq!(std::mem::size_of::<FieldBuilder>(), 232);
     }
 }
