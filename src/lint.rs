@@ -46,7 +46,9 @@ pub enum Lint {
     /// from which fields happen to be configured, and adding a *field* can
     /// change the *row count*.
     InferredRowBoundary {
+        /// The table whose rows are inferred.
         table: String,
+        /// Its `xml_path` — the container whose children delimit rows.
         xml_path: String,
         /// Every configured direct child element of `xml_path`, in first-seen
         /// order. Each one finalizes a row of this table when it closes.
@@ -60,9 +62,13 @@ pub enum Lint {
     /// whichever row finalizes next. That is rarely what the author meant, but
     /// it is not a new failure, and Phase C does not break working configs.
     FieldOutsideRow {
+        /// The table declaring the row.
         table: String,
+        /// The field that sits outside it.
         field: String,
+        /// The field's resolved path.
         field_path: String,
+        /// The row element's resolved path, which does not contain it.
         row_path: String,
     },
     /// A table has fields but **no** configured child element, so no element
@@ -73,11 +79,19 @@ pub enum Lint {
     /// element itself (`/a/@id` on a table at `/a`) — the attribute
     /// pseudo-nodes are entered and left without going through the
     /// row-finalizing close path.
-    NeverFinalizesRows { table: String, xml_path: String },
+    NeverFinalizesRows {
+        /// The table that can never finalize a row.
+        table: String,
+        /// Its `xml_path`, which has no configured child element.
+        xml_path: String,
+    },
     /// A table declares no fields. It is excluded from the output entirely and
     /// exists only to feed its row counter to descendant tables' `levels`
     /// index columns.
-    StructuralTable { table: String },
+    StructuralTable {
+        /// The table that declares no fields.
+        table: String,
+    },
     /// A table declares more `levels` than it has enclosing table scopes (its
     /// non-root ancestor tables plus itself).
     ///
@@ -89,8 +103,11 @@ pub enum Lint {
     /// affected table never yields a row works today, and this phase does not
     /// break working configs.
     ExcessLevels {
+        /// The table declaring the surplus levels.
         table: String,
+        /// How many `levels` entries it declares.
         declared: usize,
+        /// How many enclosing table scopes actually exist to fill them.
         available: usize,
     },
     /// Non-nullable `Utf8` fields yield an empty string when the value is
@@ -99,7 +116,12 @@ pub enum Lint {
     /// A long-standing asymmetry, listed here so configs that *rely* on it are
     /// visible: set `nullable: true` on these fields to distinguish "absent"
     /// from "present but empty".
-    ImplicitEmptyString { table: String, fields: Vec<String> },
+    ImplicitEmptyString {
+        /// The table containing the fields.
+        table: String,
+        /// The non-nullable `Utf8` fields that yield `""` when absent.
+        fields: Vec<String>,
+    },
 }
 
 impl fmt::Display for Lint {

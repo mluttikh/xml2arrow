@@ -1,3 +1,25 @@
+//! Configuration: the mapping from XML paths to Arrow tables and fields.
+//!
+//! A [`Config`] is normally written as YAML and loaded with
+//! [`Config::from_yaml_file`] (or the `config_from_yaml!` macro in tests), but
+//! it is an ordinary struct and [`Config::builder`] builds one in Rust.
+//!
+//! Two things are worth knowing before reading further:
+//!
+//! - **Everything is validated up front.** [`Config::validate`] runs when a
+//!   config is built or loaded, and again in `Parser::new`. A configuration
+//!   mistake is an error at load rather than a wrong column at parse — which
+//!   is the trade this crate makes everywhere, since silently plausible data
+//!   is the worst failure it could produce.
+//! - **Newer keys are opt-in and additive.** [`TableConfig::row`],
+//!   [`TableConfig::links`] and [`FieldConfig::path`] each replace an older
+//!   mechanism, and a config that sets none of them behaves exactly as it did
+//!   before they existed. [`Config::version`] is how a config asserts it has
+//!   finished adopting them.
+//!
+//! See the crate-level documentation for a worked example, and `MIGRATION.md`
+//! for moving an existing config forward.
+
 use std::{
     borrow::Cow,
     collections::HashSet,
@@ -1128,6 +1150,11 @@ pub struct TableConfig {
 }
 
 impl TableConfig {
+    /// Builds a table from the four keys every config has always had.
+    ///
+    /// Leaves `row`, `links` and `row_id` unset, which is the pre-0.20
+    /// behavior: row boundaries stay inferred and parent columns come from
+    /// `levels`. Use [`TableConfig::builder`] to set any of them.
     #[must_use]
     pub fn new(name: &str, xml_path: &str, levels: Vec<String>, fields: Vec<FieldConfig>) -> Self {
         Self {
@@ -1558,17 +1585,34 @@ impl FieldConfigBuilder {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[non_exhaustive]
 pub enum DType {
+    /// Arrow `Boolean`. Accepts `true`/`false`, `1`/`0`, `yes`/`no`,
+    /// `on`/`off`, `t`/`f`, `y`/`n`, case-insensitively.
     Boolean,
+    /// Arrow `Float32`. Accepts decimal and scientific notation; `scale` and
+    /// `offset` apply.
     Float32,
+    /// Arrow `Float64`. Accepts decimal and scientific notation; `scale` and
+    /// `offset` apply.
     Float64,
+    /// Arrow `Int8`. Out-of-range values are an error, never a wrap.
     Int8,
+    /// Arrow `UInt8`. Out-of-range values are an error, never a wrap.
     UInt8,
+    /// Arrow `Int16`. Out-of-range values are an error, never a wrap.
     Int16,
+    /// Arrow `UInt16`. Out-of-range values are an error, never a wrap.
     UInt16,
+    /// Arrow `Int32`. Out-of-range values are an error, never a wrap.
     Int32,
+    /// Arrow `UInt32`. Out-of-range values are an error, never a wrap.
     UInt32,
+    /// Arrow `Int64`. Out-of-range values are an error, never a wrap.
     Int64,
+    /// Arrow `UInt64`. Out-of-range values are an error, never a wrap.
     UInt64,
+    /// Arrow `Utf8`, and the default. The only type taken exactly as the
+    /// document spells it: no surrounding whitespace is stripped unless the
+    /// field asks for it with `trim`.
     #[default]
     Utf8,
 }
