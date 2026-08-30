@@ -28,6 +28,7 @@ use pyo3::Python;
 #[cfg(feature = "python")]
 use pyo3::create_exception;
 
+/// The crate's result type: `Result<T, `[`Error`]`>`.
 pub type Result<T> = core::result::Result<T, Error>;
 
 /// The crate's top-level error type.
@@ -69,10 +70,16 @@ pub enum Error {
     /// payload every hot-path function returns — `Error` stays pointer-thin
     /// per variant while the cold error path pays one allocation.
     ParseError {
+        /// The configured field name — the column this would have filled.
         field: Arc<str>,
+        /// The field's resolved absolute path, not the spelling the config
+        /// used: someone chasing this wants the location in the document.
         path: Arc<str>,
+        /// The raw text that failed, as it appeared in the document.
         value: String,
+        /// Which way the text was unusable.
         kind: ParseKind,
+        /// Where in the document and in the output the failure happened.
         location: Box<ErrorLocation>,
     },
     /// A non-nullable field had no text (or whitespace-only text) in a row.
@@ -83,8 +90,11 @@ pub enum Error {
     /// `location` carries the same document coordinates as
     /// [`Error::ParseError`].
     MissingRequiredField {
+        /// The configured field name — the column left without a value.
         field: Arc<str>,
+        /// The field's resolved absolute path: where a value was expected.
         path: Arc<str>,
+        /// Where in the document and in the output the value was missing.
         location: Box<ErrorLocation>,
     },
     /// With `ParserOptions::error_on_unmatched_fields` enabled, one or more
@@ -100,7 +110,11 @@ pub enum Error {
     /// leaves every field below the stop path unmatched, and telling that user
     /// to check their spelling sends them hunting for a bug they do not have.
     UnmatchedFields {
+        /// Every field that captured nothing, reported together so a broken
+        /// config is fixed in one round trip.
         fields: Vec<UnmatchedField>,
+        /// Whether `stop_at_paths` was configured. When it was, a deliberate
+        /// early exit — not a misspelling — is the likely explanation.
         stop_paths_configured: bool,
     },
     /// A single field's accumulated value exceeded
@@ -112,9 +126,13 @@ pub enum Error {
     /// cap is crossed the parser stops appending — memory stays bounded — and
     /// the row raises this when it finalizes.
     ValueTooLarge {
+        /// The configured field name whose value grew past the cap.
         field: Arc<str>,
+        /// The field's resolved absolute path.
         path: Arc<str>,
+        /// The configured `max_value_bytes` that was exceeded.
         limit: usize,
+        /// Where in the document and in the output the cap was crossed.
         location: Box<ErrorLocation>,
     },
     /// A table's per-scope row counter passed `u32::MAX`, the largest value a
@@ -122,7 +140,10 @@ pub enum Error {
     /// foreign keys of every subsequent child row, so the parse fails
     /// instead. Only reachable on enormous inputs (more than 2^32 rows in a
     /// single table scope), which the streaming entry points make possible.
-    RowIndexOverflow { table: Arc<str> },
+    RowIndexOverflow {
+        /// The table whose row counter passed `u32::MAX`.
+        table: Arc<str>,
+    },
     /// The document ended while elements were still open — the input was
     /// truncated.
     ///
@@ -133,14 +154,22 @@ pub enum Error {
     ///
     /// Deliberate early exits via `ParserOptions::stop_at_paths` do not raise
     /// this; `ParserOptions::allow_truncated_input` disables it entirely.
-    TruncatedInput { open_elements: usize },
+    TruncatedInput {
+        /// How many elements were still unclosed when the input ran out.
+        open_elements: usize,
+    },
     /// A scale or offset was configured on a data type that doesn't support it.
     UnsupportedConversion {
+        /// Which transform was attempted.
         conversion: ConversionKind,
+        /// The data type it was attempted on, as configured.
         data_type: String,
     },
     /// The configuration failed `Config::validate()`.
-    InvalidConfig { reason: ConfigIssue },
+    InvalidConfig {
+        /// What was wrong with the configuration.
+        reason: ConfigIssue,
+    },
 }
 
 /// Document coordinates locating a value-level failure.
@@ -157,7 +186,10 @@ pub enum Error {
 /// two.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ErrorLocation {
+    /// Zero-based index of the output row being built when the error was
+    /// raised — where the failure lands in the *result*.
     pub row: Option<usize>,
+    /// Byte offset into the document of the event that raised the error.
     pub position: Option<u64>,
 }
 
@@ -225,7 +257,9 @@ pub enum ParseKind {
     /// A numeric (integer or float) parser rejected the raw text. Carries
     /// the target type name and the underlying parser's message.
     InvalidNumber {
+        /// The target type's name, e.g. `"i32"` or `"f64"`.
         type_name: &'static str,
+        /// The underlying parser's message.
         reason: String,
     },
     /// A boolean token didn't match any recognized form.
@@ -248,7 +282,9 @@ pub enum ParseKind {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ConversionKind {
+    /// A `scale` multiplier, which only float fields accept.
     Scaling,
+    /// An `offset` addend, which only float fields accept.
     Offset,
 }
 
@@ -261,36 +297,57 @@ pub enum ConversionKind {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ConfigIssue {
+    /// A table had an empty `name`. Names identify output tables, so one is required.
     EmptyTableName,
+    /// Two tables share a `name`. Output is keyed by name, so the second would replace the first.
     DuplicateTableName {
+        /// The name claimed by more than one table.
         name: String,
     },
     /// Two tables resolve to the same `xml_path`. The path registry stores a
     /// single table per path node, so the earlier table would silently
     /// receive zero rows — rejected instead.
     DuplicateTableXmlPath {
+        /// The table that claimed the path first.
         table_a: String,
+        /// The table that claimed it again.
         table_b: String,
+        /// The contested path, as the later table spelled it.
         xml_path: String,
     },
+    /// A table had an empty `xml_path` and so matches nothing.
     EmptyTableXmlPath {
+        /// The table whose `xml_path` was empty.
         table: String,
     },
+    /// A field had an empty `name`. Names become column names.
     EmptyFieldName {
+        /// The table containing the unnamed field.
         table: String,
     },
+    /// Two fields in one table share a `name`, which would produce two columns of the same name.
     DuplicateFieldName {
+        /// The table containing the repeated name.
         table: String,
+        /// The name used by more than one field.
         field: String,
     },
+    /// A field named a location with an empty string.
     EmptyFieldXmlPath {
+        /// The field's table.
         table: String,
+        /// The field whose path was empty.
         field: String,
     },
+    /// A field's path lies outside its table's `xml_path`, so it could never be captured for that table's rows.
     FieldPathNotUnderTable {
+        /// The field's table.
         table: String,
+        /// The table's `xml_path`, which the field must sit inside.
         table_path: String,
+        /// The field that pointed outside it.
         field: String,
+        /// The field's resolved path.
         field_path: String,
     },
     /// An operation that requires exactly one output table (a table with a
@@ -299,124 +356,165 @@ pub enum ConfigIssue {
     /// on a config with a different number of them. Structural tables (empty
     /// `fields`) don't count: they never produce output.
     SingleTableRequired {
+        /// How many tables with fields the config actually has.
         output_tables: usize,
     },
     /// A table declared `row:` as an empty (or whitespace-only) string. Use
     /// `row: "."` for one row per table element, or omit the key entirely to
     /// keep inferred boundaries.
     EmptyRowPath {
+        /// The table whose `row:` was blank.
         table: String,
     },
     /// A table's declared `row:` resolves outside its own `xml_path`. A row
     /// element has to sit inside the table it delimits.
     RowPathNotUnderTable {
+        /// The table that declared the row.
         table: String,
+        /// The table's `xml_path`.
         table_path: String,
+        /// The `row:` value as written.
         row: String,
+        /// What it resolved to.
         row_path: String,
     },
     /// A value policy that cannot apply to the field it was set on: `null`
     /// on a non-nullable column, or `empty` on a type that has no empty value.
     InapplicablePolicy {
+        /// The field's table.
         table: String,
+        /// The field carrying the policy.
         field: String,
+        /// The policy as it would be written, e.g. `"on_missing: null"`.
         policy: &'static str,
+        /// Why it cannot apply to this column.
         reason: &'static str,
     },
     /// A table declared both `links` and a non-empty `levels`. They are two
     /// ways to say the same thing, and `links` supersedes `levels`.
     LinksAndLevels {
+        /// The table that set both.
         table: String,
     },
     /// A link set both `parent` and `index_of`, or neither. They produce
     /// different column types with different guarantees, so exactly one.
     LinkKindAmbiguous {
+        /// The table holding the ambiguous link.
         table: String,
     },
     /// A `parent:` link named a table that does not exist.
     UnknownParentTable {
+        /// The table declaring the link.
         table: String,
+        /// The table name it referred to, which does not exist.
         parent: String,
     },
     /// A `parent:` link named a table that does not enclose this one. The FK
     /// would read a counter for a scope that is not open.
     ParentNotAncestor {
+        /// The table declaring the link.
         table: String,
+        /// The declaring table's scope.
         table_path: String,
+        /// The named parent.
         parent: String,
+        /// The parent's scope, which does not contain the above.
         parent_path: String,
     },
     /// An `index_of:` path that is not an ancestor table's row element.
     IndexOfNotAncestorTable {
+        /// The table declaring the link.
         table: String,
+        /// The path it named.
         index_of: String,
     },
     /// A link column's name collides with a field or another link column.
     LinkColumnCollision {
+        /// The table where the names collided.
         table: String,
+        /// The name claimed twice.
         column: String,
     },
     /// A field set both `path` and `xml_path`. They are two spellings of the
     /// same thing; picking a winner silently would hide a real mistake.
     FieldPathConflict {
+        /// The field's table.
         table: String,
+        /// The field that set both keys.
         field: String,
     },
     /// A field set neither `path` nor `xml_path`, so it names no location.
     FieldPathMissing {
+        /// The field's table.
         table: String,
+        /// The field that set neither key.
         field: String,
     },
     /// A field used a relative `path` on a table that declares no `row:`.
     /// A relative field path is relative to the row element, so without one
     /// there is nothing to resolve against.
     RelativeFieldPathWithoutRow {
+        /// The table, which declares no `row:`.
         table: String,
+        /// The field with the relative path.
         field: String,
+        /// The relative path, with nothing to resolve it against.
         path: String,
     },
     /// A root table (`xml_path: /`) declared a `row:` resolving to itself.
     /// The implicit document root never closes, so no row could ever be
     /// finalized and the table would silently produce nothing.
     RowIsRootTable {
+        /// The root table whose `row:` resolved to itself.
         table: String,
     },
     /// Another table sits strictly between a table and its declared `row:`
     /// element. Rows are finalized against the innermost open table, so the
     /// inner table would silently absorb them.
     RowPathCrossesTable {
+        /// The table that declared the row.
         table: String,
+        /// Its resolved row element.
         row_path: String,
+        /// The table sitting between the two.
         nested_table: String,
+        /// That table's `xml_path`.
         nested_table_path: String,
     },
     /// `version:` named a generation this build does not know. Guessing which
     /// semantics were meant is exactly the wrong move for a key whose entire
     /// job is to pin them.
     UnsupportedConfigVersion {
+        /// The version the config asked for.
         version: u32,
     },
     /// `version: 2` asserts every table declares its row boundaries, and this
     /// one leaves them inferred.
     InferredRowInVersion2 {
+        /// The table still leaving its rows inferred.
         table: String,
     },
     /// `version: 2` asserts no table uses `levels`. It names labels and takes
     /// its values positionally; `links` names the relationship.
     LevelsInVersion2 {
+        /// The table still using `levels:`.
         table: String,
     },
     /// `version: 2` asserts every field uses `path`. `xml_path` is the
     /// deprecated spelling of the same key.
     FieldXmlPathInVersion2 {
+        /// The field's table.
         table: String,
+        /// The field still spelled `xml_path:`.
         field: String,
     },
     /// A table nested inside another declared no `links`, under `version: 2`.
     /// Without one its rows carry nothing relating them to the enclosing
     /// table's — which is the relationship `levels` used to express positionally.
     NestedTableWithoutLinksInVersion2 {
+        /// The nested table with no links.
         table: String,
+        /// The nearest table enclosing it.
         enclosing_table: String,
     },
 }
