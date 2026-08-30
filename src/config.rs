@@ -1096,14 +1096,12 @@ pub struct Link {
     /// Column name. Defaults to `_<parent>_id` for a `parent` link and
     /// `<element>_idx` for an `index_of` link.
     ///
-    /// The `parent` default interpolates the referenced table's `name` exactly
-    /// as written, so a table named `/report/stations/` produces a column
-    /// named `_/report/stations/_id`. That is a legal Arrow field name and
-    /// everything downstream that quotes identifiers handles it, but it is
-    /// awkward to type and breaks unquoted SQL. A configuration whose table
-    /// names are not plain identifiers — one generated from an XSD, typically
-    /// — should set this, and [`TableConfig::row_id`] on the referenced table,
-    /// rather than take the defaults.
+    /// Set it whenever the derived name is not what you want downstream. The
+    /// `parent` default interpolates the referenced table's `name` exactly as
+    /// written, so a table whose name is not a plain identifier produces a
+    /// column that is not one either — legal as an Arrow field name, and
+    /// handled by anything that quotes identifiers, but not by everything.
+    /// [`TableConfig::row_id`] does the same for the key side.
     ///
     /// Collisions are rejected rather than resolved: if two links, or a link
     /// and a field, would produce the same column, `Config::validate` fails

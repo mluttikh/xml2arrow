@@ -9096,15 +9096,11 @@ mod tests {
     /// A table name is interpolated into the derived link column *verbatim*,
     /// including when it is not a plain identifier.
     ///
-    /// This is a deliberate choice, pinned here so it is not "fixed" into
-    /// something cleverer. Configurations generated from an XSD often name
-    /// tables by their path, which yields a column like
-    /// `_/report/monitoring_stations/_id`. That is a legal Arrow field name
-    /// and everything that quotes identifiers handles it; the alternative —
-    /// sanitizing the name down to its last segment — buys prettier defaults
-    /// at the cost of a rule to explain, and generators can set `name:`
-    /// themselves. See `link_and_key_columns_can_be_renamed` for the fix a
-    /// generator is expected to apply.
+    /// A deliberate choice, pinned here so it is not "fixed" into something
+    /// cleverer. Sanitizing the name — to its last path segment, say — would
+    /// buy prettier defaults at the cost of a rule to explain, and the name
+    /// is overridable anyway, which `link_and_key_columns_can_be_renamed`
+    /// covers. The result is a legal Arrow field name either way.
     #[test]
     fn a_path_shaped_table_name_appears_in_the_link_column_verbatim() {
         let batches = parse(
