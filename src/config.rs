@@ -195,6 +195,20 @@ pub(crate) fn path_is_under(descendant: &str, ancestor: &str) -> bool {
     path_segments(ancestor).all(|segment| descendant_segments.next() == Some(segment))
 }
 
+/// Returns true when `descendant` is nested *strictly* inside `ancestor` —
+/// under it, and not the same path.
+///
+/// The distinction is load-bearing wherever one table's scope is compared with
+/// another's. "Is this table inside that one?" and "is this table inside or
+/// equal to that one?" are different questions with different right answers: a
+/// table whose path equals another's is a sibling in scope, not a child, and
+/// treating it as a child produces links to itself and rows attributed to the
+/// wrong table. Spelling the pair out at each site invited getting one half
+/// wrong, so it is named once here.
+pub(crate) fn path_is_strictly_under(descendant: &str, ancestor: &str) -> bool {
+    !paths_equal(descendant, ancestor) && path_is_under(descendant, ancestor)
+}
+
 /// Resolves a declared `row` against its table's `xml_path`.
 ///
 /// `"."` names the table element itself, a leading `/` means the path is
@@ -457,11 +471,9 @@ impl Config {
             // is popped before the row is finalized, so the row still
             // lands here.
             for other in &self.tables {
-                let other_is_strictly_inside = path_is_under(&other.xml_path, &table.xml_path)
-                    && !paths_equal(&other.xml_path, &table.xml_path);
-                let row_is_strictly_inside_other = path_is_under(&row_path, &other.xml_path)
-                    && !paths_equal(&row_path, &other.xml_path);
-                if other_is_strictly_inside && row_is_strictly_inside_other {
+                if path_is_strictly_under(&other.xml_path, &table.xml_path)
+                    && path_is_strictly_under(&row_path, &other.xml_path)
+                {
                     return Err(Error::InvalidConfig {
                         reason: ConfigIssue::RowPathCrossesTable {
                             table: table.name.clone(),
@@ -513,9 +525,7 @@ impl Config {
                         // from whatever happened to enclose the table and
                         // so could silently mis-align.
                         let parent_scope = parent.link_scope_path();
-                        if paths_equal(&parent_scope, &scope)
-                            || !path_is_under(&scope, &parent_scope)
-                        {
+                        if !path_is_strictly_under(&scope, &parent_scope) {
                             return Err(Error::InvalidConfig {
                                 reason: ConfigIssue::ParentNotAncestor {
                                     table: table.name.clone(),
@@ -533,9 +543,7 @@ impl Config {
                         // identical to the legacy `<level>` value.
                         let is_ancestor_table = self.tables.iter().any(|t| {
                             let other = t.link_scope_path();
-                            paths_equal(&other, index_of)
-                                && !paths_equal(&other, &scope)
-                                && path_is_under(&scope, &other)
+                            paths_equal(&other, index_of) && path_is_strictly_under(&scope, &other)
                         });
                         if !is_ancestor_table {
                             return Err(Error::InvalidConfig {
@@ -772,7 +780,7 @@ impl Config {
                     return false;
                 }
                 let candidate_scope = candidate.link_scope_path();
-                !paths_equal(&candidate_scope, &scope) && path_is_under(&scope, &candidate_scope)
+                path_is_strictly_under(&scope, &candidate_scope)
             })
             .max_by_key(|candidate| path_segments(&candidate.link_scope_path()).count())
     }
@@ -2166,6 +2174,35 @@ mod tests {
         let err = config.validate().unwrap_err();
         assert!(matches!(err, Error::InvalidConfig { .. }));
         assert!(err.to_string().contains("not under table"));
+    }
+
+    /// The whole reason `path_is_strictly_under` exists as its own name: it
+    /// answers "is this *inside* that", where `path_is_under` answers "inside
+    /// or the same". Six call sites compare one table's scope with another's,
+    /// and every one of them means the strict question — a table whose path
+    /// equals another's is a sibling in scope, not a child.
+    #[rstest]
+    // Equal paths: under, but not strictly.
+    #[case("/a/b", "/a/b", true, false)]
+    // Non-canonical spellings of the same equality.
+    #[case("a/b", "/a/b/", true, false)]
+    // Genuinely nested.
+    #[case("/a/b/c", "/a/b", true, true)]
+    // Everything is under the root, and strictly so unless it *is* the root.
+    #[case("/a", "/", true, true)]
+    #[case("/", "/", true, false)]
+    // A shared string prefix is not a shared path prefix.
+    #[case("/root/items_other", "/root/item", false, false)]
+    // The other direction is not under at all.
+    #[case("/a", "/a/b", false, false)]
+    fn strictly_under_differs_from_under_exactly_on_equality(
+        #[case] descendant: &str,
+        #[case] ancestor: &str,
+        #[case] under: bool,
+        #[case] strictly: bool,
+    ) {
+        assert_eq!(path_is_under(descendant, ancestor), under);
+        assert_eq!(path_is_strictly_under(descendant, ancestor), strictly);
     }
 
     #[test]

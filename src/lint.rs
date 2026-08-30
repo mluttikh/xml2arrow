@@ -27,7 +27,9 @@ use std::fmt;
 
 use std::borrow::Cow;
 
-use crate::config::{Config, DType, path_is_under, path_segments, paths_equal, resolve_field_path};
+use crate::config::{
+    Config, DType, path_is_strictly_under, path_is_under, path_segments, resolve_field_path,
+};
 
 /// An advisory finding about a configuration.
 ///
@@ -310,8 +312,7 @@ impl Config {
                 .iter()
                 .filter(|ancestor| {
                     path_segments(&ancestor.xml_path).next().is_some()
-                        && !paths_equal(&ancestor.xml_path, table_path)
-                        && path_is_under(table_path, &ancestor.xml_path)
+                        && path_is_strictly_under(table_path, &ancestor.xml_path)
                 })
                 .count()
     }
