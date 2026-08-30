@@ -40,6 +40,7 @@ pub xml2arrow::config::Config::parser_options: xml2arrow::config::ParserOptions
 pub xml2arrow::config::Config::tables: alloc::vec::Vec<xml2arrow::config::TableConfig>
 impl xml2arrow::config::Config
 pub fn xml2arrow::config::Config::from_yaml_file(impl core::convert::AsRef<std::path::Path>) -> xml2arrow::errors::Result<Self>
+pub fn xml2arrow::config::Config::from_yaml_str(&str) -> xml2arrow::errors::Result<Self>
 pub fn xml2arrow::config::Config::requires_attribute_parsing(&self) -> bool
 pub fn xml2arrow::config::Config::to_yaml_file(&self, impl core::convert::AsRef<std::path::Path>) -> xml2arrow::errors::Result<()>
 pub fn xml2arrow::config::Config::validate(&self) -> xml2arrow::errors::Result<()>
@@ -396,6 +397,7 @@ pub xml2arrow::Config::parser_options: xml2arrow::config::ParserOptions
 pub xml2arrow::Config::tables: alloc::vec::Vec<xml2arrow::config::TableConfig>
 impl xml2arrow::config::Config
 pub fn xml2arrow::config::Config::from_yaml_file(impl core::convert::AsRef<std::path::Path>) -> xml2arrow::errors::Result<Self>
+pub fn xml2arrow::config::Config::from_yaml_str(&str) -> xml2arrow::errors::Result<Self>
 pub fn xml2arrow::config::Config::requires_attribute_parsing(&self) -> bool
 pub fn xml2arrow::config::Config::to_yaml_file(&self, impl core::convert::AsRef<std::path::Path>) -> xml2arrow::errors::Result<()>
 pub fn xml2arrow::config::Config::validate(&self) -> xml2arrow::errors::Result<()>
