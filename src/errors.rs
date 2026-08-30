@@ -796,6 +796,15 @@ impl fmt::Display for ConfigIssue {
     }
 }
 
+impl From<ConfigIssue> for Error {
+    /// Every configuration problem reaches callers as
+    /// [`Error::InvalidConfig`], so validation can `return Err(issue.into())`
+    /// and the reader sees the issue rather than the wrapper around it.
+    fn from(reason: ConfigIssue) -> Self {
+        Error::InvalidConfig { reason }
+    }
+}
+
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {

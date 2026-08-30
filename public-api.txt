@@ -440,6 +440,8 @@ pub xml2arrow::errors::ConfigIssue::UnknownParentTable::parent: alloc::string::S
 pub xml2arrow::errors::ConfigIssue::UnknownParentTable::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::UnsupportedConfigVersion
 pub xml2arrow::errors::ConfigIssue::UnsupportedConfigVersion::version: u32
+impl core::convert::From<xml2arrow::errors::ConfigIssue> for xml2arrow::errors::Error
+pub fn xml2arrow::errors::Error::from(xml2arrow::errors::ConfigIssue) -> Self
 impl core::fmt::Debug for xml2arrow::errors::ConfigIssue
 pub fn xml2arrow::errors::ConfigIssue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::fmt::Display for xml2arrow::errors::ConfigIssue
@@ -510,6 +512,8 @@ impl core::convert::From<quick_xml::errors::Error> for xml2arrow::errors::Error
 pub fn xml2arrow::errors::Error::from(quick_xml::errors::Error) -> Self
 impl core::convert::From<quick_xml::events::attributes::AttrError> for xml2arrow::errors::Error
 pub fn xml2arrow::errors::Error::from(quick_xml::events::attributes::AttrError) -> Self
+impl core::convert::From<xml2arrow::errors::ConfigIssue> for xml2arrow::errors::Error
+pub fn xml2arrow::errors::Error::from(xml2arrow::errors::ConfigIssue) -> Self
 impl core::convert::From<yaml_serde::error::Error> for xml2arrow::errors::Error
 pub fn xml2arrow::errors::Error::from(yaml_serde::error::Error) -> Self
 impl core::error::Error for xml2arrow::errors::Error
@@ -704,6 +708,8 @@ impl core::convert::From<quick_xml::errors::Error> for xml2arrow::errors::Error
 pub fn xml2arrow::errors::Error::from(quick_xml::errors::Error) -> Self
 impl core::convert::From<quick_xml::events::attributes::AttrError> for xml2arrow::errors::Error
 pub fn xml2arrow::errors::Error::from(quick_xml::events::attributes::AttrError) -> Self
+impl core::convert::From<xml2arrow::errors::ConfigIssue> for xml2arrow::errors::Error
+pub fn xml2arrow::errors::Error::from(xml2arrow::errors::ConfigIssue) -> Self
 impl core::convert::From<yaml_serde::error::Error> for xml2arrow::errors::Error
 pub fn xml2arrow::errors::Error::from(yaml_serde::error::Error) -> Self
 impl core::error::Error for xml2arrow::errors::Error
