@@ -483,84 +483,110 @@ impl Config {
     /// a table that genuinely encloses this one, and contributes a column name
     /// nothing else has claimed.
     fn validate_declared_links(&self, table: &TableConfig) -> Result<()> {
-        if let Some(links) = &table.links {
-            if !table.levels.is_empty() {
-                return Err(ConfigIssue::LinksAndLevels {
-                    table: table.name.clone(),
-                }
-                .into());
+        let Some(links) = &table.links else {
+            return Ok(());
+        };
+        if !table.levels.is_empty() {
+            return Err(ConfigIssue::LinksAndLevels {
+                table: table.name.clone(),
             }
-            let scope = table.link_scope_path();
-            let mut column_names: HashSet<String> = table
-                .fields
-                .iter()
-                .map(|field| field.name.clone())
-                .collect();
+            .into());
+        }
 
-            for link in links {
-                match (link.parent.as_deref(), link.index_of.as_deref()) {
-                    (Some(parent_name), None) => {
-                        let Some(parent) = self.tables.iter().find(|t| t.name == parent_name)
-                        else {
-                            return Err(ConfigIssue::UnknownParentTable {
-                                table: table.name.clone(),
-                                parent: parent_name.to_string(),
-                            }
-                            .into());
-                        };
-                        // The parent's rows must *contain* this
-                        // table's, checked by name. This is the whole
-                        // advantage over `levels`, which took its values
-                        // from whatever happened to enclose the table and
-                        // so could silently mis-align.
-                        let parent_scope = parent.link_scope_path();
-                        if !path_is_strictly_under(&scope, &parent_scope) {
-                            return Err(ConfigIssue::ParentNotAncestor {
-                                table: table.name.clone(),
-                                table_path: scope.clone(),
-                                parent: parent_name.to_string(),
-                                parent_path: parent_scope,
-                            }
-                            .into());
-                        }
-                    }
-                    (None, Some(index_of)) => {
-                        // Restricted to an enclosing table's row element:
-                        // that table already counts exactly this, so the
-                        // ordinal costs nothing at parse time and is
-                        // identical to the legacy `<level>` value.
-                        let is_ancestor_table = self.tables.iter().any(|t| {
-                            let other = t.link_scope_path();
-                            paths_equal(&other, index_of) && path_is_strictly_under(&scope, &other)
-                        });
-                        if !is_ancestor_table {
-                            return Err(ConfigIssue::IndexOfNotAncestorTable {
-                                table: table.name.clone(),
-                                index_of: index_of.to_string(),
-                            }
-                            .into());
-                        }
-                    }
-                    _ => {
-                        return Err(ConfigIssue::LinkKindAmbiguous {
-                            table: table.name.clone(),
-                        }
-                        .into());
-                    }
-                }
+        let scope = table.link_scope_path();
+        // Seeded with the field names so a link column that shadowed a field
+        // is caught by the same check as one that shadows another link.
+        let mut column_names: HashSet<String> = table
+            .fields
+            .iter()
+            .map(|field| field.name.clone())
+            .collect();
 
-                // A link column that shadowed a field would be a silently
-                // wrong column, so collisions are rejected.
-                if let Some(column) = link.column_name()
-                    && !column_names.insert(column.clone())
-                {
-                    return Err(ConfigIssue::LinkColumnCollision {
+        for link in links {
+            match (link.parent.as_deref(), link.index_of.as_deref()) {
+                (Some(parent), None) => self.validate_parent_link(table, &scope, parent)?,
+                (None, Some(index_of)) => self.validate_index_of_link(table, &scope, index_of)?,
+                // Neither or both. They produce different column types with
+                // different guarantees, so picking one would be a guess.
+                _ => {
+                    return Err(ConfigIssue::LinkKindAmbiguous {
                         table: table.name.clone(),
-                        column,
                     }
                     .into());
                 }
             }
+
+            // A link column that shadowed a field would be a silently wrong
+            // column, so collisions are rejected.
+            if let Some(column) = link.column_name()
+                && !column_names.insert(column.clone())
+            {
+                return Err(ConfigIssue::LinkColumnCollision {
+                    table: table.name.clone(),
+                    column,
+                }
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks a `parent:` link — that the named table exists and genuinely
+    /// encloses this one.
+    ///
+    /// Checking it *by name* is the whole advantage over `levels`, which took
+    /// its values from whatever happened to enclose the table and so could
+    /// mis-align silently, producing a column of plausible wrong numbers.
+    fn validate_parent_link(
+        &self,
+        table: &TableConfig,
+        scope: &str,
+        parent_name: &str,
+    ) -> Result<()> {
+        let Some(parent) = self.tables.iter().find(|t| t.name == parent_name) else {
+            return Err(ConfigIssue::UnknownParentTable {
+                table: table.name.clone(),
+                parent: parent_name.to_string(),
+            }
+            .into());
+        };
+        let parent_scope = parent.link_scope_path();
+        if !path_is_strictly_under(scope, &parent_scope) {
+            return Err(ConfigIssue::ParentNotAncestor {
+                table: table.name.clone(),
+                table_path: scope.to_string(),
+                parent: parent_name.to_string(),
+                parent_path: parent_scope,
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    /// Checks an `index_of:` link — that the path names the row element of a
+    /// table enclosing this one.
+    ///
+    /// Restricted to an enclosing *table*, deliberately: such a table already
+    /// counts exactly this, so the ordinal costs nothing at parse time and is
+    /// identical to the legacy `<level>` value for the same path. An arbitrary
+    /// path would need a per-node occurrence counter maintained on every
+    /// element open.
+    fn validate_index_of_link(
+        &self,
+        table: &TableConfig,
+        scope: &str,
+        index_of: &str,
+    ) -> Result<()> {
+        let is_ancestor_table = self.tables.iter().any(|t| {
+            let other = t.link_scope_path();
+            paths_equal(&other, index_of) && path_is_strictly_under(scope, &other)
+        });
+        if !is_ancestor_table {
+            return Err(ConfigIssue::IndexOfNotAncestorTable {
+                table: table.name.clone(),
+                index_of: index_of.to_string(),
+            }
+            .into());
         }
         Ok(())
     }
@@ -569,7 +595,6 @@ impl Config {
     /// `path`/`xml_path`, resolving inside the table, and carrying no policy
     /// that cannot apply to the column it is set on.
     fn validate_table_fields(&self, table: &TableConfig) -> Result<()> {
-        let empty_policies = ValuePolicies::default();
         let mut field_names = HashSet::with_capacity(table.fields.len());
         for field in &table.fields {
             if field.name.is_empty() {
@@ -638,39 +663,51 @@ impl Config {
                 .into());
             }
 
-            // A policy that cannot apply is rejected rather than quietly
-            // ignored: `on_missing: null` on a non-nullable column has no
-            // valid outcome, and silently falling back to the default
-            // would leave the config saying one thing and the data doing
-            // another.
-            let effective = field
-                .policies
-                .over(self.defaults.as_ref().unwrap_or(&empty_policies));
-            let inapplicable = if effective.on_missing == Some(OnMissing::Null) && !field.nullable {
-                Some(("on_missing: null", "the column is not nullable"))
-            } else if effective.on_missing == Some(OnMissing::Empty)
-                && field.data_type != DType::Utf8
-            {
-                Some((
-                    "on_missing: empty",
-                    "only Utf8 has an empty value; use null or error",
-                ))
-            } else if effective.on_invalid == Some(OnInvalid::Null) && !field.nullable {
-                Some(("on_invalid: null", "the column is not nullable"))
-            } else {
-                None
-            };
-            if let Some((policy, reason)) = inapplicable {
-                return Err(ConfigIssue::InapplicablePolicy {
-                    table: table.name.clone(),
-                    field: field.name.clone(),
-                    policy,
-                    reason,
-                }
-                .into());
-            }
-
+            self.validate_field_policies(table, field)?;
             field.validate()?;
+        }
+        Ok(())
+    }
+
+    /// Rejects a value policy that cannot apply to the column it is set on.
+    ///
+    /// Quietly ignoring one would leave the config saying a thing the data
+    /// does not do, which is the failure mode this crate spends most of its
+    /// validation budget avoiding. There are only three ways to be
+    /// inapplicable, and all three are a mismatch with the column rather than
+    /// with the policy: asking for null on a column that cannot hold one, or
+    /// for an empty value on a type that has none.
+    ///
+    /// Checked against the *effective* policy — the field's own layered over
+    /// the config-wide `defaults` — because a `defaults:` block can introduce
+    /// the mismatch for a field that set nothing itself.
+    fn validate_field_policies(&self, table: &TableConfig, field: &FieldConfig) -> Result<()> {
+        let empty_policies = ValuePolicies::default();
+        let effective = field
+            .policies
+            .over(self.defaults.as_ref().unwrap_or(&empty_policies));
+
+        let inapplicable = if effective.on_missing == Some(OnMissing::Null) && !field.nullable {
+            Some(("on_missing: null", "the column is not nullable"))
+        } else if effective.on_missing == Some(OnMissing::Empty) && field.data_type != DType::Utf8 {
+            Some((
+                "on_missing: empty",
+                "only Utf8 has an empty value; use null or error",
+            ))
+        } else if effective.on_invalid == Some(OnInvalid::Null) && !field.nullable {
+            Some(("on_invalid: null", "the column is not nullable"))
+        } else {
+            None
+        };
+
+        if let Some((policy, reason)) = inapplicable {
+            return Err(ConfigIssue::InapplicablePolicy {
+                table: table.name.clone(),
+                field: field.name.clone(),
+                policy,
+                reason,
+            }
+            .into());
         }
         Ok(())
     }
