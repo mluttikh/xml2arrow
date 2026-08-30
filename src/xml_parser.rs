@@ -43,8 +43,6 @@ use crate::errors::UnmatchedField;
 use crate::lint::Lint;
 use crate::path_registry::{PathNodeId, PathNodeInfo, PathRegistry, PathTracker};
 
-// === Field-level accumulation ===
-
 // --- The parser: compiled configuration, and the entry points that use it ---
 //
 // Everything below is reached from `Parser`. It is first because it is what a
@@ -873,9 +871,14 @@ pub fn parse_xml_slice(xml: &[u8], config: &Config) -> Result<IndexMap<String, R
 
 // --- Streaming entry points ---
 //
-// The same parse, yielded batch by batch instead of collected. `BatchStream`
-// drives the identical event loop below; the difference is only when a table
-// hands its accumulated rows back.
+// The entry points above accumulate the whole document into one RecordBatch
+// per table, so peak memory is proportional to the dataset. The types here
+// bound that: `BatchStream` steps the same `handle_event` core one event at a
+// time and emits a table's accumulated rows whenever it crosses a
+// `BatchOptions` threshold.
+//
+// Flushing is value-transparent (see `TableBuilder::flush`): concatenating a
+// table's streamed batches reproduces the collect-everything output exactly.
 
 /// Flush thresholds for the streaming entry points ([`Parser::parse_batches`]
 /// and friends). A table's batch is emitted as soon as *either* threshold is
@@ -1298,13 +1301,13 @@ impl<S> std::fmt::Debug for SingleTableReader<'_, S> {
 
 // --- Event loop implementations ---
 //
-// Two pumps over the same `handle_event`: one for any `BufRead`, one
-// borrowing a `&[u8]` so element names and text never leave the input buffer.
-// Written once and monomorphized, because a second copy of this logic is a
-// second place for row semantics to drift.
-
+// Three pumps, one `handle_event`. The event-handling logic is written once
+// and monomorphized, because a second copy of it is a second place for row
+// semantics to drift; the read/Break/buffer discipline *around* it differs
+// per pump and is written three times.
 //
-// Two loop variants exist to match how events are read from quick-xml:
+// The two collecting pumps live here and match how events are read from
+// quick-xml:
 //
 // 1) `process_xml_events` (buffered): uses `read_event_into(&mut buf)` which
 //    copies each event into a reusable buffer. Required for streaming readers.
@@ -1313,14 +1316,10 @@ impl<S> std::fmt::Debug for SingleTableReader<'_, S> {
 //    `Reader<&[u8]>` which returns events that borrow directly from the input
 //    slice, eliminating per-event copies.
 //
-// Both delegate to `handle_event` for the actual event processing so the
-// match-arm logic is written exactly once.
-//
-// A THIRD pump exists in `BatchStream::next` (streaming output): it reads
-// through the `EventSource` abstraction and steps one event at a time so a
-// batch can be yielded mid-parse. All three share `handle_event`, but the
-// read/Break/buffer discipline around it is written three times — any change
-// to the loops below must be mirrored there, and vice versa.
+// The third is `BatchStream::next` (above, with the streaming entry points):
+// it reads through the `EventSource` abstraction and steps one event at a
+// time so a batch can be yielded mid-parse. Any change to the loop discipline
+// below must be mirrored there, and vice versa.
 
 /// The result of processing a single XML event, telling the event loop
 /// whether to continue reading or stop (on EOF or a stop-path match).
@@ -1753,16 +1752,6 @@ fn parse_attributes(
     Ok(())
 }
 
-// === Streaming (batched) output ===
-//
-// The collect-everything entry points above accumulate the whole document
-// into one RecordBatch per table; peak memory is proportional to the
-// dataset. The types below bound that: `BatchStream` steps the same
-// `handle_event` core one event at a time and emits a table's accumulated
-// rows whenever the table crosses a `BatchOptions` threshold. Flushing is
-// value-transparent (see `TableBuilder::flush`): concatenating a table's
-// streamed batches reproduces the collect-everything output exactly.
-
 // --- Row coordination ---
 //
 // `XmlToArrowConverter` is the per-parse state the event loop drives: which
@@ -2142,18 +2131,14 @@ impl XmlToArrowConverter {
             // An `index_of` link takes the ancestor's per-scope counter, which
             // is the same value a `<level>` column carries for that path.
             //
-            // Guarded on the builder's own (non-`Arc`) list rather than read
-            // unconditionally from the compiled plan: this runs once per
-            // finalized row, and reaching through `compiled` costs a pointer
-            // chase and a bounds check that every table using `levels` — that
-            // is, every configuration written before this release — would pay
-            // for an empty list. The overflow check rides along in the same
-            // pass for the same reason.
-            // One test on a precomputed bool, rather than an `Option` check and
-            // a `Vec` length on every finalized row. A table that declares no
-            // links skips the collection *and* the append, and reaches
-            // `end_row` through exactly the signature it used before links
-            // existed.
+            // Behind one test on a precomputed bool, because this runs per
+            // finalized row and a table that declares no links — that is,
+            // every configuration written before links existed — would
+            // otherwise pay an `Option` check, a `Vec` length and a reach
+            // through `compiled` to iterate nothing. Guarded, such a table
+            // skips the collection *and* the append, and reaches `end_row`
+            // through exactly the signature it had before. The overflow check
+            // rides along in the same pass for the same reason.
             if self.table_builders[table_idx].has_link_columns {
                 self.link_values_buffer.clear();
                 for spec in &link_plan(&self.compiled.link_plans, table_idx).links {
@@ -2284,10 +2269,10 @@ impl XmlToArrowConverter {
 
 // --- Value and row builders ---
 //
-// The bottom of the stack: one `FieldBuilder` per column holding an Arrow
-// builder and the bytes captured so far, grouped into a `TableBuilder` per
-// table. `append_current_value` is where captured text becomes a typed Arrow
-// value, and it runs once per field per row.
+// The bottom of the stack, in two layers. Field-level accumulation first: one
+// `FieldBuilder` per column, holding an Arrow builder and the bytes captured
+// so far, where `append_current_value` turns captured text into a typed Arrow
+// value once per field per row. Then table-level batching, which groups them.
 
 /// Enum-based array builder that avoids dynamic dispatch (`Box<dyn ArrayBuilder>`)
 /// in the hot path. Each variant holds the concrete Arrow builder type directly.
@@ -2879,9 +2864,10 @@ impl FieldBuilder {
     }
 }
 
-// === Table-level batching ===
-// A TableBuilder owns per-field builders plus index builders for nested levels.
-// It finalizes rows into a RecordBatch in a single, ordered pass.
+// --- Table-level batching ---
+//
+// A `TableBuilder` owns per-field builders plus index builders for nested
+// levels. It finalizes rows into a `RecordBatch` in a single, ordered pass.
 
 /// The subset of a `TableConfig` that finalization needs.
 ///
