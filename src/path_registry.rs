@@ -233,16 +233,47 @@ impl PathRegistry {
             node_info: vec![PathNodeInfo::default()], // Root info
         };
 
-        // Phase 1: register table paths
-        // The table boundary must be known so the parser can push/pop row scopes.
-        for (table_idx, table_config) in config.tables.iter().enumerate() {
-            let node_id = registry.get_or_create_path(&table_config.xml_path);
-            registry.node_info[node_id.index()].table_index = Some(table_idx);
-        }
+        // The order below is load-bearing, and each step says why in its own
+        // doc comment. In short: paths must exist before anything can be
+        // marked on them, so every step that *creates* nodes runs before every
+        // step that only *reads* the finished trie.
+        registry.register_table_paths(config);
+        registry.register_field_paths(config);
+        registry.mark_attribute_parents();
+        registry.register_stop_paths(config);
 
-        // Phase 2: register field paths
-        // We allow multiple fields to map to the same node (e.g., different
-        // tables that share a path shape).
+        // Does *any* table declare a row? One discriminant read per table, and
+        // it buys the right to skip an entire extra walk over the tables plus a
+        // per-table-node lookup for every config that declares none — which,
+        // for now, is nearly all of them.
+        //
+        // `Parser::new`'s fixed cost is the whole parse for small documents,
+        // and `parse_tiny` exists to measure exactly that: an unconditional
+        // second pass here showed up as ~1-2% on the two benchmarks that
+        // construct a parser inside the measured loop, while the two that
+        // reuse one were untouched. That split is what identified it.
+        let any_declared_row = config.tables.iter().any(|t| t.row.is_some());
+        if any_declared_row {
+            registry.mark_declared_rows(config);
+        }
+        registry.mark_inferred_rows(config, any_declared_row);
+
+        registry
+    }
+
+    /// Registers every table's `xml_path`, so the parser can push and pop row
+    /// scopes as those elements open and close.
+    fn register_table_paths(&mut self, config: &Config) {
+        for (table_idx, table_config) in config.tables.iter().enumerate() {
+            let node_id = self.get_or_create_path(&table_config.xml_path);
+            self.node_info[node_id.index()].table_index = Some(table_idx);
+        }
+    }
+
+    /// Registers every field's location. Several fields may land on one node —
+    /// two tables sharing a path shape, for instance — so a node carries a
+    /// list rather than a single index.
+    fn register_field_paths(&mut self, config: &Config) {
         for (table_idx, table_config) in config.tables.iter().enumerate() {
             for (field_idx, field_config) in table_config.fields.iter().enumerate() {
                 // Resolved, so a relative `path:` and the absolute spelling of
@@ -253,80 +284,80 @@ impl PathRegistry {
                 let Some(field_path) = resolve_field_path(table_config, field_config) else {
                     continue;
                 };
-                let node_id = registry.get_or_create_path(&field_path);
-                registry.node_info[node_id.index()]
+                let node_id = self.get_or_create_path(&field_path);
+                self.node_info[node_id.index()]
                     .field_indices
                     .push((table_idx, field_idx));
             }
         }
+    }
 
-        // Phase 3: mark nodes that have attribute children so the parser can
-        // skip attribute iteration for elements with no attribute fields.
-        for node_id_idx in 0..registry.children.len() {
-            registry.node_info[node_id_idx].has_attribute_children =
-                registry.children[node_id_idx].any_attribute_name();
+    /// Marks nodes that have at least one attribute child, so the parser can
+    /// skip attribute iteration entirely for elements with no attribute fields.
+    ///
+    /// Reads the trie rather than adding to it, so it must run after every
+    /// step that creates nodes.
+    fn mark_attribute_parents(&mut self) {
+        for node_idx in 0..self.children.len() {
+            self.node_info[node_idx].has_attribute_children =
+                self.children[node_idx].any_attribute_name();
         }
+    }
 
-        // Phase 4: register optional stop paths and mark them, so ending the
-        // parse is a bit test rather than a scan of the configured paths.
+    /// Registers `stop_at_paths` and flags them, so ending the parse early is
+    /// a bit test on the current node rather than a scan of configured paths.
+    fn register_stop_paths(&mut self, config: &Config) {
         for stop_path in &config.parser_options.stop_at_paths {
-            let node_id = registry.get_or_create_path(stop_path);
-            registry.node_info[node_id.index()].is_stop = true;
+            let node_id = self.get_or_create_path(stop_path);
+            self.node_info[node_id.index()].is_stop = true;
         }
+    }
 
-        // Does *any* table declare a row? One discriminant read per table, and
-        // it buys the right to skip an entire extra walk over the tables (5a)
-        // plus a per-table-node lookup (5b) for every config that declares
-        // none — which, for now, is nearly all of them.
-        //
-        // `Parser::new`'s fixed cost is the whole parse for small documents,
-        // and `parse_tiny` exists to measure exactly that: an unconditional
-        // second pass here showed up as ~1-2% on the two benchmarks that
-        // construct a parser inside the measured loop, while the two that
-        // reuse one were untouched. That split is what identified it.
-        let any_declared_row = config.tables.iter().any(|t| t.row.is_some());
-
-        // Phase 5a: mark declared row elements (`row:`). A declared row marks
-        // *itself*, where the inferred rule below marks each configured child
-        // of a table — the same bit, on a different node, which is what keeps
-        // v1 and v2 row semantics on one code path rather than two engines.
-        //
-        // Runs before 5b because resolving a row path can create trie nodes,
-        // and 5b's `children` iteration must see the finished trie.
-        if any_declared_row {
-            for table_config in &config.tables {
-                let Some(row_path) = table_config.row_path() else {
-                    continue;
-                };
-                let table_node = registry.get_or_create_path(&table_config.xml_path);
-                let row_node = registry.get_or_create_path(&row_path);
-                if row_node != table_node {
-                    registry.node_info[row_node.index()].ends_row = true;
-                }
+    /// Marks the row element of every table that declares one with `row:`.
+    ///
+    /// A declared row marks *itself*, where the inferred rule marks each
+    /// configured child of a table — the same bit on a different node, which
+    /// is what keeps v1 and v2 row semantics on one code path rather than two
+    /// engines.
+    ///
+    /// `row: "."` deliberately marks nothing: the row element *is* the table
+    /// element, so it has to finalize before its own scope is popped, which is
+    /// `end_table`'s job and is reached only when a table element closes.
+    /// Carrying it as a frame bit instead would have put 4 bytes on the stack
+    /// entry of every element in the document to serve a case that can only
+    /// arise on a table close.
+    ///
+    /// Must run before [`PathRegistry::mark_inferred_rows`]: resolving a row
+    /// path can create trie nodes, and that step iterates the finished trie.
+    fn mark_declared_rows(&mut self, config: &Config) {
+        for table_config in &config.tables {
+            let Some(row_path) = table_config.row_path() else {
+                continue;
+            };
+            let table_node = self.get_or_create_path(&table_config.xml_path);
+            let row_node = self.get_or_create_path(&row_path);
+            if row_node != table_node {
+                self.node_info[row_node.index()].ends_row = true;
             }
         }
-        // `row: "."` deliberately marks nothing above. The row element *is* the
-        // table element, so it has to finalize before its own scope is popped —
-        // which is `end_table`'s job, reached only when a table element closes.
-        // Carrying it as a frame bit instead would have put 4 bytes on the
-        // stack entry of every element in the document to serve a case that can
-        // only arise on a table close.
+    }
 
-        // Phase 5b: mark the nodes whose closing tag finalizes a row — every
-        // element child of a table node. See `PathNodeInfo::ends_row` for why
-        // this is exactly the rule the parser used to evaluate per event.
-        //
-        // Skipped for tables that declared a row: for those, phase 5a has
-        // already named the element, and marking the children too would
-        // finalize a row per child *as well*, which is the very behavior
-        // `row:` exists to replace.
-        //
-        // Must run *after* phase 4: a stop path can introduce nodes, and a node
-        // introduced under a table path delimits rows exactly like any other
-        // configured child. Marking before phase 4 would miss those and quietly
-        // change row counts for configs that combine the two.
-        for node_idx in 0..registry.children.len() {
-            let Some(table_idx) = registry.node_info[node_idx].table_index else {
+    /// Marks the nodes whose closing tag finalizes a row under the *inferred*
+    /// rule: every element child of a table node. See [`PathNodeInfo::ends_row`]
+    /// for why this is exactly the rule the parser used to evaluate per event.
+    ///
+    /// Skipped for tables that declared a row — those were named by
+    /// [`PathRegistry::mark_declared_rows`], and marking their children too
+    /// would finalize a row per child *as well*, which is the very behavior
+    /// `row:` exists to replace.
+    ///
+    /// Must run after [`PathRegistry::register_stop_paths`]: a stop path can
+    /// introduce nodes, and one introduced under a table path delimits rows
+    /// exactly like any other configured child. Marking earlier would miss
+    /// those and quietly change row counts for configs that combine the two.
+    fn mark_inferred_rows(&mut self, config: &Config, any_declared_row: bool) {
+        for node_idx in 0..self.children.len() {
+            let Some(table_idx) = self.node_info[node_idx].table_index else {
                 continue;
             };
             // Short-circuits to nothing when no table declared a row, leaving
@@ -335,20 +366,18 @@ impl PathRegistry {
                 continue;
             }
             // Move the child list aside rather than collecting it: marking goes
-            // through `registry`, which would otherwise stay borrowed for the
-            // whole loop. `NodeChildren::new()` is an empty `Vec`, so the swap
-            // costs no allocation — and this runs in `Parser::new`, whose fixed
-            // cost is the whole parse for anyone handling small documents.
-            let children = std::mem::replace(&mut registry.children[node_idx], NodeChildren::new());
+            // through `self`, which would otherwise stay borrowed for the whole
+            // loop. `NodeChildren::new()` is an empty `Vec`, so the swap costs
+            // no allocation — and this runs in `Parser::new`, whose fixed cost
+            // is the whole parse for anyone handling small documents.
+            let children = std::mem::replace(&mut self.children[node_idx], NodeChildren::new());
             for (name, child_id) in children.entries() {
                 if !name.starts_with(b"@") {
-                    registry.node_info[child_id.index()].ends_row = true;
+                    self.node_info[child_id.index()].ends_row = true;
                 }
             }
-            registry.children[node_idx] = children;
+            self.children[node_idx] = children;
         }
-
-        registry
     }
 
     /// Gets or creates a path in the trie, returning its node ID.
