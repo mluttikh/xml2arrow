@@ -45,6 +45,2250 @@ use crate::path_registry::{PathNodeId, PathNodeInfo, PathRegistry, PathTracker};
 
 // === Field-level accumulation ===
 
+// --- The parser: compiled configuration, and the entry points that use it ---
+//
+// Everything below is reached from `Parser`. It is first because it is what a
+// reader is looking for: the type you construct once and then hand documents
+// to, and the two ways to hand it one. `Compiled` is the state `Parser::new`
+// works out ahead of time so no parse has to.
+
+/// A reusable, pre-compiled parser for a single [`Config`].
+///
+/// Constructing a `Parser` does the *one-time* setup work — validating the
+/// config and compiling every configured XML path into an integer-indexed
+/// `PathRegistry` trie. That work is fixed cost (independent of document size)
+/// and, on a small document, can dominate the total parse time. Holding a
+/// `Parser` lets you pay it **once** and then parse many documents through the
+/// same compiled state — the intended pattern when processing a stream or
+/// directory of files that all share one schema.
+///
+/// The free functions [`parse_xml`] and [`parse_xml_slice`] are thin wrappers
+/// that build a throwaway `Parser` per call; reach for `Parser` directly
+/// whenever you parse more than one document with the same `Config`.
+///
+/// # Example
+///
+/// ```rust
+/// use xml2arrow::{Parser, config::{Config, TableConfig, FieldConfigBuilder, DType}};
+///
+/// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build().unwrap()];
+/// let config = Config::builder()
+///     .table(TableConfig::builder("items", "/data").fields(fields).build())
+///     .build()
+///     .unwrap();
+///
+/// // Compile once...
+/// let parser = Parser::new(&config).unwrap();
+/// // ...parse many.
+/// for xml in [b"<data><item><value>1</value></item></data>".as_slice(),
+///             b"<data><item><value>2</value></item></data>".as_slice()] {
+///     let batches = parser.parse_slice(xml).unwrap();
+///     // ... use batches
+/// }
+/// ```
+pub struct Parser {
+    /// The compiled state, shared rather than borrowed so that a stream can
+    /// *own* its parser: a `BatchStream` that borrowed one could never be
+    /// `'static`, which forces every FFI and async wrapper into a thread and a
+    /// channel to get around the lifetime. Cloning is a refcount bump, so one
+    /// compiled config can serve any number of concurrent streams.
+    inner: Arc<Compiled>,
+}
+
+/// Everything `Parser::new` computes once: immutable, `Sync`, and shared by
+/// every parse the parser serves.
+struct Compiled {
+    /// Owned copy of the configuration, retained so each parse can rebuild its
+    /// fresh `TableBuilder`s and re-apply the reader options.
+    config: Config,
+    /// The compiled path trie — the expensive artifact this type exists to reuse.
+    registry: PathRegistry,
+    /// Whether any configured field maps to an attribute. Cached so the hot
+    /// path can pick the attribute-free event loop without re-scanning config.
+    needs_attrs: bool,
+    /// Per-table compiled `links:` / `row_id:`, aligned with `config.tables`.
+    /// Empty entries for tables using `levels`, which keeps that path untouched.
+    link_plans: Vec<TableLinkPlan>,
+    /// Per-table output schemas (index columns + value columns), aligned with
+    /// `config.tables`. Computed once here so every batch a table emits —
+    /// streamed or collected — shares one `Arc<Schema>`, and so
+    /// [`Parser::schema`] can serve consumers (IPC writers, DataFusion
+    /// registration) before any document is parsed.
+    table_schemas: Vec<Arc<Schema>>,
+    /// Table names as shared strings, aligned with `config.tables`. Streamed
+    /// [`TableBatch`]es carry a clone; `Arc<str>` keeps that per-batch cost
+    /// to a refcount bump.
+    table_names: Vec<Arc<str>>,
+    /// Every field's resolved metadata — name, absolute path, transform and
+    /// value policy — stored flat in `config.tables` order: table 0's fields,
+    /// then table 1's, and so on.
+    ///
+    /// All of it is fixed by the config, yet `XmlToArrowConverter::new` rebuilds
+    /// a `FieldBuilder` per field of every table on *every* document. Computing
+    /// it here turns that per-parse work — layering policies over `defaults`
+    /// over a type default, resolving a relative path, and copying two strings
+    /// — into a clone of three refcounted handles and 32 bytes of `Option<f64>`.
+    ///
+    /// One flat `Vec` rather than a `Vec` per table, so compiling a config adds
+    /// a single allocation rather than one per table.
+    field_metas: Vec<FieldMeta>,
+}
+
+impl Clone for Parser {
+    /// A refcount bump — the compiled trie and schemas are shared, never copied.
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+/// Which ancestor counter a declared link reads, resolved to a table index at
+/// compile time so row finalization is an array index rather than a search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinkKind {
+    /// The ancestor's **global** row ordinal: a join key, never reset.
+    ParentId,
+    /// The ancestor's **per-scope** row counter: a positional ordinal, and by
+    /// construction the same number a `<level>` column would carry.
+    IndexOf,
+}
+
+#[derive(Debug, Clone)]
+struct LinkSpec {
+    kind: LinkKind,
+    /// Index into `config.tables` of the ancestor whose counter this reads.
+    ancestor_table_idx: usize,
+    column_name: String,
+}
+
+/// What `links:` and `row_id:` compile to for one table.
+///
+/// Empty for every table that uses `levels` (or neither), which is what keeps
+/// the legacy path exactly as it was.
+#[derive(Debug, Clone, Default)]
+struct TableLinkPlan {
+    /// Name of this table's own key column, when it materializes one.
+    row_id_column: Option<String>,
+    links: Vec<LinkSpec>,
+}
+
+/// The plan every table gets when the configuration declares no links at all.
+/// A `static` so `link_plan()` can hand out a reference without allocating.
+static EMPTY_LINK_PLAN: TableLinkPlan = TableLinkPlan {
+    row_id_column: None,
+    links: Vec::new(),
+};
+
+/// The compiled plan for one table, or the shared empty one when the
+/// configuration declared no links.
+fn link_plan(plans: &[TableLinkPlan], table_idx: usize) -> &TableLinkPlan {
+    plans.get(table_idx).unwrap_or(&EMPTY_LINK_PLAN)
+}
+
+/// Resolves every table's `links:` and `row_id:` into index-based specs.
+///
+/// Runs once in `Parser::new`, after validation has established that every
+/// referenced table exists and encloses its referent — so the lookups here
+/// cannot fail and the parse never searches by name.
+fn build_link_plans(config: &Config) -> Vec<TableLinkPlan> {
+    // Empty when nothing declares links or a key column — which is every
+    // configuration written before this release. Returning no plans at all,
+    // rather than one default per table, keeps `Parser::new` from allocating
+    // for a feature the config does not use; `link_plan()` serves a shared
+    // default to the callers that index it.
+    if config
+        .tables
+        .iter()
+        .all(|t| t.links.is_none() && t.row_id.is_none())
+    {
+        return Vec::new();
+    }
+
+    let index_of_table = |path: &str, scope: &str| {
+        config.tables.iter().position(|t| {
+            let other = t.link_scope_path();
+            paths_equal(&other, path) && !paths_equal(&other, scope)
+        })
+    };
+
+    let mut plans: Vec<TableLinkPlan> = vec![TableLinkPlan::default(); config.tables.len()];
+
+    for (table_idx, table) in config.tables.iter().enumerate() {
+        let scope = table.link_scope_path();
+        for link in table.links.iter().flatten() {
+            let Some(column_name) = link.column_name() else {
+                continue;
+            };
+            if let Some(parent) = link.parent.as_deref() {
+                let Some(parent_idx) = config.tables.iter().position(|t| t.name == parent) else {
+                    continue;
+                };
+                plans[table_idx].links.push(LinkSpec {
+                    kind: LinkKind::ParentId,
+                    ancestor_table_idx: parent_idx,
+                    column_name,
+                });
+                // A referenced table materializes its own key, so both sides
+                // of the join exist. Tables nobody references pay nothing,
+                // which is why this is driven by the links rather than
+                // switched on globally.
+                if plans[parent_idx].row_id_column.is_none() {
+                    plans[parent_idx].row_id_column =
+                        Some(default_row_id_name(&config.tables[parent_idx]));
+                }
+            } else if let Some(index_of) = link.index_of.as_deref()
+                && let Some(ancestor_idx) = index_of_table(index_of, &scope)
+            {
+                plans[table_idx].links.push(LinkSpec {
+                    kind: LinkKind::IndexOf,
+                    ancestor_table_idx: ancestor_idx,
+                    column_name,
+                });
+            }
+        }
+    }
+
+    // `row_id: false` suppresses the column even when referenced; `row_id: true`
+    // or a name forces it on for a table nobody references.
+    for (plan, table) in plans.iter_mut().zip(&config.tables) {
+        match table.row_id.as_ref() {
+            Some(RowId::Enabled(false)) => plan.row_id_column = None,
+            Some(RowId::Enabled(true)) => {
+                plan.row_id_column.get_or_insert_with(|| "_id".to_string());
+            }
+            Some(RowId::Named(name)) => plan.row_id_column = Some(name.clone()),
+            None => {}
+        }
+    }
+    plans
+}
+
+/// The default key-column name for a table: `_id`.
+fn default_row_id_name(_table: &TableConfig) -> String {
+    "_id".to_string()
+}
+
+/// Builds a table's output schema exactly as its batches are laid out: the
+/// table's own key column when it has one, then one index column per `levels`
+/// entry (named `<level>`, `UInt32`) or per declared link (`UInt64` for a
+/// parent key, `UInt32` for an ordinal), then the configured fields in order.
+fn build_table_schema(table_config: &TableConfig, plan: &TableLinkPlan) -> Schema {
+    // Exact, not `+ 1` for a key column most tables do not have: an
+    // over-allocated `Vec` leaves `len != capacity`, and this runs once per
+    // table per `Parser::new`, whose fixed cost is the whole parse for a small
+    // document.
+    let mut fields = Vec::with_capacity(
+        usize::from(plan.row_id_column.is_some())
+            + table_config.levels.len()
+            + plan.links.len()
+            + table_config.fields.len(),
+    );
+    if let Some(row_id) = &plan.row_id_column {
+        fields.push(Field::new(row_id, DataType::UInt64, false));
+    }
+    for level in &table_config.levels {
+        fields.push(Field::new(format!("<{level}>"), DataType::UInt32, false));
+    }
+    for link in &plan.links {
+        let dtype = match link.kind {
+            LinkKind::ParentId => DataType::UInt64,
+            LinkKind::IndexOf => DataType::UInt32,
+        };
+        fields.push(Field::new(&link.column_name, dtype, false));
+    }
+    for fc in &table_config.fields {
+        fields.push(Field::new(
+            &fc.name,
+            fc.data_type.as_arrow_type(),
+            fc.nullable,
+        ));
+    }
+    Schema::new(fields)
+}
+
+impl Parser {
+    /// Compiles `config` into a reusable parser, performing all one-time setup.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if configuration validation fails (e.g. an unsupported
+    /// scale/offset on a non-numeric field).
+    pub fn new(config: &Config) -> Result<Self> {
+        // Validate field configurations early to catch unsupported scale/offset.
+        config.validate()?;
+
+        // Build the path registry for efficient lookups — the work we want to
+        // amortize across every document parsed through this `Parser`.
+        let registry = PathRegistry::from_config(config);
+
+        // Links resolve to table indices once, so row finalization indexes an
+        // array instead of searching by name.
+        let link_plans = build_link_plans(config);
+        let table_schemas = config
+            .tables
+            .iter()
+            .enumerate()
+            .map(|(idx, tc)| Arc::new(build_table_schema(tc, link_plan(&link_plans, idx))))
+            .collect();
+        let table_names = config
+            .tables
+            .iter()
+            .map(|tc| Arc::from(tc.name.as_str()))
+            .collect();
+        let defaults = config.defaults.as_ref();
+        // `version: 2` opts into the value defaults 1.0 will make mandatory.
+        // Validation has already established the config is fully migrated, so
+        // this is the only place the version reaches the parser at all.
+        let v2_defaults = config.version == Some(2);
+        let field_metas = config
+            .tables
+            .iter()
+            .flat_map(|tc| tc.fields.iter().map(move |fc| (tc, fc)))
+            .map(|(tc, fc)| {
+                FieldMeta::from_config(tc, fc, &ResolvedPolicy::resolve(fc, defaults, v2_defaults))
+            })
+            .collect();
+
+        Ok(Self {
+            inner: Arc::new(Compiled {
+                config: config.clone(),
+                registry,
+                needs_attrs: config.requires_attribute_parsing(),
+                link_plans,
+                table_schemas,
+                table_names,
+                field_metas,
+            }),
+        })
+    }
+
+    /// Returns advisory findings about this parser's configuration — configs
+    /// that are valid but whose row semantics or value handling commonly
+    /// surprise. See [`Lint`] for what is checked.
+    ///
+    /// Hosts are expected to log these; the library never prints. Lints are
+    /// advisory in every release they appear in and never change parsing
+    /// behavior.
+    ///
+    /// Computed on demand rather than cached in [`Parser::new`]: `Parser::new`'s
+    /// fixed cost dominates parses of small documents, and callers typically
+    /// want this exactly once, at startup.
+    ///
+    /// ```rust
+    /// # use xml2arrow::{Parser, config_from_yaml};
+    /// # let config = config_from_yaml!(r#"
+    /// # tables:
+    /// #   - name: items
+    /// #     xml_path: /data
+    /// #     levels: []
+    /// #     fields: [{name: v, xml_path: /data/item/v, data_type: Int32}]
+    /// # "#);
+    /// let parser = Parser::new(&config)?;
+    /// for lint in parser.warnings() {
+    ///     eprintln!("xml2arrow config warning: {lint}");
+    /// }
+    /// # Ok::<(), xml2arrow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn warnings(&self) -> Vec<Lint> {
+        self.inner.config.lint()
+    }
+
+    /// Returns the output schema of `table` without parsing any document.
+    ///
+    /// The schema is fully determined by the [`Config`]: one non-nullable
+    /// `UInt32` index column per `levels` entry (named `<level>`), followed by
+    /// the configured fields. Every batch the table produces — via
+    /// [`Parser::parse`] or the streaming entry points — shares this exact
+    /// `Arc<Schema>`.
+    ///
+    /// Returns `None` for unknown table names and for *structural* tables
+    /// (empty `fields`), which never appear in any output.
+    #[must_use]
+    pub fn schema(&self, table: &str) -> Option<SchemaRef> {
+        self.inner
+            .config
+            .tables
+            .iter()
+            .position(|tc| tc.name == table && !tc.fields.is_empty())
+            .map(|idx| self.inner.table_schemas[idx].clone())
+    }
+
+    /// Returns the schema of the config's unique output table — the table
+    /// that [`Parser::parse_single_table`] streams.
+    ///
+    /// Consumers wiring the single-table stream into schema-first sinks
+    /// (Parquet writers, Arrow C-stream exports for Python) need this before
+    /// constructing the reader; exposing it here keeps the "exactly one
+    /// output table" rule and its error in one place.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfig`] when the config does not have exactly
+    /// one table with fields, exactly like [`Parser::parse_single_table`].
+    pub fn single_table_schema(&self) -> Result<SchemaRef> {
+        Ok(self.inner.table_schemas[self.single_output_table_index()?].clone())
+    }
+
+    /// Parses XML from a streaming reader (e.g. a `File`) into Arrow batches.
+    ///
+    /// Use [`Parser::parse_slice`] instead when the whole document is already
+    /// in memory — it avoids quick-xml's per-event buffer copy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if XML parsing encounters invalid data, value
+    /// conversion fails, or Arrow `RecordBatch` creation fails.
+    pub fn parse(&self, reader: impl BufRead) -> Result<IndexMap<String, RecordBatch>> {
+        let mut reader = Reader::from_reader(reader);
+        self.configure_reader(&mut reader);
+        let needs_attrs = self.inner.needs_attrs;
+        self.run_parse(&mut reader, |r, t, c| {
+            if needs_attrs {
+                process_xml_events::<_, true>(r, t, c)
+            } else {
+                process_xml_events::<_, false>(r, t, c)
+            }
+        })
+    }
+
+    /// Parses XML from an in-memory byte slice into Arrow batches (zero-copy).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if XML parsing encounters invalid data, value
+    /// conversion fails, or Arrow `RecordBatch` creation fails.
+    pub fn parse_slice(&self, xml: &[u8]) -> Result<IndexMap<String, RecordBatch>> {
+        let mut reader = Reader::from_reader(xml);
+        self.configure_reader(&mut reader);
+        let needs_attrs = self.inner.needs_attrs;
+        self.run_parse(&mut reader, |r, t, c| {
+            if needs_attrs {
+                process_xml_events_slice::<true>(r, t, c)
+            } else {
+                process_xml_events_slice::<false>(r, t, c)
+            }
+        })
+    }
+
+    /// Parses XML from a streaming reader, yielding Arrow batches
+    /// incrementally with bounded memory.
+    ///
+    /// This is the entry point for documents too large to hold in memory as
+    /// one set of Arrow tables (multi-GB exports, archives, log or catalogue
+    /// extracts). The returned [`BatchStream`] is an
+    /// `Iterator<Item = Result<TableBatch>>`: each item names the table it
+    /// belongs to and carries a batch of its rows. A table's batch is emitted
+    /// whenever it crosses one of the [`BatchOptions`] thresholds, and the
+    /// remainder is drained when the document ends (or a
+    /// `stop_at_paths` match stops it early).
+    ///
+    /// Guarantees:
+    ///
+    /// - **Value transparency**: concatenating a table's batches in yield
+    ///   order (e.g. `arrow::compute::concat_batches`) produces exactly the
+    ///   `RecordBatch` that [`Parser::parse`] would have returned for it —
+    ///   including the `<level>` index columns.
+    /// - Batches of one table share one `Arc<Schema>`, equal to
+    ///   [`Parser::schema`], and always contain at least one row (tables with
+    ///   no rows yield nothing — use [`Parser::schema`] when a sink needs a
+    ///   schema up front).
+    /// - Within a table, rows appear in document order across batches. No
+    ///   ordering promise across tables; note that a parent table's row
+    ///   always finalizes *after* its children's rows (its element closes
+    ///   last), so a child batch can reference a parent row that arrives in
+    ///   a later batch of the parent table.
+    /// - On error the stream yields the `Err` once and then fuses;
+    ///   already-yielded batches remain valid.
+    ///
+    /// The `<level>` caveat from the non-streaming API carries over
+    /// unchanged: index values are per-scope ordinals, so incremental joins
+    /// must match on all level columns (see the `levels` documentation).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use xml2arrow::{BatchOptions, Parser, config::{Config, TableConfig, FieldConfigBuilder, DType}};
+    ///
+    /// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build().unwrap()];
+    /// let config = Config::builder()
+    ///     .table(TableConfig::builder("items", "/data").fields(fields).build())
+    ///     .build()
+    ///     .unwrap();
+    /// let parser = Parser::new(&config).unwrap();
+    ///
+    /// let xml: &[u8] = b"<data><item><value>1</value></item><item><value>2</value></item></data>";
+    /// let options = BatchOptions::default().with_max_rows_per_batch(1);
+    /// for item in parser.parse_batches(xml, options) {
+    ///     let batch = item.unwrap();
+    ///     assert_eq!(&*batch.table, "items");
+    ///     assert_eq!(batch.batch.num_rows(), 1);
+    /// }
+    /// ```
+    pub fn parse_batches<R: BufRead>(
+        &self,
+        reader: R,
+        options: BatchOptions,
+    ) -> BatchStream<'_, ReaderSource<R>> {
+        let mut reader = Reader::from_reader(reader);
+        self.configure_reader(&mut reader);
+        BatchStream::new(
+            self.clone(),
+            ReaderSource {
+                reader,
+                buf: Vec::with_capacity(4096),
+            },
+            options,
+        )
+    }
+
+    /// Zero-copy variant of [`Parser::parse_batches`] for XML already in
+    /// memory (or memory-mapped): events borrow directly from the slice, no
+    /// per-event buffer copy. Combined with a memory-mapped file this parses
+    /// arbitrarily large documents with bounded heap — the OS pages the
+    /// input, the batch thresholds bound the builders.
+    pub fn parse_batches_slice<'a>(
+        &'a self,
+        xml: &'a [u8],
+        options: BatchOptions,
+    ) -> BatchStream<'a, SliceSource<'a>> {
+        let mut reader = Reader::from_reader(xml);
+        self.configure_reader(&mut reader);
+        BatchStream::new(self.clone(), SliceSource { reader }, options)
+    }
+
+    /// Streams a reader into batches through a parser the stream **owns**,
+    /// yielding a `BatchStream<'static, _>` when the reader is `'static`.
+    ///
+    /// [`Parser::parse_batches`] borrows the parser, so its stream cannot
+    /// outlive the binding it came from. That is fine inside one function and
+    /// awkward everywhere else: an FFI wrapper, a struct field, or a thread
+    /// needs a value that stands alone, and the usual workaround — a producer
+    /// thread pushing batches down a channel — buys ownership at the cost of a
+    /// thread and a synchronisation protocol.
+    ///
+    /// Since a [`Parser`] is a handle over shared compiled state, taking it by
+    /// value costs a refcount bump. Callers who keep a parser around clone it:
+    ///
+    /// ```rust
+    /// # use xml2arrow::{BatchOptions, Parser, config_from_yaml};
+    /// # let config = config_from_yaml!(r#"
+    /// # tables:
+    /// #   - name: items
+    /// #     xml_path: /data
+    /// #     levels: []
+    /// #     fields: [{name: v, xml_path: /data/item/v, data_type: Int32}]
+    /// # "#);
+    /// let parser = Parser::new(&config)?;
+    /// let xml: &'static [u8] = b"<data><item><v>1</v></item></data>";
+    ///
+    /// // Owns its parser, so it can be returned, stored, or sent to a thread.
+    /// let stream = parser.clone().into_batches(xml, BatchOptions::default());
+    /// let handle = std::thread::spawn(move || stream.count());
+    /// assert_eq!(handle.join().unwrap(), 1);
+    ///
+    /// // The parser is still usable here.
+    /// let _ = parser.parse_slice(xml)?;
+    /// # Ok::<(), xml2arrow::Error>(())
+    /// ```
+    pub fn into_batches<R: BufRead>(
+        self,
+        reader: R,
+        options: BatchOptions,
+    ) -> BatchStream<'static, ReaderSource<R>> {
+        let mut reader = Reader::from_reader(reader);
+        self.configure_reader(&mut reader);
+        BatchStream::new(
+            self,
+            ReaderSource {
+                reader,
+                buf: Vec::with_capacity(4096),
+            },
+            options,
+        )
+    }
+
+    /// Owned counterpart of [`Parser::parse_single_table`]: a
+    /// [`RecordBatchReader`] that carries its own parser.
+    ///
+    /// This is the shape schema-first consumers want — `ArrowWriter`,
+    /// DataFusion, or a pyarrow C-stream export all take a reader and expect to
+    /// own it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfig`] when the config does not have exactly
+    /// one table with fields, exactly like [`Parser::parse_single_table`].
+    pub fn into_single_table<R: BufRead>(
+        self,
+        reader: R,
+        options: BatchOptions,
+    ) -> Result<SingleTableReader<'static, ReaderSource<R>>> {
+        let table_idx = self.single_output_table_index()?;
+        let schema = self.inner.table_schemas[table_idx].clone();
+        Ok(SingleTableReader {
+            schema,
+            stream: self.into_batches(reader, options),
+        })
+    }
+
+    /// Callback-style wrapper over [`Parser::parse_batches`]: drives the
+    /// stream to completion, handing each batch to `sink`. A `sink` error
+    /// aborts the parse and is returned as-is.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error the underlying stream yields (XML parsing,
+    /// value conversion, or `RecordBatch` creation), or the first error
+    /// returned by `sink` — whichever occurs first aborts the parse.
+    #[deprecated(
+        since = "0.20.0",
+        note = "iterate `parse_batches` directly — `for item in parser.parse_batches(reader, options) { let TableBatch { table, batch } = item?; }` is the same code without a second entry point"
+    )]
+    pub fn parse_streaming<R, F>(&self, reader: R, options: BatchOptions, mut sink: F) -> Result<()>
+    where
+        R: BufRead,
+        F: FnMut(&str, RecordBatch) -> Result<()>,
+    {
+        for item in self.parse_batches(reader, options) {
+            let TableBatch { table, batch } = item?;
+            sink(&table, batch)?;
+        }
+        Ok(())
+    }
+
+    /// Streams the single output table of this config as an
+    /// [`arrow::array::RecordBatchReader`].
+    ///
+    /// Many configs — and virtually all "huge document" ones — define exactly
+    /// one table with fields. For those, this adapter exposes the parse as
+    /// the Arrow ecosystem's standard reader abstraction, directly consumable
+    /// by `parquet::arrow::ArrowWriter`, DataFusion, or (through the C stream
+    /// interface) pyarrow.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfig`] when the config does not have exactly
+    /// one table with fields (structural tables don't count — they produce no
+    /// output). Use [`Parser::parse_batches`] for multi-table configs.
+    pub fn parse_single_table<R: BufRead>(
+        &self,
+        reader: R,
+        options: BatchOptions,
+    ) -> Result<SingleTableReader<'_, ReaderSource<R>>> {
+        let table_idx = self.single_output_table_index()?;
+        Ok(SingleTableReader {
+            schema: self.inner.table_schemas[table_idx].clone(),
+            stream: self.parse_batches(reader, options),
+        })
+    }
+
+    /// Zero-copy variant of [`Parser::parse_single_table`] for in-memory (or
+    /// memory-mapped) XML.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfig`] when the config does not have exactly
+    /// one table with fields, exactly like [`Parser::parse_single_table`].
+    pub fn parse_single_table_slice<'a>(
+        &'a self,
+        xml: &'a [u8],
+        options: BatchOptions,
+    ) -> Result<SingleTableReader<'a, SliceSource<'a>>> {
+        let table_idx = self.single_output_table_index()?;
+        Ok(SingleTableReader {
+            schema: self.inner.table_schemas[table_idx].clone(),
+            stream: self.parse_batches_slice(xml, options),
+        })
+    }
+
+    /// Index of the unique output table (non-empty `fields`), or the
+    /// `SingleTableRequired` config error.
+    fn single_output_table_index(&self) -> Result<usize> {
+        let mut output_tables = self
+            .inner
+            .config
+            .tables
+            .iter()
+            .enumerate()
+            .filter(|(_, tc)| !tc.fields.is_empty())
+            .map(|(idx, _)| idx);
+        let first = output_tables.next();
+        match (first, output_tables.next()) {
+            (Some(idx), None) => Ok(idx),
+            _ => Err(Error::InvalidConfig {
+                reason: ConfigIssue::SingleTableRequired {
+                    // Either no output table at all, or the two found plus
+                    // whatever the iterator still holds.
+                    output_tables: first.map_or(0, |_| 2 + output_tables.count()),
+                },
+            }),
+        }
+    }
+
+    /// Applies `ParserOptions` to the shared `quick_xml::Reader` config.
+    ///
+    /// Both entry points configure the reader identically; isolating that
+    /// here means each option lives in one place. `validate_closing_tags =
+    /// false` is the per-event optimization described in
+    /// `ParserOptions::validate_closing_tags`.
+    fn configure_reader<R>(&self, reader: &mut Reader<R>) {
+        let rc = reader.config_mut();
+        if self.inner.config.parser_options.trim_text {
+            rc.trim_text(true);
+        }
+        if !self.inner.config.parser_options.validate_closing_tags {
+            rc.check_end_names = false;
+        }
+    }
+
+    /// Shared parser driver used by both `parse` and `parse_slice`.
+    ///
+    /// The two entry points differ only in how they obtain events from their
+    /// reader and whether attribute parsing is required; everything else —
+    /// building the fresh per-parse converter, root-table priming, and
+    /// finalization — is identical. Accepting the event loop as a closure lets
+    /// each caller stay specialized (buffered vs zero-copy, attrs on vs off)
+    /// without duplicating the surrounding orchestration.
+    fn run_parse<R, F>(
+        &self,
+        reader: &mut Reader<R>,
+        run_events: F,
+    ) -> Result<IndexMap<String, RecordBatch>>
+    where
+        F: FnOnce(&mut Reader<R>, &mut PathTracker, &mut XmlToArrowConverter) -> Result<()>,
+    {
+        // usize::MAX thresholds: collect everything, never trigger a flush
+        // (root-table priming happens inside the converter constructor).
+        let mut xml_to_arrow_converter = XmlToArrowConverter::new(self, usize::MAX, usize::MAX);
+        let mut path_tracker = PathTracker::new(&self.inner.registry);
+
+        // The event loop aborts on the first error with the reader still
+        // parked at the failing event, so annotating the byte offset *here* —
+        // once per parse, not per event — loses no precision and keeps
+        // position work entirely out of the loop.
+        run_events(reader, &mut path_tracker, &mut xml_to_arrow_converter)
+            .map_err(|e| e.with_position(reader.buffer_position()))?;
+
+        xml_to_arrow_converter.finish()
+    }
+}
+
+/// Parses XML data from a reader into Arrow record batches based on a provided configuration.
+///
+/// This is a convenience wrapper that compiles `config` into a [`Parser`] and
+/// parses a single document. When parsing **many** documents with the same
+/// `Config`, construct a [`Parser`] once and reuse it — that amortizes the
+/// one-time path-compilation cost this wrapper pays on every call.
+///
+/// This function takes a reader implementing the `BufRead` trait (e.g., a
+/// `BufReader<File>` or a `&[u8]` slice) and a `Config` struct that defines the
+/// structure of the XML data and how it should be mapped to Arrow tables.
+///
+/// # Arguments
+///
+/// * `reader`: A reader object that provides access to the XML data.
+/// * `config`: A `Config` struct that specifies the tables, fields, and data types to extract from the XML.
+///
+/// # Returns
+///
+/// A `Result` containing:
+///
+/// *   `Ok(IndexMap<String, RecordBatch>)`: An `IndexMap` where keys are the table names (as defined
+///     in the config) and values are the corresponding Arrow `RecordBatch` objects.
+/// *   `Err(Error)`: An `Error` value if any error occurs during parsing, configuration, or Arrow table creation.
+///
+/// # Errors
+///
+/// Returns an error if configuration validation fails, XML parsing encounters invalid
+/// data, value conversion fails, or Arrow `RecordBatch` creation fails.
+///
+/// # Example
+///
+/// ```rust
+/// use xml2arrow::{Parser, config::{Config, TableConfig, FieldConfigBuilder, DType}};
+///
+/// let xml_content = r#"<data><item><value>123</value></item></data>"#;
+/// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build()?];
+/// let config = Config::builder()
+///     .table(TableConfig::builder("items", "/data").fields(fields).build())
+///     .build()?;
+/// let record_batches = Parser::new(&config)?.parse(xml_content.as_bytes())?;
+/// // ... use record_batches
+/// # Ok::<(), xml2arrow::Error>(())
+/// ```
+#[deprecated(
+    since = "0.20.0",
+    note = "construct a `Parser` and reuse it: `Parser::new(&config)?.parse(reader)`. The free function hides the one-time path-compilation cost, which it pays on every call"
+)]
+pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<String, RecordBatch>> {
+    Parser::new(config)?.parse(reader)
+}
+
+/// Parses XML data from an in-memory byte slice into Arrow record batches.
+///
+/// This is the zero-copy variant of [`parse_xml`]. When the XML data is already
+/// in memory, this function avoids per-event buffer copies by using quick-xml's
+/// slice reader, which returns events that borrow directly from the input.
+/// For streaming sources (files, network), use [`parse_xml`] instead.
+///
+/// Like [`parse_xml`], this compiles a throwaway [`Parser`] per call; reuse a
+/// [`Parser`] when parsing many slices with the same `Config`.
+///
+/// # Arguments
+///
+/// * `xml`: A byte slice containing the XML data.
+/// * `config`: A `Config` struct that specifies the tables, fields, and data types to extract.
+///
+/// # Returns
+///
+/// An `IndexMap<String, RecordBatch>` where keys are table names and values are Arrow batches.
+///
+/// # Errors
+///
+/// Returns an error if configuration validation fails, XML parsing encounters invalid
+/// data, value conversion fails, or Arrow `RecordBatch` creation fails.
+///
+/// # Example
+///
+/// ```rust
+/// use xml2arrow::{Parser, config::{Config, TableConfig, FieldConfigBuilder, DType}};
+///
+/// let xml = b"<data><item><value>123</value></item></data>";
+/// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build()?];
+/// let config = Config::builder()
+///     .table(TableConfig::builder("items", "/data").fields(fields).build())
+///     .build()?;
+/// let record_batches = Parser::new(&config)?.parse_slice(xml)?;
+/// # Ok::<(), xml2arrow::Error>(())
+/// ```
+#[deprecated(
+    since = "0.20.0",
+    note = "construct a `Parser` and reuse it: `Parser::new(&config)?.parse_slice(xml)`. The free function hides the one-time path-compilation cost, which it pays on every call"
+)]
+pub fn parse_xml_slice(xml: &[u8], config: &Config) -> Result<IndexMap<String, RecordBatch>> {
+    Parser::new(config)?.parse_slice(xml)
+}
+
+// --- Streaming entry points ---
+//
+// The same parse, yielded batch by batch instead of collected. `BatchStream`
+// drives the identical event loop below; the difference is only when a table
+// hands its accumulated rows back.
+
+/// Flush thresholds for the streaming entry points ([`Parser::parse_batches`]
+/// and friends). A table's batch is emitted as soon as *either* threshold is
+/// reached. Both are checked at row boundaries only, so a batch can exceed
+/// `max_bytes_per_batch` by at most one row's bytes.
+///
+/// Marked `#[non_exhaustive]`; construct via `Default` and adjust fields, or
+/// chain the `with_*` setters:
+///
+/// ```rust
+/// use xml2arrow::BatchOptions;
+/// let options = BatchOptions::default().with_max_rows_per_batch(1024);
+/// ```
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct BatchOptions {
+    /// Emit a table's batch once it holds this many rows. Defaults to 8192
+    /// (the de-facto Arrow ecosystem working batch size). `0` is treated as
+    /// `1` — a yielded batch always has at least one row.
+    pub max_rows_per_batch: usize,
+    /// Also emit once a table has accumulated this many *raw value bytes*
+    /// (summed across its fields), whichever threshold is hit first. Defaults
+    /// to 128 MiB.
+    ///
+    /// This counts only the bytes of the parsed values, not the fixed per-row
+    /// overhead every column carries (Arrow offset buffers, validity bitmaps,
+    /// fixed-width value and `<level>` FK columns). It is therefore *not* an
+    /// exact cap on builder memory and under-counts it for short, empty, or
+    /// null values: treat [`Self::max_rows_per_batch`] as the real bound on
+    /// how large a batch's builders can grow, and this as a secondary guard
+    /// that keeps text-heavy batches from letting a `StringBuilder`'s
+    /// i32-offset 2 GiB ceiling be reached across many rows.
+    ///
+    /// Values above an internal ceiling (~1 GiB) are clamped down to it. The
+    /// ceiling sits below Arrow's 2 GiB per-`Utf8`-column offset limit rather
+    /// than at it, because the budget is only checked *after* a row has been
+    /// appended: the reserved headroom is what keeps the final row before a
+    /// flush from overflowing a column. A single row whose values exceed that
+    /// headroom (most plainly: one ≥ 1 GiB value) is unsupported and will still
+    /// panic on append, exactly as on the non-streaming path.
+    pub max_bytes_per_batch: usize,
+}
+
+impl Default for BatchOptions {
+    fn default() -> Self {
+        Self {
+            max_rows_per_batch: 8192,
+            max_bytes_per_batch: 128 * 1024 * 1024,
+        }
+    }
+}
+
+impl BatchOptions {
+    /// Returns `self` with `max_rows_per_batch` replaced.
+    #[must_use]
+    pub fn with_max_rows_per_batch(mut self, rows: usize) -> Self {
+        self.max_rows_per_batch = rows;
+        self
+    }
+
+    /// Returns `self` with `max_bytes_per_batch` replaced.
+    #[must_use]
+    pub fn with_max_bytes_per_batch(mut self, bytes: usize) -> Self {
+        self.max_bytes_per_batch = bytes;
+        self
+    }
+}
+
+/// One streamed batch: the table it belongs to and a `RecordBatch` of its
+/// rows. Yielded by [`BatchStream`].
+///
+/// Destructuring is the intended way to consume one:
+/// `let TableBatch { table, batch } = item?;`
+// Deliberately NOT `#[non_exhaustive]`, unlike `BatchOptions`. The two face
+// opposite directions: callers *construct* `BatchOptions` (where the attribute
+// earns its keep), but only ever *destructure* this — where it would cost every
+// caller a `..` in the pattern, permanently, to buy the ability to add a field.
+// Pre-1.0 that purchase is free anyway: every 0.x minor bump is already a
+// breaking change under Cargo's semver rules, so a field can be added in a
+// future 0.x. Revisit at the 1.0 boundary, when the field set is settled.
+#[derive(Debug, Clone)]
+pub struct TableBatch {
+    /// The configured table name. `Arc<str>`: all batches of one table share
+    /// the allocation, cloning is a refcount bump.
+    pub table: Arc<str>,
+    /// The rows accumulated since this table's previous batch.
+    pub batch: RecordBatch,
+}
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// A source of XML events for [`BatchStream`] — the streaming counterpart of
+/// the buffered/zero-copy split in the collect-everything entry points.
+///
+/// Sealed: implemented only by [`ReaderSource`] (buffered, any `BufRead`) and
+/// [`SliceSource`] (zero-copy, in-memory slice). The trait exists so the
+/// streaming machinery is written once; its methods are an internal detail.
+pub trait EventSource: sealed::Sealed {
+    #[doc(hidden)]
+    fn read_event(&mut self) -> std::result::Result<Event<'_>, quick_xml::Error>;
+    #[doc(hidden)]
+    fn decoder(&self) -> Decoder;
+    #[doc(hidden)]
+    fn buffer_position(&self) -> u64;
+}
+
+/// Buffered [`EventSource`] over any `BufRead` (files, sockets,
+/// decompression adapters). Each event is copied into a reusable buffer —
+/// required for streaming readers, same trade-off as [`Parser::parse`].
+pub struct ReaderSource<R: BufRead> {
+    reader: Reader<R>,
+    buf: Vec<u8>,
+}
+
+impl<R: BufRead> sealed::Sealed for ReaderSource<R> {}
+
+impl<R: BufRead> EventSource for ReaderSource<R> {
+    fn read_event(&mut self) -> std::result::Result<Event<'_>, quick_xml::Error> {
+        self.buf.clear();
+        self.reader.read_event_into(&mut self.buf)
+    }
+
+    fn decoder(&self) -> Decoder {
+        self.reader.decoder()
+    }
+
+    fn buffer_position(&self) -> u64 {
+        self.reader.buffer_position()
+    }
+}
+
+/// Zero-copy [`EventSource`] over an in-memory byte slice; events borrow
+/// directly from the input, same trade-off as [`Parser::parse_slice`].
+pub struct SliceSource<'x> {
+    reader: Reader<&'x [u8]>,
+}
+
+impl sealed::Sealed for SliceSource<'_> {}
+
+impl EventSource for SliceSource<'_> {
+    fn read_event(&mut self) -> std::result::Result<Event<'_>, quick_xml::Error> {
+        self.reader.read_event()
+    }
+
+    fn decoder(&self) -> Decoder {
+        self.reader.decoder()
+    }
+
+    fn buffer_position(&self) -> u64 {
+        self.reader.buffer_position()
+    }
+}
+
+/// Where the streaming loop is in its lifecycle.
+#[derive(Clone, Copy, Debug)]
+enum StreamState {
+    /// Reading events; batches are emitted on threshold crossings.
+    Running,
+    /// Input exhausted (EOF or a stop-path match). Emitting each table's
+    /// remaining rows in config order, resuming at `next_table`.
+    Draining { next_table: usize },
+    /// Everything emitted, or an error was yielded. Only `None` from here.
+    Done,
+}
+
+/// Incremental XML → Arrow parse: an iterator of [`TableBatch`]es with
+/// bounded memory.
+///
+/// Created by [`Parser::parse_batches`] / [`Parser::parse_batches_slice`], or
+/// by [`Parser::into_batches`] when the stream needs to outlive the binding the
+/// parser is in; see [`Parser::parse_batches`] for the yielded guarantees.
+///
+/// The stream holds its own handle on the compiled parser, so one [`Parser`]
+/// can serve any number of concurrent streams and none of them keeps the
+/// original binding alive.
+///
+/// The iterator is fused: after `None` — or after yielding an `Err` — it
+/// only returns `None`.
+///
+/// # An error invalidates the batches already yielded
+///
+/// Because batches are handed out as they fill, a failure detected later in
+/// the document — a malformed value, or an
+/// [`Error::TruncatedInput`](crate::errors::Error) raised at EOF — arrives
+/// *after* the consumer already holds earlier batches. Those batches are not
+/// wrong in themselves, but they are an incomplete view of the document.
+///
+/// Treat any `Err` from this iterator as invalidating the whole stream, not as
+/// one bad batch to skip: discard what you have accumulated, or stage it
+/// somewhere you can roll back. The collect-everything entry points
+/// ([`Parser::parse`], [`Parser::parse_slice`]) do not have this problem —
+/// they return `Err` and nothing else.
+// `Iterator`'s own `#[must_use]` does not carry over to a concrete named type,
+// so without this `parser.parse_batches(reader, options);` compiles and parses
+// nothing at all — silently, since the work is entirely lazy.
+#[must_use = "a BatchStream is lazy — dropping it without iterating parses nothing"]
+pub struct BatchStream<'p, S> {
+    /// Owned, so the stream can outlive the binding it was created from. The
+    /// `'p` parameter is retained for source compatibility and no longer
+    /// reflects a real borrow — see `_parser_lifetime`.
+    parser: Parser,
+    source: S,
+    /// Copy of the reader's decoder, read once — the encoding cannot change
+    /// once parsing begins (mirrors the collect-everything loops).
+    decoder: Decoder,
+    path_tracker: PathTracker,
+    converter: XmlToArrowConverter,
+    attr_name_buffer: Vec<u8>,
+    state: StreamState,
+    /// The stream holds its `Parser` by value, so nothing here borrows. The
+    /// lifetime survives only because it is part of the published type, and
+    /// removing it would break every caller that names the type; the borrowing
+    /// constructors still tie it to the parser they were given, which is
+    /// strictly more restrictive than reality and therefore always sound. It
+    /// goes away in the next major release.
+    _parser_lifetime: PhantomData<&'p Parser>,
+}
+
+impl<'p, S: EventSource> BatchStream<'p, S> {
+    fn new(parser: Parser, source: S, options: BatchOptions) -> Self {
+        let decoder = source.decoder();
+        Self {
+            source,
+            decoder,
+            path_tracker: PathTracker::new(&parser.inner.registry),
+            converter: XmlToArrowConverter::new(
+                &parser,
+                options.max_rows_per_batch,
+                options.max_bytes_per_batch,
+            ),
+            attr_name_buffer: Vec::with_capacity(64),
+            state: StreamState::Running,
+            parser,
+            _parser_lifetime: PhantomData,
+        }
+    }
+
+    /// Flushes `table_idx`'s accumulated rows into a [`TableBatch`].
+    ///
+    /// `more_rows_expected` distinguishes a threshold flush, where the table
+    /// will keep accumulating and so wants its buffers sized, from the final
+    /// drain, where reserving would allocate for rows that never arrive.
+    fn flush_table(&mut self, table_idx: usize, more_rows_expected: bool) -> Result<TableBatch> {
+        let batch = self.converter.table_builders[table_idx].flush(more_rows_expected)?;
+        Ok(TableBatch {
+            table: self.parser.inner.table_names[table_idx].clone(),
+            batch,
+        })
+    }
+
+    /// Yields the next non-empty leftover table during the drain phase,
+    /// advancing to `Done` when none remain.
+    fn drain_next(&mut self) -> Option<Result<TableBatch>> {
+        let StreamState::Draining { next_table } = self.state else {
+            return None;
+        };
+        for table_idx in next_table..self.converter.table_builders.len() {
+            let table = &self.converter.table_builders[table_idx];
+            // Structural tables never emit; tables whose rows all went out
+            // in threshold flushes have nothing left. Skipping them keeps
+            // the "a yielded batch always has ≥ 1 row" contract.
+            if table.field_builders.is_empty() || table.rows_in_batch == 0 {
+                continue;
+            }
+            self.state = StreamState::Draining {
+                next_table: table_idx + 1,
+            };
+            return match self.flush_table(table_idx, false) {
+                Ok(item) => Some(Ok(item)),
+                Err(e) => {
+                    self.state = StreamState::Done;
+                    Some(Err(e))
+                }
+            };
+        }
+        self.state = StreamState::Done;
+        // Every row has been emitted, so this is the streaming counterpart of
+        // `XmlToArrowConverter::finish`'s sweep. Batches already yielded stay
+        // valid: the error says the *config* did not match the document, not
+        // that the rows are wrong.
+        self.converter.unmatched_fields_error().map(Err)
+    }
+}
+
+impl<'p, S: EventSource> Iterator for BatchStream<'p, S> {
+    type Item = Result<TableBatch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.state {
+                StreamState::Done => return None,
+                StreamState::Draining { .. } => return self.drain_next(),
+                StreamState::Running => {
+                    let event = match self.source.read_event() {
+                        Ok(event) => event,
+                        Err(e) => {
+                            self.state = StreamState::Done;
+                            return Some(Err(e.into()));
+                        }
+                    };
+                    // Runtime dispatch on `needs_attrs` where the collect
+                    // loops monomorphize: one perfectly-predicted branch per
+                    // event buys a single public stream type per source.
+                    // Keep the surrounding read/Break discipline in lockstep
+                    // with `process_xml_events` / `process_xml_events_slice`.
+                    let handled = if self.parser.inner.needs_attrs {
+                        handle_event::<true>(
+                            event,
+                            self.decoder,
+                            &mut self.path_tracker,
+                            &mut self.converter,
+                            &mut self.attr_name_buffer,
+                        )
+                    } else {
+                        handle_event::<false>(
+                            event,
+                            self.decoder,
+                            &mut self.path_tracker,
+                            &mut self.converter,
+                            &mut self.attr_name_buffer,
+                        )
+                    };
+                    let action = match handled {
+                        Ok(action) => action,
+                        Err(e) => {
+                            self.state = StreamState::Done;
+                            // Same once-per-parse annotation as `run_parse`:
+                            // the source is still parked at the failing event.
+                            return Some(Err(e.with_position(self.source.buffer_position())));
+                        }
+                    };
+                    // Transition on Break *before* emitting a pending flush:
+                    // a stop-path close can both finalize a row (tripping a
+                    // threshold) and end the parse. The flushed batch goes
+                    // out now; the next call continues draining.
+                    if matches!(action, LoopAction::Break) {
+                        self.state = StreamState::Draining { next_table: 0 };
+                    }
+                    if let Some(table_idx) = self.converter.pending_flush.take() {
+                        return match self.flush_table(table_idx, true) {
+                            Ok(item) => Some(Ok(item)),
+                            Err(e) => {
+                                self.state = StreamState::Done;
+                                Some(Err(e))
+                            }
+                        };
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<'p, S: EventSource> FusedIterator for BatchStream<'p, S> {}
+
+/// Manual `Debug` (rather than derive) so it exists for every source type —
+/// `Reader<R>` internals aren't `Debug` — and so users can `unwrap`/`expect`
+/// on `Result`s containing the stream in tests.
+impl<S> std::fmt::Debug for BatchStream<'_, S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BatchStream")
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A [`RecordBatchReader`] over the single output table of a config.
+///
+/// Created by [`Parser::parse_single_table`] /
+/// [`Parser::parse_single_table_slice`]. Yields the table's batches in row
+/// order; [`RecordBatchReader::schema`] returns the same `Arc<Schema>` every
+/// batch carries, available before the first byte is parsed.
+///
+/// Errors surface as `ArrowError` (the trait's error type): native Arrow
+/// errors pass through, everything else wraps as
+/// `ArrowError::ExternalError` with this crate's [`Error`] as the source.
+// Lazy like [`BatchStream`]. The enclosing `Result` already carries a
+// `must_use`, but that only catches discarding the whole call — this also
+// catches `parser.parse_single_table(..).unwrap();`, which throws the reader
+// away after successfully building it.
+#[must_use = "a SingleTableReader is lazy — dropping it without iterating parses nothing"]
+pub struct SingleTableReader<'p, S> {
+    schema: SchemaRef,
+    stream: BatchStream<'p, S>,
+}
+
+impl<'p, S: EventSource> Iterator for SingleTableReader<'p, S> {
+    type Item = std::result::Result<RecordBatch, arrow::error::ArrowError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // The stream can only ever yield the one output table (structural
+        // tables never emit), so no name filtering is needed.
+        match self.stream.next()? {
+            Ok(table_batch) => Some(Ok(table_batch.batch)),
+            Err(Error::Arrow(e)) => Some(Err(e)),
+            Err(e) => Some(Err(arrow::error::ArrowError::ExternalError(Box::new(e)))),
+        }
+    }
+}
+
+impl<'p, S: EventSource> FusedIterator for SingleTableReader<'p, S> {}
+
+impl<'p, S: EventSource> RecordBatchReader for SingleTableReader<'p, S> {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+}
+
+/// Manual `Debug` for the same reasons as [`BatchStream`]'s — and because
+/// `Result<SingleTableReader, _>::unwrap_err()` in caller tests requires it.
+impl<S> std::fmt::Debug for SingleTableReader<'_, S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SingleTableReader")
+            .field("schema", &self.schema)
+            .finish_non_exhaustive()
+    }
+}
+
+// --- Event loop implementations ---
+//
+// Two pumps over the same `handle_event`: one for any `BufRead`, one
+// borrowing a `&[u8]` so element names and text never leave the input buffer.
+// Written once and monomorphized, because a second copy of this logic is a
+// second place for row semantics to drift.
+
+//
+// Two loop variants exist to match how events are read from quick-xml:
+//
+// 1) `process_xml_events` (buffered): uses `read_event_into(&mut buf)` which
+//    copies each event into a reusable buffer. Required for streaming readers.
+//
+// 2) `process_xml_events_slice` (zero-copy): uses `read_event()` on
+//    `Reader<&[u8]>` which returns events that borrow directly from the input
+//    slice, eliminating per-event copies.
+//
+// Both delegate to `handle_event` for the actual event processing so the
+// match-arm logic is written exactly once.
+//
+// A THIRD pump exists in `BatchStream::next` (streaming output): it reads
+// through the `EventSource` abstraction and steps one event at a time so a
+// batch can be yielded mid-parse. All three share `handle_event`, but the
+// read/Break/buffer discipline around it is written three times — any change
+// to the loops below must be mirrored there, and vice versa.
+
+/// The result of processing a single XML event, telling the event loop
+/// whether to continue reading or stop (on EOF or a stop-path match).
+enum LoopAction {
+    Continue,
+    Break,
+}
+
+/// Closes the currently entered element: pops its frame, pops the table scope
+/// it opened, finalizes a row if this element delimits one, and signals a break
+/// when it is a stop path.
+///
+/// Called by both `Event::End` and `Event::Empty` (which enters and closes in
+/// one event). Keeping the closing semantics in one place avoids drift between
+/// them.
+///
+/// Every decision here is a bit the frame has carried since `enter()` resolved
+/// it, so closing an element touches neither the registry nor the parent frame.
+/// `ends_row` in particular is the *precomputed* form of the rule this function
+/// used to evaluate — "the closing element is configured and its parent is a
+/// table" — see [`PathNodeInfo::ends_row`] for why the two are the same rule.
+/// Which table the row belongs to is unchanged: the innermost table still open,
+/// which is what makes an unconfigured subtree unable to perturb any output.
+#[inline]
+fn close_element(
+    path_tracker: &mut PathTracker,
+    xml_to_arrow_converter: &mut XmlToArrowConverter,
+) -> Result<LoopAction> {
+    // `None` at root depth: a stray end tag with no open element is a no-op.
+    let Some(frame) = path_tracker.leave() else {
+        return Ok(LoopAction::Continue);
+    };
+
+    // Order is load-bearing: `end_table` finalizes a declared `row: "."` while
+    // its own scope is still innermost, then pops it, and only then can
+    // `ends_row` finalize the *enclosing* table's row.
+    if frame.is_table {
+        xml_to_arrow_converter.end_table()?;
+    }
+    if frame.ends_row {
+        xml_to_arrow_converter.end_current_row()?;
+    }
+    // Stop after closing the configured path, so header-only reads exit without
+    // scanning the remainder of the document.
+    if frame.is_stop {
+        return Ok(LoopAction::Break);
+    }
+    Ok(LoopAction::Continue)
+}
+
+/// Builds the `TruncatedInput` error for the EOF completeness check. Outlined
+/// to keep `handle_event`'s body small — code-size growth there has cost more
+/// than 10% through lost inlining — even though this check itself runs only
+/// once per parse.
+#[cold]
+#[inline(never)]
+fn truncated_input_error(open_elements: usize) -> Error {
+    Error::TruncatedInput { open_elements }
+}
+
+/// Resolves a general reference in element text (`&#66;`, `&amp;`,
+/// `&custom;`) and appends the resolved bytes to the fields listening at
+/// `node_id`.
+///
+/// Two resolution steps cover the complete vocabulary a non-DTD-aware parser
+/// can handle: character references (`&#66;`, `&#x41;`) and the five
+/// predefined entities. A 4-byte stack buffer keeps the char-ref path
+/// allocation-free. An undeclared/custom entity cannot be resolved without
+/// DTD support; silently dropping it — the historical behavior — corrupted
+/// the extracted value, so it errors instead, but only when a configured
+/// field is actually capturing at this node.
+///
+/// Kept out of line (like `parse_attributes`): references are rare relative
+/// to Start/Text/End events, and inlining this — with its error construction
+/// — would grow `handle_event` for no hot-path benefit.
+#[inline(never)]
+fn handle_general_ref(
+    e: BytesRef<'_>,
+    node_id: PathNodeId,
+    xml_to_arrow_converter: &mut XmlToArrowConverter,
+) -> Result<()> {
+    if let Some(ch) = e.resolve_char_ref()? {
+        let mut utf8_buf = [0u8; 4];
+        let encoded = ch.encode_utf8(&mut utf8_buf);
+        xml_to_arrow_converter.set_field_value_for_node(node_id, encoded.as_bytes());
+        return Ok(());
+    }
+
+    // The predefined-entity lookup requires a `&str`, but the vocabulary
+    // (`amp`, `lt`, `gt`, `quot`, `apos`) is ASCII, so invalid UTF-8 simply
+    // fails to resolve.
+    let text = e.into_inner();
+    let resolved = std::str::from_utf8(&text)
+        .ok()
+        .and_then(escape::resolve_predefined_entity);
+    match resolved {
+        Some(entity_text) => {
+            xml_to_arrow_converter.set_field_value_for_node(node_id, entity_text.as_bytes());
+        }
+        None => {
+            if let Some((meta, row_index)) = xml_to_arrow_converter.active_field_meta(node_id) {
+                return Err(Error::ParseError {
+                    field: meta.name.clone(),
+                    path: meta.xml_path.clone(),
+                    value: String::from_utf8_lossy(&text).into_owned(),
+                    kind: ParseKind::UnresolvedEntity,
+                    // Raised mid-row; see `duplicate_value_error`.
+                    location: Box::new(ErrorLocation {
+                        row: Some(row_index),
+                        position: None,
+                    }),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Processes a single XML event, updating path tracking, table builders, and field values.
+///
+/// This function encapsulates the core event-handling logic shared by both the
+/// buffered and zero-copy parsing paths. Extracting it avoids duplicating the
+/// match arms while keeping each loop wrapper focused solely on how it obtains
+/// the next event.
+///
+/// On every `Event::Start` / `Event::Empty`, `path_tracker.enter()` returns
+/// the new node together with a borrow of its `PathNodeInfo`. We extract the
+/// few fields the arm actually needs (`table_index`, `has_attribute_children`)
+/// before doing any further work on the converter, so the immutable borrow
+/// of the registry ends and the converter is free to be mutated. The parent's
+/// `is_table` flag — needed when this element later closes — was cached onto
+/// the path-tracker frame by `enter()`, so we never re-read `node_info[]` at
+/// `Event::End` time.
+///
+/// `inline(always)`, not `inline`: this function exists to be written once and
+/// shared by the event pumps, not to be *called* by them. It sits astride every
+/// XML event, so a call here costs argument setup, a return, and the loss of
+/// cross-function optimization on the hottest path in the crate — measured at
+/// around 6% more instructions when the inliner declined it after unrelated
+/// growth in the value-append helpers. Its size is deliberately kept low for
+/// the same reason: rare arms and error construction live in `#[cold]` /
+/// `#[inline(never)]` helpers so that what lands here stays small.
+///
+/// Whether it is inlined is checkable without a benchmark: if
+/// `nm target/release/deps/parse_benchmark-* | grep handle_event` prints
+/// anything, it is not.
+#[inline(always)]
+fn handle_event<const PARSE_ATTRIBUTES: bool>(
+    event: Event<'_>,
+    decoder: Decoder,
+    path_tracker: &mut PathTracker,
+    xml_to_arrow_converter: &mut XmlToArrowConverter,
+    attr_name_buffer: &mut Vec<u8>,
+) -> Result<LoopAction> {
+    match event {
+        Event::Start(e) => {
+            // `strip_namespaces` (default) resolves the local name, dropping any
+            // `ns:` prefix; disabling it uses the raw qualified name and skips
+            // quick-xml's per-name `:` scan — identical output for prefix-free
+            // documents (see `ParserOptions::strip_namespaces`).
+            let name_bytes = if xml_to_arrow_converter.strip_namespaces {
+                e.local_name().into_inner()
+            } else {
+                e.name().into_inner()
+            };
+
+            // Fused lookup: child resolution + node-info read in one pass.
+            // The `&PathNodeInfo` borrow is tied to the registry (not the
+            // converter), so the repeated-element check can run on it before
+            // the bits the rest of the arm needs are extracted into Copy
+            // locals.
+            let (node_id_opt, table_index, has_attrs) =
+                match path_tracker.enter(name_bytes, &xml_to_arrow_converter.compiled.registry) {
+                    Some((id, info)) => {
+                        // Re-entering a field element whose row value is
+                        // already set means the element appeared twice —
+                        // rejected while `info` is in hand (no extra
+                        // registry read; see check_element_not_repeated).
+                        if !info.field_indices.is_empty() {
+                            check_element_not_repeated(
+                                &mut xml_to_arrow_converter.table_builders,
+                                &xml_to_arrow_converter.builder_stack,
+                                info,
+                            )?;
+                        }
+                        (Some(id), info.table_index, info.has_attribute_children)
+                    }
+                    None => (None, None, false),
+                };
+
+            if let Some(table_idx) = table_index {
+                // node_id is Some when info was returned, so this unwrap holds.
+                xml_to_arrow_converter.start_table(table_idx, node_id_opt.unwrap());
+            }
+
+            if PARSE_ATTRIBUTES && has_attrs {
+                parse_attributes(
+                    decoder,
+                    e.attributes(),
+                    path_tracker,
+                    xml_to_arrow_converter,
+                    attr_name_buffer,
+                )?;
+            }
+        }
+        Event::Empty(e) => {
+            // `strip_namespaces` (default) resolves the local name, dropping any
+            // `ns:` prefix; disabling it uses the raw qualified name and skips
+            // quick-xml's per-name `:` scan — identical output for prefix-free
+            // documents (see `ParserOptions::strip_namespaces`).
+            let name_bytes = if xml_to_arrow_converter.strip_namespaces {
+                e.local_name().into_inner()
+            } else {
+                e.name().into_inner()
+            };
+
+            let (node_id_opt, table_index, has_attrs) =
+                match path_tracker.enter(name_bytes, &xml_to_arrow_converter.compiled.registry) {
+                    Some((id, info)) => {
+                        // Same repeated-element guard as Event::Start.
+                        if !info.field_indices.is_empty() {
+                            check_element_not_repeated(
+                                &mut xml_to_arrow_converter.table_builders,
+                                &xml_to_arrow_converter.builder_stack,
+                                info,
+                            )?;
+                        }
+                        (Some(id), info.table_index, info.has_attribute_children)
+                    }
+                    None => (None, None, false),
+                };
+
+            if let Some(table_idx) = table_index {
+                xml_to_arrow_converter.start_table(table_idx, node_id_opt.unwrap());
+            }
+
+            if PARSE_ATTRIBUTES && has_attrs {
+                parse_attributes(
+                    decoder,
+                    e.attributes(),
+                    path_tracker,
+                    xml_to_arrow_converter,
+                    attr_name_buffer,
+                )?;
+            }
+
+            // Empty elements have no children or text; close immediately. The
+            // frame `enter` just pushed carries the same bits an `Event::End`
+            // would pop, so the two paths cannot diverge.
+            return close_element(path_tracker, xml_to_arrow_converter);
+        }
+        Event::GeneralRef(e) => {
+            if let Some(node_id) = path_tracker.current() {
+                handle_general_ref(e, node_id, xml_to_arrow_converter)?;
+            }
+        }
+        Event::Text(e) => {
+            if let Some(node_id) = path_tracker.current() {
+                let text = e.into_inner();
+                xml_to_arrow_converter.set_field_value_for_node(node_id, &text);
+            }
+        }
+        Event::CData(e) => {
+            if let Some(node_id) = path_tracker.current() {
+                let text = e.into_inner();
+                xml_to_arrow_converter.set_field_value_for_node(node_id, &text);
+            }
+        }
+        Event::End(_) => {
+            return close_element(path_tracker, xml_to_arrow_converter);
+        }
+        Event::Eof => {
+            // A well-formed document closes every element it opened, so the
+            // tracker is back at root depth here. Anything else means the input
+            // ended mid-element — a truncated file, a killed writer, a short
+            // read — and the rows parsed so far are a plausible-looking
+            // *partial* result. Returning them silently is the worst failure
+            // mode this crate has, so fail instead.
+            //
+            // quick-xml's `check_end_names` only rejects *mismatched* end tags,
+            // never *missing* ones, so this is the only point at which
+            // truncation is detectable. `stop_at_paths` exits via
+            // `close_element`'s Break and never reaches this arm, so deliberate
+            // early stops keep working.
+            let depth = path_tracker.depth();
+            if depth > 0 && !xml_to_arrow_converter.allow_truncated_input {
+                return Err(truncated_input_error(depth));
+            }
+            return Ok(LoopAction::Break);
+        }
+        _ => (),
+    }
+    Ok(LoopAction::Continue)
+}
+
+/// Streaming (buffered) XML event loop for readers that implement `BufRead`.
+///
+/// This path copies each event into a reusable buffer via `read_event_into`.
+/// For in-memory byte slices, prefer `process_xml_events_slice` which avoids
+/// the copy entirely.
+fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
+    reader: &mut Reader<B>,
+    path_tracker: &mut PathTracker,
+    xml_to_arrow_converter: &mut XmlToArrowConverter,
+) -> Result<()> {
+    let mut buf = Vec::with_capacity(4096);
+    let mut attr_name_buffer = Vec::with_capacity(64);
+    // Decoder is `Copy` and reflects the reader's encoding, which does not
+    // change once parsing begins — read it once outside the hot loop.
+    let decoder = reader.decoder();
+
+    loop {
+        let event = reader.read_event_into(&mut buf)?;
+        let action = handle_event::<PARSE_ATTRIBUTES>(
+            event,
+            decoder,
+            path_tracker,
+            xml_to_arrow_converter,
+            &mut attr_name_buffer,
+        )?;
+        if matches!(action, LoopAction::Break) {
+            break;
+        }
+        buf.clear();
+    }
+    Ok(())
+}
+
+/// Zero-copy XML event loop for in-memory byte slices.
+///
+/// When the XML input is already in memory, `Reader<&[u8]>::read_event()`
+/// returns events that borrow directly from the input slice — no buffer
+/// allocation or per-event copy required. This is the fast path for the
+/// common case where the caller has the full XML in a `&[u8]` or `&str`.
+fn process_xml_events_slice<const PARSE_ATTRIBUTES: bool>(
+    reader: &mut Reader<&[u8]>,
+    path_tracker: &mut PathTracker,
+    xml_to_arrow_converter: &mut XmlToArrowConverter,
+) -> Result<()> {
+    let mut attr_name_buffer = Vec::with_capacity(64);
+    // Decoder is `Copy` and reflects the reader's encoding, which does not
+    // change once parsing begins — read it once outside the hot loop.
+    let decoder = reader.decoder();
+
+    loop {
+        let event = reader.read_event()?;
+        let action = handle_event::<PARSE_ATTRIBUTES>(
+            event,
+            decoder,
+            path_tracker,
+            xml_to_arrow_converter,
+            &mut attr_name_buffer,
+        )?;
+        if matches!(action, LoopAction::Break) {
+            break;
+        }
+    }
+    Ok(())
+}
+
+#[inline(never)]
+fn parse_attributes(
+    decoder: Decoder,
+    mut attributes: Attributes,
+    path_tracker: &mut PathTracker,
+    xml_to_arrow_converter: &mut XmlToArrowConverter,
+    attr_name_buffer: &mut Vec<u8>,
+) -> Result<()> {
+    // For trusted inputs, skip quick-xml's duplicate-attribute detection.
+    // That check is O(n²) in the element's attribute count and, more
+    // importantly, allocates a `Vec` per attribute-bearing element to record
+    // the seen key ranges — pure overhead when we don't act on duplicates.
+    if !xml_to_arrow_converter.validate_attributes {
+        attributes.with_checks(false);
+    }
+    // Hoisted out of the loop: same `:`-scan trade-off as element names, applied
+    // to each attribute key (see `ParserOptions::strip_namespaces`).
+    let strip_namespaces = xml_to_arrow_converter.strip_namespaces;
+    for attribute in attributes {
+        let attribute = attribute?;
+        let key = if strip_namespaces {
+            attribute.key.local_name().into_inner()
+        } else {
+            attribute.key.into_inner()
+        };
+
+        // Reuse buffer to avoid allocation: build "@key" as bytes
+        attr_name_buffer.clear();
+        attr_name_buffer.push(b'@');
+        attr_name_buffer.extend_from_slice(key);
+
+        // Attributes only need the node ID; the `&PathNodeInfo` borrow
+        // returned by enter() is dropped immediately so the converter can
+        // be mutated below.
+        let attr_node_id = path_tracker
+            .enter(attr_name_buffer, &xml_to_arrow_converter.compiled.registry)
+            .map(|(id, _)| id);
+        if let Some(id) = attr_node_id {
+            // Attribute values are almost always plain UTF-8 needing no
+            // processing; in that case `decoded_and_normalized_value` is
+            // wasted work — it runs a per-attribute decode + unescape, and
+            // `Utf8` fields are validated exactly once at row finalization
+            // (`append_current_value`) anyway while numeric fields parse
+            // straight from bytes. The slow path triggers on exactly the
+            // bytes a conforming parser must process: `&` starts an entity
+            // or character reference, and literal `\t`, `\r`, `\n` become
+            // spaces under XML 1.0 attribute-value normalization
+            // (https://www.w3.org/TR/xml/#AVNormalize). Values containing
+            // none of the four are byte-identical either way.
+            //
+            // Element text (`Event::Text`) intentionally stays raw: the XML
+            // spec applies this normalization to attribute values only.
+            let raw = attribute.value.as_ref();
+            if raw
+                .iter()
+                .any(|b| matches!(b, b'&' | b'\t' | b'\r' | b'\n'))
+            {
+                // `Implicit1_0` selects plain XML 1.0 normalization (no
+                // XML 1.1 extras), the same default the deprecated
+                // `decode_and_unescape_value` hardcoded.
+                let value =
+                    attribute.decoded_and_normalized_value(XmlVersion::Implicit1_0, decoder)?;
+                xml_to_arrow_converter.set_field_value_for_node(id, value.as_bytes());
+            } else {
+                xml_to_arrow_converter.set_field_value_for_node(id, raw);
+            }
+        }
+        path_tracker.leave();
+    }
+    Ok(())
+}
+
+// === Streaming (batched) output ===
+//
+// The collect-everything entry points above accumulate the whole document
+// into one RecordBatch per table; peak memory is proportional to the
+// dataset. The types below bound that: `BatchStream` steps the same
+// `handle_event` core one event at a time and emits a table's accumulated
+// rows whenever the table crosses a `BatchOptions` threshold. Flushing is
+// value-transparent (see `TableBuilder::flush`): concatenating a table's
+// streamed batches reproduces the collect-everything output exactly.
+
+// --- Row coordination ---
+//
+// `XmlToArrowConverter` is the per-parse state the event loop drives: which
+// tables are open, which row each is on, and where a value at a given trie
+// node should land. It owns the table builders below and decides *when* a row
+// is finished; they decide what its values become.
+
+/// Entry on the table stack tracking active tables during parsing.
+#[derive(Debug, Clone)]
+struct TableStackEntry {
+    /// The table index in the `table_builders` array.
+    table_idx: usize,
+    /// The node ID in the path registry.
+    node_id: PathNodeId,
+}
+
+/// Converts parsed XML events into Arrow `RecordBatch`es — the mutable,
+/// per-parse half of the conversion.
+///
+/// Everything here holds parse-specific state (the Arrow builders that
+/// accumulate values, the active table stack, scratch buffers) and so must be
+/// reconstructed for every document. The immutable, *reusable* half — the
+/// validated config and compiled `PathRegistry` — lives in [`Parser`], which
+/// this borrows from. Splitting the two is what lets a single `Parser` parse
+/// many documents without rebuilding the path trie each time (see [`Parser`]).
+struct XmlToArrowConverter {
+    /// Table builders for each table defined in the configuration, indexed by position.
+    table_builders: Vec<TableBuilder>,
+    /// Stack of active tables representing the current nesting level.
+    builder_stack: Vec<TableStackEntry>,
+    /// The compiled state this parse runs against, shared with the `Parser`
+    /// rather than borrowed from it. Holding an `Arc` (one pointer, like the
+    /// reference it replaces) is what lets a stream own its parser; reads go
+    /// through `self.compiled.registry` and cost the same load as before.
+    compiled: Arc<Compiled>,
+    /// Reusable buffer for collecting parent row indices, avoiding per-row allocation.
+    parent_indices_buffer: Vec<u32>,
+    /// Reused across rows like `parent_indices_buffer`: declared link values,
+    /// widened to `u64` so one buffer serves both link kinds.
+    link_values_buffer: Vec<u64>,
+    /// Mirror of `ParserOptions::validate_attributes`. When `false`, the
+    /// attribute iterator skips quick-xml's per-element duplicate-key check
+    /// (and its backing allocation). Cached here so `parse_attributes` reads
+    /// a plain `bool` rather than re-deriving it from the config each call.
+    validate_attributes: bool,
+    /// Mirror of `ParserOptions::strip_namespaces`. When `true`, element and
+    /// attribute names are resolved via `local_name()` (stripping any `ns:`
+    /// prefix); when `false`, the raw qualified `name()` is used, skipping the
+    /// per-name `:` scan. Cached here so the hot path reads a plain `bool`.
+    strip_namespaces: bool,
+    /// Mirror of `ParserOptions::allow_truncated_input`; read once per parse,
+    /// on the `Event::Eof` arm.
+    allow_truncated_input: bool,
+    /// Per-batch flush thresholds (rows / raw value bytes). The
+    /// collect-everything entry points pass `usize::MAX` for both; the row
+    /// threshold stays there, so its per-row comparison is an always-false,
+    /// perfectly predicted branch. The byte threshold is clamped down to
+    /// `MAX_BATCH_BYTES_CEILING` even for them, so a collect parse of a table
+    /// accumulating more than ~1 GiB of value bytes *can* trip it — see
+    /// `pending_flush` for why that is inert rather than wrong.
+    max_rows_per_batch: usize,
+    max_bytes_per_batch: usize,
+    /// Mirror of `ParserOptions::error_on_unmatched_fields`, read once when
+    /// the document ends.
+    error_on_unmatched_fields: bool,
+    /// Set by `end_current_row` when the just-finalized row pushed its table
+    /// over a batch threshold. The streaming loop takes it and flushes that
+    /// table.
+    ///
+    /// The collect loops never *read* it, so on those paths this is inert
+    /// bookkeeping rather than a missed flush: `finish()` emits every table
+    /// whole regardless of what was signalled here.
+    ///
+    /// A single slot suffices because at most one table can become pending per
+    /// event — each event finalizes at most one row. That invariant is checked
+    /// by the `debug_assert!` at the assignment site; were it ever broken, a
+    /// pending flush would be silently dropped and the batch would grow past
+    /// its threshold unnoticed.
+    pending_flush: Option<usize>,
+}
+
+/// Upper bound applied to `max_bytes_per_batch`.
+///
+/// A `StringBuilder` addresses its value buffer with i32 offsets, so a single
+/// Utf8 column cannot hold more than `i32::MAX` bytes. Overflowing that limit
+/// *panics* inside Arrow (`byte array offset overflow`) rather than raising a
+/// recoverable error, so the budget must stay clear of it. Since
+/// `bytes_in_batch` sums every field, holding the whole budget below this
+/// ceiling keeps each individual Utf8 column under the offset limit.
+///
+/// The ceiling is deliberately *half* the addressable range rather than
+/// `i32::MAX` itself, because the budget is only consulted at row boundaries —
+/// after `save_row` has already appended the row. Accumulated bytes can
+/// therefore reach `max_bytes_per_batch - 1 + <the final row's bytes>`, and a
+/// ceiling of exactly `i32::MAX` would let that last row overflow the column
+/// as it is appended, before any flush check could fire. Reserving the upper
+/// half as headroom makes the guard hold for every row up to ~1 GiB — orders
+/// of magnitude beyond any "normal row", which is the case the byte budget
+/// exists to bound.
+///
+/// What no ceiling can rescue is a single row whose own values exceed that
+/// headroom (most plainly: one ≥ 1 GiB value). Such a row overflows the column
+/// while being appended, on the streaming and non-streaming paths alike.
+const MAX_BATCH_BYTES_CEILING: usize = (i32::MAX / 2) as usize;
+
+impl XmlToArrowConverter {
+    /// Builds the fresh per-parse state from an already-compiled [`Parser`].
+    ///
+    /// This is the only work that *must* happen on every document: allocating
+    /// the Arrow builders that will hold the parsed values. The expensive setup
+    /// (config validation, path-trie construction, schema construction) was
+    /// already done once in [`Parser::new`], so this stays cheap even for tiny
+    /// documents.
+    ///
+    /// The row threshold is clamped to at least 1 so a zero value can never
+    /// emit empty batches (a yielded batch always has ≥ 1 row). The byte
+    /// threshold is likewise clamped into `1..=MAX_BATCH_BYTES_CEILING`, so a
+    /// caller cannot raise it past the point where accumulated Utf8 bytes would
+    /// overflow a `StringBuilder`'s i32 offsets.
+    fn new(parser: &Parser, max_rows_per_batch: usize, max_bytes_per_batch: usize) -> Self {
+        let config = &parser.inner.config;
+        let max_value_bytes = config.parser_options.max_value_bytes.unwrap_or(usize::MAX);
+        let max_links = parser
+            .inner
+            .link_plans
+            .iter()
+            .map(|plan| plan.links.len())
+            .max()
+            .unwrap_or(0);
+        let mut table_builders = Vec::with_capacity(config.tables.len());
+        // `field_metas` is flat in table order, so walking the tables in order
+        // also walks it — no per-table index to store or look up.
+        let mut field_metas = parser.inner.field_metas.as_slice();
+        for (table_idx, (table_config, schema)) in config
+            .tables
+            .iter()
+            .zip(&parser.inner.table_schemas)
+            .enumerate()
+        {
+            let (table_metas, rest) = field_metas.split_at(table_config.fields.len());
+            field_metas = rest;
+            table_builders.push(TableBuilder::new(
+                table_config,
+                link_plan(&parser.inner.link_plans, table_idx),
+                schema.clone(),
+                table_metas,
+                max_value_bytes,
+            ));
+        }
+
+        let mut converter = Self {
+            table_builders,
+            // Sized rather than grown: the profile showed `builder_stack`
+            // reallocating inside this constructor on every parse, because
+            // `start_table` pushes the root table into a zero-capacity Vec. Its
+            // depth — and `parent_indices_buffer`'s length, which mirrors it —
+            // is bounded by the number of tables, which is small and known here.
+            builder_stack: Vec::with_capacity(config.tables.len()),
+            compiled: Arc::clone(&parser.inner),
+            parent_indices_buffer: Vec::with_capacity(config.tables.len()),
+            // `with_capacity(0)` does not allocate, so a config that declares
+            // no links pays nothing for this and one that does grows once per
+            // parser instead of once per parse.
+            link_values_buffer: Vec::with_capacity(max_links),
+            validate_attributes: config.parser_options.validate_attributes,
+            error_on_unmatched_fields: config.parser_options.error_on_unmatched_fields,
+            strip_namespaces: config.parser_options.strip_namespaces,
+            allow_truncated_input: config.parser_options.allow_truncated_input,
+            max_rows_per_batch: max_rows_per_batch.max(1),
+            max_bytes_per_batch: max_bytes_per_batch.clamp(1, MAX_BATCH_BYTES_CEILING),
+            pending_flush: None,
+        };
+
+        // Start the root-level table (xml_path: /) if it exists AND has fields
+        // defined. We only start it if it has fields, because adding it to the
+        // builder_stack would affect parent_row_indices for all nested tables,
+        // breaking their level indexing. Tables with xml_path: / and no fields
+        // are just used for hierarchy purposes and don't need to be on the stack.
+        if let Some(table_idx) = parser.inner.registry.get_table_index(PathNodeId::ROOT)
+            && !converter.table_builders[table_idx]
+                .field_builders
+                .is_empty()
+        {
+            converter.start_table(table_idx, PathNodeId::ROOT);
+        }
+        converter
+    }
+
+    /// Sets a field value for the current table using path node information.
+    #[inline]
+    pub fn set_field_value_for_node(&mut self, node_id: PathNodeId, value: &[u8]) {
+        let info = self.compiled.registry.get_node_info(node_id);
+        if info.field_indices.is_empty() {
+            return;
+        }
+
+        // Get the current table index from the stack
+        if let Some(current_entry) = self.builder_stack.last() {
+            let current_table_idx = current_entry.table_idx;
+
+            // Find matching field indices for the current table
+            for &(table_idx, field_idx) in &info.field_indices {
+                if table_idx == current_table_idx {
+                    self.table_builders[table_idx].set_field_value_by_index(field_idx, value);
+                }
+            }
+        }
+    }
+}
+
+/// Decides what happens when a field's element occurs a second time in one row.
+///
+/// Called from the `Start`/`Empty` arms when the *entered* node carries field
+/// mappings (`info` is the `PathNodeInfo` those arms already hold, so this adds
+/// no registry lookup). If a matching field of the current table already
+/// accumulated a value in this row, the element is appearing again —
+/// historically the raw bytes were silently concatenated ("1" + "2" → 12 for an
+/// Int32), fabricating values that never appeared in the document. The field's
+/// `on_repeat` now decides: error (the default), keep the first, or keep the
+/// last.
+///
+/// Value-less occurrences (`<v/><v>2</v>`) pass: nothing was captured, so the
+/// rule is "at most one value-bearing occurrence per row". Duplicate
+/// *attributes* (reachable with `validate_attributes: false`) are intentionally
+/// exempt — attribute pseudo-nodes are entered inside `parse_attributes`, which
+/// does not run this check, preserving the documented concatenation behavior
+/// for trusted input.
+///
+/// A free function over the two fields it touches, not a method: `info` is
+/// borrowed from the compiled registry, which lives behind the same `&self`
+/// this needs mutably, and taking the fields directly is what lets the borrow
+/// checker see they are disjoint.
+#[inline]
+fn check_element_not_repeated(
+    table_builders: &mut [TableBuilder],
+    builder_stack: &[TableStackEntry],
+    info: &PathNodeInfo,
+) -> Result<()> {
+    {
+        let Some(current_entry) = builder_stack.last() else {
+            return Ok(());
+        };
+        let current_table_idx = current_entry.table_idx;
+        for &(table_idx, field_idx) in &info.field_indices {
+            if table_idx != current_table_idx
+                || !table_builders[table_idx].field_builders[field_idx].has_value
+            {
+                continue;
+            }
+            // A repeat, and the policy decides. Reading it here rather than in
+            // `set_current_value` is what keeps the common path free: this
+            // branch is only reached when a field already holds a value, and
+            // the value-append path stays a plain extend.
+            //
+            // The distinction has to be made *here*, at element open, because
+            // one occurrence's text can arrive as several events — `has_value`
+            // alone cannot tell a continuation from a repeat.
+            match table_builders[table_idx].field_builders[field_idx]
+                .meta
+                .policy
+                .on_repeat
+            {
+                OnRepeat::Error => {
+                    return Err(duplicate_value_error(table_builders, table_idx, field_idx));
+                }
+                OnRepeat::First => {
+                    // Keep what is already there and ignore the rest of the
+                    // row: every later occurrence, not just this one.
+                    table_builders[table_idx].field_builders[field_idx].skip_rest_of_row = true;
+                }
+                OnRepeat::Last => {
+                    // Start this occurrence from scratch; whichever ends up
+                    // last wins by simply being the one left standing.
+                    let fb = &mut table_builders[table_idx].field_builders[field_idx];
+                    fb.current_value.clear();
+                    fb.has_value = false;
+                    fb.value_too_large = false;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl XmlToArrowConverter {
+    /// Builds the `RowIndexOverflow` error for `end_current_row`. Out of
+    /// line and cold, like `duplicate_value_error`, so the checked cast in
+    /// the per-row path stays a bare compare.
+    #[cold]
+    #[inline(never)]
+    fn row_index_overflow_error(&self, table_idx: usize) -> Error {
+        Error::RowIndexOverflow {
+            table: Arc::from(self.table_builders[table_idx].meta.name.as_str()),
+        }
+    }
+}
+
+/// Builds the `DuplicateValue` error. Free, cold and out of line for the same
+/// borrow reason as `check_element_not_repeated`.
+#[cold]
+#[inline(never)]
+fn duplicate_value_error(
+    table_builders: &[TableBuilder],
+    table_idx: usize,
+    field_idx: usize,
+) -> Error {
+    let table_builder = &table_builders[table_idx];
+    let field_builder = &table_builder.field_builders[field_idx];
+    Error::ParseError {
+        field: field_builder.meta.name.clone(),
+        path: field_builder.meta.xml_path.clone(),
+        value: String::from_utf8_lossy(&field_builder.current_value).into_owned(),
+        kind: ParseKind::DuplicateValue,
+        // Raised mid-row, so `save_row`'s annotation never sees it: the
+        // in-progress row will occupy the table's current counter.
+        location: Box::new(ErrorLocation {
+            row: Some(table_builder.row_index),
+            position: None,
+        }),
+    }
+}
+
+impl XmlToArrowConverter {
+    /// Returns the metadata of the first field of the *current* table mapped
+    /// to `node_id`, or `None` when a value at this node would not be
+    /// captured. Used by the entity-reference handler to decide whether an
+    /// unresolvable reference is an error (it would corrupt a field value)
+    /// or ignorable (nothing is listening at this node).
+    fn active_field_meta(&self, node_id: PathNodeId) -> Option<(&FieldMeta, usize)> {
+        let info = self.compiled.registry.get_node_info(node_id);
+        let current_table_idx = self.builder_stack.last()?.table_idx;
+        info.field_indices
+            .iter()
+            .find(|(table_idx, _)| *table_idx == current_table_idx)
+            .map(|&(table_idx, field_idx)| {
+                let table_builder = &self.table_builders[table_idx];
+                (
+                    &table_builder.field_builders[field_idx].meta,
+                    table_builder.row_index,
+                )
+            })
+    }
+
+    fn end_current_row(&mut self) -> Result<()> {
+        // Collect parent indices into reusable buffer to avoid per-row allocation.
+        self.parent_indices_buffer.clear();
+        for entry in &self.builder_stack {
+            // Skip the root table (xml_path: /) when collecting parent indices.
+            // The root table is special - it represents the document root and shouldn't
+            // contribute to parent indices for child tables.
+            if entry.node_id == PathNodeId::ROOT {
+                continue;
+            }
+            // Checked, not `as`: the streaming entry points removed the
+            // memory ceiling that used to make >u32::MAX rows per scope
+            // unreachable, and a wrapped foreign key would silently link
+            // child rows to the wrong parents. The happy path is a single
+            // predictable compare per ancestor.
+            let row_index = self.table_builders[entry.table_idx].row_index;
+            let Ok(index) = u32::try_from(row_index) else {
+                return Err(self.row_index_overflow_error(entry.table_idx));
+            };
+            self.parent_indices_buffer.push(index);
+        }
+        if let Some(entry) = self.builder_stack.last() {
+            let table_idx = entry.table_idx;
+
+            // Declared link values, read from the ancestors' own counters.
+            //
+            // A `parent` link takes the ancestor's *global* ordinal, which is
+            // the index the currently-open parent occurrence will receive when
+            // it finalizes — parents close after their children, so the row it
+            // names does not exist yet. That is exactly why the ordinal has to
+            // be global: it is stable against the parent arriving in a later
+            // batch, or in no batch at all under an early stop.
+            //
+            // An `index_of` link takes the ancestor's per-scope counter, which
+            // is the same value a `<level>` column carries for that path.
+            //
+            // Guarded on the builder's own (non-`Arc`) list rather than read
+            // unconditionally from the compiled plan: this runs once per
+            // finalized row, and reaching through `compiled` costs a pointer
+            // chase and a bounds check that every table using `levels` — that
+            // is, every configuration written before this release — would pay
+            // for an empty list. The overflow check rides along in the same
+            // pass for the same reason.
+            // One test on a precomputed bool, rather than an `Option` check and
+            // a `Vec` length on every finalized row. A table that declares no
+            // links skips the collection *and* the append, and reaches
+            // `end_row` through exactly the signature it used before links
+            // existed.
+            if self.table_builders[table_idx].has_link_columns {
+                self.link_values_buffer.clear();
+                for spec in &link_plan(&self.compiled.link_plans, table_idx).links {
+                    let ancestor = &self.table_builders[spec.ancestor_table_idx];
+                    let value = match spec.kind {
+                        LinkKind::ParentId => ancestor.global_row_index,
+                        LinkKind::IndexOf => {
+                            // Same ceiling as the `<level>` columns: an ordinal
+                            // that wrapped would link rows to the wrong
+                            // ancestor rather than fail.
+                            if u32::try_from(ancestor.row_index).is_err() {
+                                return Err(self.row_index_overflow_error(spec.ancestor_table_idx));
+                            }
+                            ancestor.row_index as u64
+                        }
+                    };
+                    self.link_values_buffer.push(value);
+                }
+                self.table_builders[table_idx].append_link_columns(&self.link_values_buffer);
+            }
+
+            let table = &mut self.table_builders[table_idx];
+            table.end_row(&self.parent_indices_buffer)?;
+            // Batch-threshold check, on the only path where a row finalizes.
+            // Structural tables keep `rows_in_batch == 0`, so they can never
+            // trip this even with tiny thresholds.
+            if table.rows_in_batch >= self.max_rows_per_batch
+                || table.bytes_in_batch >= self.max_bytes_per_batch
+            {
+                // The single slot relies on the streaming loop draining it
+                // after every event, which holds only because an event
+                // finalizes at most one row. Overwriting an unread signal
+                // would drop a flush silently — no error, no failing test,
+                // just a batch growing past its bound. Cost-free in release.
+                debug_assert!(
+                    self.pending_flush.is_none(),
+                    "pending flush for table {:?} overwritten by table {table_idx} — \
+                     more than one row finalized in a single event",
+                    self.pending_flush
+                );
+                self.pending_flush = Some(table_idx);
+            }
+        }
+        Ok(())
+    }
+
+    /// Pushes a new table scope onto the builder stack.
+    ///
+    /// `table_idx` is taken as a parameter (rather than re-derived from
+    /// `node_id` via `registry.get_table_index`) because every hot-path
+    /// caller already has the index in hand from the same `PathNodeInfo`
+    /// read that decided this node was a table boundary. Avoiding the
+    /// re-lookup keeps the per-Start path to a single `node_info[]` access.
+    fn start_table(&mut self, table_idx: usize, node_id: PathNodeId) {
+        self.builder_stack
+            .push(TableStackEntry { table_idx, node_id });
+        self.table_builders[table_idx].row_index = 0;
+    }
+
+    /// Pops the innermost table scope, first finalizing its row when the table
+    /// declared `row: "."`.
+    ///
+    /// The ordering is the whole reason this lives here: `end_current_row`
+    /// finalizes against the innermost open table, so a `row: "."` row has to
+    /// close while this table is still that table. Afterwards the popped
+    /// frame's own `ends_row` may finalize the *enclosing* table's row, which
+    /// is how a `row: "."` table that is also a configured child of an outer
+    /// table keeps delimiting the outer table exactly as it did before.
+    fn end_table(&mut self) -> Result<()> {
+        if let Some(entry) = self.builder_stack.last()
+            && self.table_builders[entry.table_idx]
+                .meta
+                .row_is_table_element
+        {
+            self.end_current_row()?;
+        }
+        self.builder_stack.pop();
+        Ok(())
+    }
+
+    /// Reports every configured field that captured nothing anywhere in the
+    /// document, when `error_on_unmatched_fields` is enabled.
+    ///
+    /// All offenders are collected in one pass so a broken config is fixed in
+    /// one round trip rather than one field per run. Structural tables have no
+    /// field builders and so contribute nothing.
+    fn unmatched_fields_error(&self) -> Option<Error> {
+        if !self.error_on_unmatched_fields {
+            return None;
+        }
+        let fields: Vec<UnmatchedField> = self
+            .table_builders
+            .iter()
+            .flat_map(|table_builder| {
+                table_builder
+                    .field_builders
+                    .iter()
+                    .filter(|field_builder| !field_builder.ever_matched)
+                    .map(|field_builder| UnmatchedField {
+                        table: table_builder.meta.name.clone(),
+                        field: field_builder.meta.name.to_string(),
+                        xml_path: field_builder.meta.xml_path.to_string(),
+                    })
+            })
+            .collect();
+        (!fields.is_empty()).then_some(Error::UnmatchedFields {
+            fields,
+            stop_paths_configured: !self.compiled.config.parser_options.stop_at_paths.is_empty(),
+        })
+    }
+
+    fn finish(mut self) -> Result<IndexMap<String, arrow::record_batch::RecordBatch>> {
+        // Reporting a broken config beats handing back batches with silently
+        // empty columns, so the sweep runs before anything is assembled.
+        if let Some(error) = self.unmatched_fields_error() {
+            return Err(error);
+        }
+        let mut record_batches = IndexMap::new();
+        for table_builder in &mut self.table_builders {
+            if !table_builder.field_builders.is_empty() {
+                let record_batch = table_builder.flush(false)?;
+                record_batches.insert(table_builder.meta.name.clone(), record_batch);
+            }
+        }
+        Ok(record_batches)
+    }
+}
+
+// --- Value and row builders ---
+//
+// The bottom of the stack: one `FieldBuilder` per column holding an Arrow
+// builder and the bytes captured so far, grouped into a `TableBuilder` per
+// table. `append_current_value` is where captured text becomes a typed Arrow
+// value, and it runs once per field per row.
+
 /// Enum-based array builder that avoids dynamic dispatch (`Box<dyn ArrayBuilder>`)
 /// in the hot path. Each variant holds the concrete Arrow builder type directly.
 enum TypedArrayBuilder {
@@ -972,2217 +3216,6 @@ impl LinkBuilder {
             LinkBuilder::ParentId(b) => *b = UInt64Builder::with_capacity(rows),
             LinkBuilder::IndexOf(b) => *b = UInt32Builder::with_capacity(rows),
         }
-    }
-}
-
-/// Entry on the table stack tracking active tables during parsing.
-#[derive(Debug, Clone)]
-struct TableStackEntry {
-    /// The table index in the `table_builders` array.
-    table_idx: usize,
-    /// The node ID in the path registry.
-    node_id: PathNodeId,
-}
-
-/// Converts parsed XML events into Arrow `RecordBatch`es — the mutable,
-/// per-parse half of the conversion.
-///
-/// Everything here holds parse-specific state (the Arrow builders that
-/// accumulate values, the active table stack, scratch buffers) and so must be
-/// reconstructed for every document. The immutable, *reusable* half — the
-/// validated config and compiled `PathRegistry` — lives in [`Parser`], which
-/// this borrows from. Splitting the two is what lets a single `Parser` parse
-/// many documents without rebuilding the path trie each time (see [`Parser`]).
-struct XmlToArrowConverter {
-    /// Table builders for each table defined in the configuration, indexed by position.
-    table_builders: Vec<TableBuilder>,
-    /// Stack of active tables representing the current nesting level.
-    builder_stack: Vec<TableStackEntry>,
-    /// The compiled state this parse runs against, shared with the `Parser`
-    /// rather than borrowed from it. Holding an `Arc` (one pointer, like the
-    /// reference it replaces) is what lets a stream own its parser; reads go
-    /// through `self.compiled.registry` and cost the same load as before.
-    compiled: Arc<Compiled>,
-    /// Reusable buffer for collecting parent row indices, avoiding per-row allocation.
-    parent_indices_buffer: Vec<u32>,
-    /// Reused across rows like `parent_indices_buffer`: declared link values,
-    /// widened to `u64` so one buffer serves both link kinds.
-    link_values_buffer: Vec<u64>,
-    /// Mirror of `ParserOptions::validate_attributes`. When `false`, the
-    /// attribute iterator skips quick-xml's per-element duplicate-key check
-    /// (and its backing allocation). Cached here so `parse_attributes` reads
-    /// a plain `bool` rather than re-deriving it from the config each call.
-    validate_attributes: bool,
-    /// Mirror of `ParserOptions::strip_namespaces`. When `true`, element and
-    /// attribute names are resolved via `local_name()` (stripping any `ns:`
-    /// prefix); when `false`, the raw qualified `name()` is used, skipping the
-    /// per-name `:` scan. Cached here so the hot path reads a plain `bool`.
-    strip_namespaces: bool,
-    /// Mirror of `ParserOptions::allow_truncated_input`; read once per parse,
-    /// on the `Event::Eof` arm.
-    allow_truncated_input: bool,
-    /// Per-batch flush thresholds (rows / raw value bytes). The
-    /// collect-everything entry points pass `usize::MAX` for both; the row
-    /// threshold stays there, so its per-row comparison is an always-false,
-    /// perfectly predicted branch. The byte threshold is clamped down to
-    /// `MAX_BATCH_BYTES_CEILING` even for them, so a collect parse of a table
-    /// accumulating more than ~1 GiB of value bytes *can* trip it — see
-    /// `pending_flush` for why that is inert rather than wrong.
-    max_rows_per_batch: usize,
-    max_bytes_per_batch: usize,
-    /// Mirror of `ParserOptions::error_on_unmatched_fields`, read once when
-    /// the document ends.
-    error_on_unmatched_fields: bool,
-    /// Set by `end_current_row` when the just-finalized row pushed its table
-    /// over a batch threshold. The streaming loop takes it and flushes that
-    /// table.
-    ///
-    /// The collect loops never *read* it, so on those paths this is inert
-    /// bookkeeping rather than a missed flush: `finish()` emits every table
-    /// whole regardless of what was signalled here.
-    ///
-    /// A single slot suffices because at most one table can become pending per
-    /// event — each event finalizes at most one row. That invariant is checked
-    /// by the `debug_assert!` at the assignment site; were it ever broken, a
-    /// pending flush would be silently dropped and the batch would grow past
-    /// its threshold unnoticed.
-    pending_flush: Option<usize>,
-}
-
-/// Upper bound applied to `max_bytes_per_batch`.
-///
-/// A `StringBuilder` addresses its value buffer with i32 offsets, so a single
-/// Utf8 column cannot hold more than `i32::MAX` bytes. Overflowing that limit
-/// *panics* inside Arrow (`byte array offset overflow`) rather than raising a
-/// recoverable error, so the budget must stay clear of it. Since
-/// `bytes_in_batch` sums every field, holding the whole budget below this
-/// ceiling keeps each individual Utf8 column under the offset limit.
-///
-/// The ceiling is deliberately *half* the addressable range rather than
-/// `i32::MAX` itself, because the budget is only consulted at row boundaries —
-/// after `save_row` has already appended the row. Accumulated bytes can
-/// therefore reach `max_bytes_per_batch - 1 + <the final row's bytes>`, and a
-/// ceiling of exactly `i32::MAX` would let that last row overflow the column
-/// as it is appended, before any flush check could fire. Reserving the upper
-/// half as headroom makes the guard hold for every row up to ~1 GiB — orders
-/// of magnitude beyond any "normal row", which is the case the byte budget
-/// exists to bound.
-///
-/// What no ceiling can rescue is a single row whose own values exceed that
-/// headroom (most plainly: one ≥ 1 GiB value). Such a row overflows the column
-/// while being appended, on the streaming and non-streaming paths alike.
-const MAX_BATCH_BYTES_CEILING: usize = (i32::MAX / 2) as usize;
-
-impl XmlToArrowConverter {
-    /// Builds the fresh per-parse state from an already-compiled [`Parser`].
-    ///
-    /// This is the only work that *must* happen on every document: allocating
-    /// the Arrow builders that will hold the parsed values. The expensive setup
-    /// (config validation, path-trie construction, schema construction) was
-    /// already done once in [`Parser::new`], so this stays cheap even for tiny
-    /// documents.
-    ///
-    /// The row threshold is clamped to at least 1 so a zero value can never
-    /// emit empty batches (a yielded batch always has ≥ 1 row). The byte
-    /// threshold is likewise clamped into `1..=MAX_BATCH_BYTES_CEILING`, so a
-    /// caller cannot raise it past the point where accumulated Utf8 bytes would
-    /// overflow a `StringBuilder`'s i32 offsets.
-    fn new(parser: &Parser, max_rows_per_batch: usize, max_bytes_per_batch: usize) -> Self {
-        let config = &parser.inner.config;
-        let max_value_bytes = config.parser_options.max_value_bytes.unwrap_or(usize::MAX);
-        let max_links = parser
-            .inner
-            .link_plans
-            .iter()
-            .map(|plan| plan.links.len())
-            .max()
-            .unwrap_or(0);
-        let mut table_builders = Vec::with_capacity(config.tables.len());
-        // `field_metas` is flat in table order, so walking the tables in order
-        // also walks it — no per-table index to store or look up.
-        let mut field_metas = parser.inner.field_metas.as_slice();
-        for (table_idx, (table_config, schema)) in config
-            .tables
-            .iter()
-            .zip(&parser.inner.table_schemas)
-            .enumerate()
-        {
-            let (table_metas, rest) = field_metas.split_at(table_config.fields.len());
-            field_metas = rest;
-            table_builders.push(TableBuilder::new(
-                table_config,
-                link_plan(&parser.inner.link_plans, table_idx),
-                schema.clone(),
-                table_metas,
-                max_value_bytes,
-            ));
-        }
-
-        let mut converter = Self {
-            table_builders,
-            // Sized rather than grown: the profile showed `builder_stack`
-            // reallocating inside this constructor on every parse, because
-            // `start_table` pushes the root table into a zero-capacity Vec. Its
-            // depth — and `parent_indices_buffer`'s length, which mirrors it —
-            // is bounded by the number of tables, which is small and known here.
-            builder_stack: Vec::with_capacity(config.tables.len()),
-            compiled: Arc::clone(&parser.inner),
-            parent_indices_buffer: Vec::with_capacity(config.tables.len()),
-            // `with_capacity(0)` does not allocate, so a config that declares
-            // no links pays nothing for this and one that does grows once per
-            // parser instead of once per parse.
-            link_values_buffer: Vec::with_capacity(max_links),
-            validate_attributes: config.parser_options.validate_attributes,
-            error_on_unmatched_fields: config.parser_options.error_on_unmatched_fields,
-            strip_namespaces: config.parser_options.strip_namespaces,
-            allow_truncated_input: config.parser_options.allow_truncated_input,
-            max_rows_per_batch: max_rows_per_batch.max(1),
-            max_bytes_per_batch: max_bytes_per_batch.clamp(1, MAX_BATCH_BYTES_CEILING),
-            pending_flush: None,
-        };
-
-        // Start the root-level table (xml_path: /) if it exists AND has fields
-        // defined. We only start it if it has fields, because adding it to the
-        // builder_stack would affect parent_row_indices for all nested tables,
-        // breaking their level indexing. Tables with xml_path: / and no fields
-        // are just used for hierarchy purposes and don't need to be on the stack.
-        if let Some(table_idx) = parser.inner.registry.get_table_index(PathNodeId::ROOT)
-            && !converter.table_builders[table_idx]
-                .field_builders
-                .is_empty()
-        {
-            converter.start_table(table_idx, PathNodeId::ROOT);
-        }
-        converter
-    }
-
-    /// Sets a field value for the current table using path node information.
-    #[inline]
-    pub fn set_field_value_for_node(&mut self, node_id: PathNodeId, value: &[u8]) {
-        let info = self.compiled.registry.get_node_info(node_id);
-        if info.field_indices.is_empty() {
-            return;
-        }
-
-        // Get the current table index from the stack
-        if let Some(current_entry) = self.builder_stack.last() {
-            let current_table_idx = current_entry.table_idx;
-
-            // Find matching field indices for the current table
-            for &(table_idx, field_idx) in &info.field_indices {
-                if table_idx == current_table_idx {
-                    self.table_builders[table_idx].set_field_value_by_index(field_idx, value);
-                }
-            }
-        }
-    }
-}
-
-/// Decides what happens when a field's element occurs a second time in one row.
-///
-/// Called from the `Start`/`Empty` arms when the *entered* node carries field
-/// mappings (`info` is the `PathNodeInfo` those arms already hold, so this adds
-/// no registry lookup). If a matching field of the current table already
-/// accumulated a value in this row, the element is appearing again —
-/// historically the raw bytes were silently concatenated ("1" + "2" → 12 for an
-/// Int32), fabricating values that never appeared in the document. The field's
-/// `on_repeat` now decides: error (the default), keep the first, or keep the
-/// last.
-///
-/// Value-less occurrences (`<v/><v>2</v>`) pass: nothing was captured, so the
-/// rule is "at most one value-bearing occurrence per row". Duplicate
-/// *attributes* (reachable with `validate_attributes: false`) are intentionally
-/// exempt — attribute pseudo-nodes are entered inside `parse_attributes`, which
-/// does not run this check, preserving the documented concatenation behavior
-/// for trusted input.
-///
-/// A free function over the two fields it touches, not a method: `info` is
-/// borrowed from the compiled registry, which lives behind the same `&self`
-/// this needs mutably, and taking the fields directly is what lets the borrow
-/// checker see they are disjoint.
-#[inline]
-fn check_element_not_repeated(
-    table_builders: &mut [TableBuilder],
-    builder_stack: &[TableStackEntry],
-    info: &PathNodeInfo,
-) -> Result<()> {
-    {
-        let Some(current_entry) = builder_stack.last() else {
-            return Ok(());
-        };
-        let current_table_idx = current_entry.table_idx;
-        for &(table_idx, field_idx) in &info.field_indices {
-            if table_idx != current_table_idx
-                || !table_builders[table_idx].field_builders[field_idx].has_value
-            {
-                continue;
-            }
-            // A repeat, and the policy decides. Reading it here rather than in
-            // `set_current_value` is what keeps the common path free: this
-            // branch is only reached when a field already holds a value, and
-            // the value-append path stays a plain extend.
-            //
-            // The distinction has to be made *here*, at element open, because
-            // one occurrence's text can arrive as several events — `has_value`
-            // alone cannot tell a continuation from a repeat.
-            match table_builders[table_idx].field_builders[field_idx]
-                .meta
-                .policy
-                .on_repeat
-            {
-                OnRepeat::Error => {
-                    return Err(duplicate_value_error(table_builders, table_idx, field_idx));
-                }
-                OnRepeat::First => {
-                    // Keep what is already there and ignore the rest of the
-                    // row: every later occurrence, not just this one.
-                    table_builders[table_idx].field_builders[field_idx].skip_rest_of_row = true;
-                }
-                OnRepeat::Last => {
-                    // Start this occurrence from scratch; whichever ends up
-                    // last wins by simply being the one left standing.
-                    let fb = &mut table_builders[table_idx].field_builders[field_idx];
-                    fb.current_value.clear();
-                    fb.has_value = false;
-                    fb.value_too_large = false;
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-impl XmlToArrowConverter {
-    /// Builds the `RowIndexOverflow` error for `end_current_row`. Out of
-    /// line and cold, like `duplicate_value_error`, so the checked cast in
-    /// the per-row path stays a bare compare.
-    #[cold]
-    #[inline(never)]
-    fn row_index_overflow_error(&self, table_idx: usize) -> Error {
-        Error::RowIndexOverflow {
-            table: Arc::from(self.table_builders[table_idx].meta.name.as_str()),
-        }
-    }
-}
-
-/// Builds the `DuplicateValue` error. Free, cold and out of line for the same
-/// borrow reason as `check_element_not_repeated`.
-#[cold]
-#[inline(never)]
-fn duplicate_value_error(
-    table_builders: &[TableBuilder],
-    table_idx: usize,
-    field_idx: usize,
-) -> Error {
-    let table_builder = &table_builders[table_idx];
-    let field_builder = &table_builder.field_builders[field_idx];
-    Error::ParseError {
-        field: field_builder.meta.name.clone(),
-        path: field_builder.meta.xml_path.clone(),
-        value: String::from_utf8_lossy(&field_builder.current_value).into_owned(),
-        kind: ParseKind::DuplicateValue,
-        // Raised mid-row, so `save_row`'s annotation never sees it: the
-        // in-progress row will occupy the table's current counter.
-        location: Box::new(ErrorLocation {
-            row: Some(table_builder.row_index),
-            position: None,
-        }),
-    }
-}
-
-impl XmlToArrowConverter {
-    /// Returns the metadata of the first field of the *current* table mapped
-    /// to `node_id`, or `None` when a value at this node would not be
-    /// captured. Used by the entity-reference handler to decide whether an
-    /// unresolvable reference is an error (it would corrupt a field value)
-    /// or ignorable (nothing is listening at this node).
-    fn active_field_meta(&self, node_id: PathNodeId) -> Option<(&FieldMeta, usize)> {
-        let info = self.compiled.registry.get_node_info(node_id);
-        let current_table_idx = self.builder_stack.last()?.table_idx;
-        info.field_indices
-            .iter()
-            .find(|(table_idx, _)| *table_idx == current_table_idx)
-            .map(|&(table_idx, field_idx)| {
-                let table_builder = &self.table_builders[table_idx];
-                (
-                    &table_builder.field_builders[field_idx].meta,
-                    table_builder.row_index,
-                )
-            })
-    }
-
-    fn end_current_row(&mut self) -> Result<()> {
-        // Collect parent indices into reusable buffer to avoid per-row allocation.
-        self.parent_indices_buffer.clear();
-        for entry in &self.builder_stack {
-            // Skip the root table (xml_path: /) when collecting parent indices.
-            // The root table is special - it represents the document root and shouldn't
-            // contribute to parent indices for child tables.
-            if entry.node_id == PathNodeId::ROOT {
-                continue;
-            }
-            // Checked, not `as`: the streaming entry points removed the
-            // memory ceiling that used to make >u32::MAX rows per scope
-            // unreachable, and a wrapped foreign key would silently link
-            // child rows to the wrong parents. The happy path is a single
-            // predictable compare per ancestor.
-            let row_index = self.table_builders[entry.table_idx].row_index;
-            let Ok(index) = u32::try_from(row_index) else {
-                return Err(self.row_index_overflow_error(entry.table_idx));
-            };
-            self.parent_indices_buffer.push(index);
-        }
-        if let Some(entry) = self.builder_stack.last() {
-            let table_idx = entry.table_idx;
-
-            // Declared link values, read from the ancestors' own counters.
-            //
-            // A `parent` link takes the ancestor's *global* ordinal, which is
-            // the index the currently-open parent occurrence will receive when
-            // it finalizes — parents close after their children, so the row it
-            // names does not exist yet. That is exactly why the ordinal has to
-            // be global: it is stable against the parent arriving in a later
-            // batch, or in no batch at all under an early stop.
-            //
-            // An `index_of` link takes the ancestor's per-scope counter, which
-            // is the same value a `<level>` column carries for that path.
-            //
-            // Guarded on the builder's own (non-`Arc`) list rather than read
-            // unconditionally from the compiled plan: this runs once per
-            // finalized row, and reaching through `compiled` costs a pointer
-            // chase and a bounds check that every table using `levels` — that
-            // is, every configuration written before this release — would pay
-            // for an empty list. The overflow check rides along in the same
-            // pass for the same reason.
-            // One test on a precomputed bool, rather than an `Option` check and
-            // a `Vec` length on every finalized row. A table that declares no
-            // links skips the collection *and* the append, and reaches
-            // `end_row` through exactly the signature it used before links
-            // existed.
-            if self.table_builders[table_idx].has_link_columns {
-                self.link_values_buffer.clear();
-                for spec in &link_plan(&self.compiled.link_plans, table_idx).links {
-                    let ancestor = &self.table_builders[spec.ancestor_table_idx];
-                    let value = match spec.kind {
-                        LinkKind::ParentId => ancestor.global_row_index,
-                        LinkKind::IndexOf => {
-                            // Same ceiling as the `<level>` columns: an ordinal
-                            // that wrapped would link rows to the wrong
-                            // ancestor rather than fail.
-                            if u32::try_from(ancestor.row_index).is_err() {
-                                return Err(self.row_index_overflow_error(spec.ancestor_table_idx));
-                            }
-                            ancestor.row_index as u64
-                        }
-                    };
-                    self.link_values_buffer.push(value);
-                }
-                self.table_builders[table_idx].append_link_columns(&self.link_values_buffer);
-            }
-
-            let table = &mut self.table_builders[table_idx];
-            table.end_row(&self.parent_indices_buffer)?;
-            // Batch-threshold check, on the only path where a row finalizes.
-            // Structural tables keep `rows_in_batch == 0`, so they can never
-            // trip this even with tiny thresholds.
-            if table.rows_in_batch >= self.max_rows_per_batch
-                || table.bytes_in_batch >= self.max_bytes_per_batch
-            {
-                // The single slot relies on the streaming loop draining it
-                // after every event, which holds only because an event
-                // finalizes at most one row. Overwriting an unread signal
-                // would drop a flush silently — no error, no failing test,
-                // just a batch growing past its bound. Cost-free in release.
-                debug_assert!(
-                    self.pending_flush.is_none(),
-                    "pending flush for table {:?} overwritten by table {table_idx} — \
-                     more than one row finalized in a single event",
-                    self.pending_flush
-                );
-                self.pending_flush = Some(table_idx);
-            }
-        }
-        Ok(())
-    }
-
-    /// Pushes a new table scope onto the builder stack.
-    ///
-    /// `table_idx` is taken as a parameter (rather than re-derived from
-    /// `node_id` via `registry.get_table_index`) because every hot-path
-    /// caller already has the index in hand from the same `PathNodeInfo`
-    /// read that decided this node was a table boundary. Avoiding the
-    /// re-lookup keeps the per-Start path to a single `node_info[]` access.
-    fn start_table(&mut self, table_idx: usize, node_id: PathNodeId) {
-        self.builder_stack
-            .push(TableStackEntry { table_idx, node_id });
-        self.table_builders[table_idx].row_index = 0;
-    }
-
-    /// Pops the innermost table scope, first finalizing its row when the table
-    /// declared `row: "."`.
-    ///
-    /// The ordering is the whole reason this lives here: `end_current_row`
-    /// finalizes against the innermost open table, so a `row: "."` row has to
-    /// close while this table is still that table. Afterwards the popped
-    /// frame's own `ends_row` may finalize the *enclosing* table's row, which
-    /// is how a `row: "."` table that is also a configured child of an outer
-    /// table keeps delimiting the outer table exactly as it did before.
-    fn end_table(&mut self) -> Result<()> {
-        if let Some(entry) = self.builder_stack.last()
-            && self.table_builders[entry.table_idx]
-                .meta
-                .row_is_table_element
-        {
-            self.end_current_row()?;
-        }
-        self.builder_stack.pop();
-        Ok(())
-    }
-
-    /// Reports every configured field that captured nothing anywhere in the
-    /// document, when `error_on_unmatched_fields` is enabled.
-    ///
-    /// All offenders are collected in one pass so a broken config is fixed in
-    /// one round trip rather than one field per run. Structural tables have no
-    /// field builders and so contribute nothing.
-    fn unmatched_fields_error(&self) -> Option<Error> {
-        if !self.error_on_unmatched_fields {
-            return None;
-        }
-        let fields: Vec<UnmatchedField> = self
-            .table_builders
-            .iter()
-            .flat_map(|table_builder| {
-                table_builder
-                    .field_builders
-                    .iter()
-                    .filter(|field_builder| !field_builder.ever_matched)
-                    .map(|field_builder| UnmatchedField {
-                        table: table_builder.meta.name.clone(),
-                        field: field_builder.meta.name.to_string(),
-                        xml_path: field_builder.meta.xml_path.to_string(),
-                    })
-            })
-            .collect();
-        (!fields.is_empty()).then_some(Error::UnmatchedFields {
-            fields,
-            stop_paths_configured: !self.compiled.config.parser_options.stop_at_paths.is_empty(),
-        })
-    }
-
-    fn finish(mut self) -> Result<IndexMap<String, arrow::record_batch::RecordBatch>> {
-        // Reporting a broken config beats handing back batches with silently
-        // empty columns, so the sweep runs before anything is assembled.
-        if let Some(error) = self.unmatched_fields_error() {
-            return Err(error);
-        }
-        let mut record_batches = IndexMap::new();
-        for table_builder in &mut self.table_builders {
-            if !table_builder.field_builders.is_empty() {
-                let record_batch = table_builder.flush(false)?;
-                record_batches.insert(table_builder.meta.name.clone(), record_batch);
-            }
-        }
-        Ok(record_batches)
-    }
-}
-
-/// A reusable, pre-compiled parser for a single [`Config`].
-///
-/// Constructing a `Parser` does the *one-time* setup work — validating the
-/// config and compiling every configured XML path into an integer-indexed
-/// `PathRegistry` trie. That work is fixed cost (independent of document size)
-/// and, on a small document, can dominate the total parse time. Holding a
-/// `Parser` lets you pay it **once** and then parse many documents through the
-/// same compiled state — the intended pattern when processing a stream or
-/// directory of files that all share one schema.
-///
-/// The free functions [`parse_xml`] and [`parse_xml_slice`] are thin wrappers
-/// that build a throwaway `Parser` per call; reach for `Parser` directly
-/// whenever you parse more than one document with the same `Config`.
-///
-/// # Example
-///
-/// ```rust
-/// use xml2arrow::{Parser, config::{Config, TableConfig, FieldConfigBuilder, DType}};
-///
-/// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build().unwrap()];
-/// let config = Config::builder()
-///     .table(TableConfig::builder("items", "/data").fields(fields).build())
-///     .build()
-///     .unwrap();
-///
-/// // Compile once...
-/// let parser = Parser::new(&config).unwrap();
-/// // ...parse many.
-/// for xml in [b"<data><item><value>1</value></item></data>".as_slice(),
-///             b"<data><item><value>2</value></item></data>".as_slice()] {
-///     let batches = parser.parse_slice(xml).unwrap();
-///     // ... use batches
-/// }
-/// ```
-pub struct Parser {
-    /// The compiled state, shared rather than borrowed so that a stream can
-    /// *own* its parser: a `BatchStream` that borrowed one could never be
-    /// `'static`, which forces every FFI and async wrapper into a thread and a
-    /// channel to get around the lifetime. Cloning is a refcount bump, so one
-    /// compiled config can serve any number of concurrent streams.
-    inner: Arc<Compiled>,
-}
-
-/// Everything `Parser::new` computes once: immutable, `Sync`, and shared by
-/// every parse the parser serves.
-struct Compiled {
-    /// Owned copy of the configuration, retained so each parse can rebuild its
-    /// fresh `TableBuilder`s and re-apply the reader options.
-    config: Config,
-    /// The compiled path trie — the expensive artifact this type exists to reuse.
-    registry: PathRegistry,
-    /// Whether any configured field maps to an attribute. Cached so the hot
-    /// path can pick the attribute-free event loop without re-scanning config.
-    needs_attrs: bool,
-    /// Per-table compiled `links:` / `row_id:`, aligned with `config.tables`.
-    /// Empty entries for tables using `levels`, which keeps that path untouched.
-    link_plans: Vec<TableLinkPlan>,
-    /// Per-table output schemas (index columns + value columns), aligned with
-    /// `config.tables`. Computed once here so every batch a table emits —
-    /// streamed or collected — shares one `Arc<Schema>`, and so
-    /// [`Parser::schema`] can serve consumers (IPC writers, DataFusion
-    /// registration) before any document is parsed.
-    table_schemas: Vec<Arc<Schema>>,
-    /// Table names as shared strings, aligned with `config.tables`. Streamed
-    /// [`TableBatch`]es carry a clone; `Arc<str>` keeps that per-batch cost
-    /// to a refcount bump.
-    table_names: Vec<Arc<str>>,
-    /// Every field's resolved metadata — name, absolute path, transform and
-    /// value policy — stored flat in `config.tables` order: table 0's fields,
-    /// then table 1's, and so on.
-    ///
-    /// All of it is fixed by the config, yet `XmlToArrowConverter::new` rebuilds
-    /// a `FieldBuilder` per field of every table on *every* document. Computing
-    /// it here turns that per-parse work — layering policies over `defaults`
-    /// over a type default, resolving a relative path, and copying two strings
-    /// — into a clone of three refcounted handles and 32 bytes of `Option<f64>`.
-    ///
-    /// One flat `Vec` rather than a `Vec` per table, so compiling a config adds
-    /// a single allocation rather than one per table.
-    field_metas: Vec<FieldMeta>,
-}
-
-impl Clone for Parser {
-    /// A refcount bump — the compiled trie and schemas are shared, never copied.
-    fn clone(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-        }
-    }
-}
-
-/// Which ancestor counter a declared link reads, resolved to a table index at
-/// compile time so row finalization is an array index rather than a search.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LinkKind {
-    /// The ancestor's **global** row ordinal: a join key, never reset.
-    ParentId,
-    /// The ancestor's **per-scope** row counter: a positional ordinal, and by
-    /// construction the same number a `<level>` column would carry.
-    IndexOf,
-}
-
-#[derive(Debug, Clone)]
-struct LinkSpec {
-    kind: LinkKind,
-    /// Index into `config.tables` of the ancestor whose counter this reads.
-    ancestor_table_idx: usize,
-    column_name: String,
-}
-
-/// What `links:` and `row_id:` compile to for one table.
-///
-/// Empty for every table that uses `levels` (or neither), which is what keeps
-/// the legacy path exactly as it was.
-#[derive(Debug, Clone, Default)]
-struct TableLinkPlan {
-    /// Name of this table's own key column, when it materializes one.
-    row_id_column: Option<String>,
-    links: Vec<LinkSpec>,
-}
-
-/// The plan every table gets when the configuration declares no links at all.
-/// A `static` so `link_plan()` can hand out a reference without allocating.
-static EMPTY_LINK_PLAN: TableLinkPlan = TableLinkPlan {
-    row_id_column: None,
-    links: Vec::new(),
-};
-
-/// The compiled plan for one table, or the shared empty one when the
-/// configuration declared no links.
-fn link_plan(plans: &[TableLinkPlan], table_idx: usize) -> &TableLinkPlan {
-    plans.get(table_idx).unwrap_or(&EMPTY_LINK_PLAN)
-}
-
-/// Resolves every table's `links:` and `row_id:` into index-based specs.
-///
-/// Runs once in `Parser::new`, after validation has established that every
-/// referenced table exists and encloses its referent — so the lookups here
-/// cannot fail and the parse never searches by name.
-fn build_link_plans(config: &Config) -> Vec<TableLinkPlan> {
-    // Empty when nothing declares links or a key column — which is every
-    // configuration written before this release. Returning no plans at all,
-    // rather than one default per table, keeps `Parser::new` from allocating
-    // for a feature the config does not use; `link_plan()` serves a shared
-    // default to the callers that index it.
-    if config
-        .tables
-        .iter()
-        .all(|t| t.links.is_none() && t.row_id.is_none())
-    {
-        return Vec::new();
-    }
-
-    let index_of_table = |path: &str, scope: &str| {
-        config.tables.iter().position(|t| {
-            let other = t.link_scope_path();
-            paths_equal(&other, path) && !paths_equal(&other, scope)
-        })
-    };
-
-    let mut plans: Vec<TableLinkPlan> = vec![TableLinkPlan::default(); config.tables.len()];
-
-    for (table_idx, table) in config.tables.iter().enumerate() {
-        let scope = table.link_scope_path();
-        for link in table.links.iter().flatten() {
-            let Some(column_name) = link.column_name() else {
-                continue;
-            };
-            if let Some(parent) = link.parent.as_deref() {
-                let Some(parent_idx) = config.tables.iter().position(|t| t.name == parent) else {
-                    continue;
-                };
-                plans[table_idx].links.push(LinkSpec {
-                    kind: LinkKind::ParentId,
-                    ancestor_table_idx: parent_idx,
-                    column_name,
-                });
-                // A referenced table materializes its own key, so both sides
-                // of the join exist. Tables nobody references pay nothing,
-                // which is why this is driven by the links rather than
-                // switched on globally.
-                if plans[parent_idx].row_id_column.is_none() {
-                    plans[parent_idx].row_id_column =
-                        Some(default_row_id_name(&config.tables[parent_idx]));
-                }
-            } else if let Some(index_of) = link.index_of.as_deref()
-                && let Some(ancestor_idx) = index_of_table(index_of, &scope)
-            {
-                plans[table_idx].links.push(LinkSpec {
-                    kind: LinkKind::IndexOf,
-                    ancestor_table_idx: ancestor_idx,
-                    column_name,
-                });
-            }
-        }
-    }
-
-    // `row_id: false` suppresses the column even when referenced; `row_id: true`
-    // or a name forces it on for a table nobody references.
-    for (plan, table) in plans.iter_mut().zip(&config.tables) {
-        match table.row_id.as_ref() {
-            Some(RowId::Enabled(false)) => plan.row_id_column = None,
-            Some(RowId::Enabled(true)) => {
-                plan.row_id_column.get_or_insert_with(|| "_id".to_string());
-            }
-            Some(RowId::Named(name)) => plan.row_id_column = Some(name.clone()),
-            None => {}
-        }
-    }
-    plans
-}
-
-/// The default key-column name for a table: `_id`.
-fn default_row_id_name(_table: &TableConfig) -> String {
-    "_id".to_string()
-}
-
-/// Builds a table's output schema exactly as its batches are laid out: the
-/// table's own key column when it has one, then one index column per `levels`
-/// entry (named `<level>`, `UInt32`) or per declared link (`UInt64` for a
-/// parent key, `UInt32` for an ordinal), then the configured fields in order.
-fn build_table_schema(table_config: &TableConfig, plan: &TableLinkPlan) -> Schema {
-    // Exact, not `+ 1` for a key column most tables do not have: an
-    // over-allocated `Vec` leaves `len != capacity`, and this runs once per
-    // table per `Parser::new`, whose fixed cost is the whole parse for a small
-    // document.
-    let mut fields = Vec::with_capacity(
-        usize::from(plan.row_id_column.is_some())
-            + table_config.levels.len()
-            + plan.links.len()
-            + table_config.fields.len(),
-    );
-    if let Some(row_id) = &plan.row_id_column {
-        fields.push(Field::new(row_id, DataType::UInt64, false));
-    }
-    for level in &table_config.levels {
-        fields.push(Field::new(format!("<{level}>"), DataType::UInt32, false));
-    }
-    for link in &plan.links {
-        let dtype = match link.kind {
-            LinkKind::ParentId => DataType::UInt64,
-            LinkKind::IndexOf => DataType::UInt32,
-        };
-        fields.push(Field::new(&link.column_name, dtype, false));
-    }
-    for fc in &table_config.fields {
-        fields.push(Field::new(
-            &fc.name,
-            fc.data_type.as_arrow_type(),
-            fc.nullable,
-        ));
-    }
-    Schema::new(fields)
-}
-
-impl Parser {
-    /// Compiles `config` into a reusable parser, performing all one-time setup.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if configuration validation fails (e.g. an unsupported
-    /// scale/offset on a non-numeric field).
-    pub fn new(config: &Config) -> Result<Self> {
-        // Validate field configurations early to catch unsupported scale/offset.
-        config.validate()?;
-
-        // Build the path registry for efficient lookups — the work we want to
-        // amortize across every document parsed through this `Parser`.
-        let registry = PathRegistry::from_config(config);
-
-        // Links resolve to table indices once, so row finalization indexes an
-        // array instead of searching by name.
-        let link_plans = build_link_plans(config);
-        let table_schemas = config
-            .tables
-            .iter()
-            .enumerate()
-            .map(|(idx, tc)| Arc::new(build_table_schema(tc, link_plan(&link_plans, idx))))
-            .collect();
-        let table_names = config
-            .tables
-            .iter()
-            .map(|tc| Arc::from(tc.name.as_str()))
-            .collect();
-        let defaults = config.defaults.as_ref();
-        // `version: 2` opts into the value defaults 1.0 will make mandatory.
-        // Validation has already established the config is fully migrated, so
-        // this is the only place the version reaches the parser at all.
-        let v2_defaults = config.version == Some(2);
-        let field_metas = config
-            .tables
-            .iter()
-            .flat_map(|tc| tc.fields.iter().map(move |fc| (tc, fc)))
-            .map(|(tc, fc)| {
-                FieldMeta::from_config(tc, fc, &ResolvedPolicy::resolve(fc, defaults, v2_defaults))
-            })
-            .collect();
-
-        Ok(Self {
-            inner: Arc::new(Compiled {
-                config: config.clone(),
-                registry,
-                needs_attrs: config.requires_attribute_parsing(),
-                link_plans,
-                table_schemas,
-                table_names,
-                field_metas,
-            }),
-        })
-    }
-
-    /// Returns advisory findings about this parser's configuration — configs
-    /// that are valid but whose row semantics or value handling commonly
-    /// surprise. See [`Lint`] for what is checked.
-    ///
-    /// Hosts are expected to log these; the library never prints. Lints are
-    /// advisory in every release they appear in and never change parsing
-    /// behavior.
-    ///
-    /// Computed on demand rather than cached in [`Parser::new`]: `Parser::new`'s
-    /// fixed cost dominates parses of small documents, and callers typically
-    /// want this exactly once, at startup.
-    ///
-    /// ```rust
-    /// # use xml2arrow::{Parser, config_from_yaml};
-    /// # let config = config_from_yaml!(r#"
-    /// # tables:
-    /// #   - name: items
-    /// #     xml_path: /data
-    /// #     levels: []
-    /// #     fields: [{name: v, xml_path: /data/item/v, data_type: Int32}]
-    /// # "#);
-    /// let parser = Parser::new(&config)?;
-    /// for lint in parser.warnings() {
-    ///     eprintln!("xml2arrow config warning: {lint}");
-    /// }
-    /// # Ok::<(), xml2arrow::Error>(())
-    /// ```
-    #[must_use]
-    pub fn warnings(&self) -> Vec<Lint> {
-        self.inner.config.lint()
-    }
-
-    /// Returns the output schema of `table` without parsing any document.
-    ///
-    /// The schema is fully determined by the [`Config`]: one non-nullable
-    /// `UInt32` index column per `levels` entry (named `<level>`), followed by
-    /// the configured fields. Every batch the table produces — via
-    /// [`Parser::parse`] or the streaming entry points — shares this exact
-    /// `Arc<Schema>`.
-    ///
-    /// Returns `None` for unknown table names and for *structural* tables
-    /// (empty `fields`), which never appear in any output.
-    #[must_use]
-    pub fn schema(&self, table: &str) -> Option<SchemaRef> {
-        self.inner
-            .config
-            .tables
-            .iter()
-            .position(|tc| tc.name == table && !tc.fields.is_empty())
-            .map(|idx| self.inner.table_schemas[idx].clone())
-    }
-
-    /// Returns the schema of the config's unique output table — the table
-    /// that [`Parser::parse_single_table`] streams.
-    ///
-    /// Consumers wiring the single-table stream into schema-first sinks
-    /// (Parquet writers, Arrow C-stream exports for Python) need this before
-    /// constructing the reader; exposing it here keeps the "exactly one
-    /// output table" rule and its error in one place.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidConfig`] when the config does not have exactly
-    /// one table with fields, exactly like [`Parser::parse_single_table`].
-    pub fn single_table_schema(&self) -> Result<SchemaRef> {
-        Ok(self.inner.table_schemas[self.single_output_table_index()?].clone())
-    }
-
-    /// Parses XML from a streaming reader (e.g. a `File`) into Arrow batches.
-    ///
-    /// Use [`Parser::parse_slice`] instead when the whole document is already
-    /// in memory — it avoids quick-xml's per-event buffer copy.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if XML parsing encounters invalid data, value
-    /// conversion fails, or Arrow `RecordBatch` creation fails.
-    pub fn parse(&self, reader: impl BufRead) -> Result<IndexMap<String, RecordBatch>> {
-        let mut reader = Reader::from_reader(reader);
-        self.configure_reader(&mut reader);
-        let needs_attrs = self.inner.needs_attrs;
-        self.run_parse(&mut reader, |r, t, c| {
-            if needs_attrs {
-                process_xml_events::<_, true>(r, t, c)
-            } else {
-                process_xml_events::<_, false>(r, t, c)
-            }
-        })
-    }
-
-    /// Parses XML from an in-memory byte slice into Arrow batches (zero-copy).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if XML parsing encounters invalid data, value
-    /// conversion fails, or Arrow `RecordBatch` creation fails.
-    pub fn parse_slice(&self, xml: &[u8]) -> Result<IndexMap<String, RecordBatch>> {
-        let mut reader = Reader::from_reader(xml);
-        self.configure_reader(&mut reader);
-        let needs_attrs = self.inner.needs_attrs;
-        self.run_parse(&mut reader, |r, t, c| {
-            if needs_attrs {
-                process_xml_events_slice::<true>(r, t, c)
-            } else {
-                process_xml_events_slice::<false>(r, t, c)
-            }
-        })
-    }
-
-    /// Parses XML from a streaming reader, yielding Arrow batches
-    /// incrementally with bounded memory.
-    ///
-    /// This is the entry point for documents too large to hold in memory as
-    /// one set of Arrow tables (multi-GB exports, archives, log or catalogue
-    /// extracts). The returned [`BatchStream`] is an
-    /// `Iterator<Item = Result<TableBatch>>`: each item names the table it
-    /// belongs to and carries a batch of its rows. A table's batch is emitted
-    /// whenever it crosses one of the [`BatchOptions`] thresholds, and the
-    /// remainder is drained when the document ends (or a
-    /// `stop_at_paths` match stops it early).
-    ///
-    /// Guarantees:
-    ///
-    /// - **Value transparency**: concatenating a table's batches in yield
-    ///   order (e.g. `arrow::compute::concat_batches`) produces exactly the
-    ///   `RecordBatch` that [`Parser::parse`] would have returned for it —
-    ///   including the `<level>` index columns.
-    /// - Batches of one table share one `Arc<Schema>`, equal to
-    ///   [`Parser::schema`], and always contain at least one row (tables with
-    ///   no rows yield nothing — use [`Parser::schema`] when a sink needs a
-    ///   schema up front).
-    /// - Within a table, rows appear in document order across batches. No
-    ///   ordering promise across tables; note that a parent table's row
-    ///   always finalizes *after* its children's rows (its element closes
-    ///   last), so a child batch can reference a parent row that arrives in
-    ///   a later batch of the parent table.
-    /// - On error the stream yields the `Err` once and then fuses;
-    ///   already-yielded batches remain valid.
-    ///
-    /// The `<level>` caveat from the non-streaming API carries over
-    /// unchanged: index values are per-scope ordinals, so incremental joins
-    /// must match on all level columns (see the `levels` documentation).
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use xml2arrow::{BatchOptions, Parser, config::{Config, TableConfig, FieldConfigBuilder, DType}};
-    ///
-    /// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build().unwrap()];
-    /// let config = Config::builder()
-    ///     .table(TableConfig::builder("items", "/data").fields(fields).build())
-    ///     .build()
-    ///     .unwrap();
-    /// let parser = Parser::new(&config).unwrap();
-    ///
-    /// let xml: &[u8] = b"<data><item><value>1</value></item><item><value>2</value></item></data>";
-    /// let options = BatchOptions::default().with_max_rows_per_batch(1);
-    /// for item in parser.parse_batches(xml, options) {
-    ///     let batch = item.unwrap();
-    ///     assert_eq!(&*batch.table, "items");
-    ///     assert_eq!(batch.batch.num_rows(), 1);
-    /// }
-    /// ```
-    pub fn parse_batches<R: BufRead>(
-        &self,
-        reader: R,
-        options: BatchOptions,
-    ) -> BatchStream<'_, ReaderSource<R>> {
-        let mut reader = Reader::from_reader(reader);
-        self.configure_reader(&mut reader);
-        BatchStream::new(
-            self.clone(),
-            ReaderSource {
-                reader,
-                buf: Vec::with_capacity(4096),
-            },
-            options,
-        )
-    }
-
-    /// Zero-copy variant of [`Parser::parse_batches`] for XML already in
-    /// memory (or memory-mapped): events borrow directly from the slice, no
-    /// per-event buffer copy. Combined with a memory-mapped file this parses
-    /// arbitrarily large documents with bounded heap — the OS pages the
-    /// input, the batch thresholds bound the builders.
-    pub fn parse_batches_slice<'a>(
-        &'a self,
-        xml: &'a [u8],
-        options: BatchOptions,
-    ) -> BatchStream<'a, SliceSource<'a>> {
-        let mut reader = Reader::from_reader(xml);
-        self.configure_reader(&mut reader);
-        BatchStream::new(self.clone(), SliceSource { reader }, options)
-    }
-
-    /// Streams a reader into batches through a parser the stream **owns**,
-    /// yielding a `BatchStream<'static, _>` when the reader is `'static`.
-    ///
-    /// [`Parser::parse_batches`] borrows the parser, so its stream cannot
-    /// outlive the binding it came from. That is fine inside one function and
-    /// awkward everywhere else: an FFI wrapper, a struct field, or a thread
-    /// needs a value that stands alone, and the usual workaround — a producer
-    /// thread pushing batches down a channel — buys ownership at the cost of a
-    /// thread and a synchronisation protocol.
-    ///
-    /// Since a [`Parser`] is a handle over shared compiled state, taking it by
-    /// value costs a refcount bump. Callers who keep a parser around clone it:
-    ///
-    /// ```rust
-    /// # use xml2arrow::{BatchOptions, Parser, config_from_yaml};
-    /// # let config = config_from_yaml!(r#"
-    /// # tables:
-    /// #   - name: items
-    /// #     xml_path: /data
-    /// #     levels: []
-    /// #     fields: [{name: v, xml_path: /data/item/v, data_type: Int32}]
-    /// # "#);
-    /// let parser = Parser::new(&config)?;
-    /// let xml: &'static [u8] = b"<data><item><v>1</v></item></data>";
-    ///
-    /// // Owns its parser, so it can be returned, stored, or sent to a thread.
-    /// let stream = parser.clone().into_batches(xml, BatchOptions::default());
-    /// let handle = std::thread::spawn(move || stream.count());
-    /// assert_eq!(handle.join().unwrap(), 1);
-    ///
-    /// // The parser is still usable here.
-    /// let _ = parser.parse_slice(xml)?;
-    /// # Ok::<(), xml2arrow::Error>(())
-    /// ```
-    pub fn into_batches<R: BufRead>(
-        self,
-        reader: R,
-        options: BatchOptions,
-    ) -> BatchStream<'static, ReaderSource<R>> {
-        let mut reader = Reader::from_reader(reader);
-        self.configure_reader(&mut reader);
-        BatchStream::new(
-            self,
-            ReaderSource {
-                reader,
-                buf: Vec::with_capacity(4096),
-            },
-            options,
-        )
-    }
-
-    /// Owned counterpart of [`Parser::parse_single_table`]: a
-    /// [`RecordBatchReader`] that carries its own parser.
-    ///
-    /// This is the shape schema-first consumers want — `ArrowWriter`,
-    /// DataFusion, or a pyarrow C-stream export all take a reader and expect to
-    /// own it.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidConfig`] when the config does not have exactly
-    /// one table with fields, exactly like [`Parser::parse_single_table`].
-    pub fn into_single_table<R: BufRead>(
-        self,
-        reader: R,
-        options: BatchOptions,
-    ) -> Result<SingleTableReader<'static, ReaderSource<R>>> {
-        let table_idx = self.single_output_table_index()?;
-        let schema = self.inner.table_schemas[table_idx].clone();
-        Ok(SingleTableReader {
-            schema,
-            stream: self.into_batches(reader, options),
-        })
-    }
-
-    /// Callback-style wrapper over [`Parser::parse_batches`]: drives the
-    /// stream to completion, handing each batch to `sink`. A `sink` error
-    /// aborts the parse and is returned as-is.
-    ///
-    /// # Errors
-    ///
-    /// Returns the first error the underlying stream yields (XML parsing,
-    /// value conversion, or `RecordBatch` creation), or the first error
-    /// returned by `sink` — whichever occurs first aborts the parse.
-    #[deprecated(
-        since = "0.20.0",
-        note = "iterate `parse_batches` directly — `for item in parser.parse_batches(reader, options) { let TableBatch { table, batch } = item?; }` is the same code without a second entry point"
-    )]
-    pub fn parse_streaming<R, F>(&self, reader: R, options: BatchOptions, mut sink: F) -> Result<()>
-    where
-        R: BufRead,
-        F: FnMut(&str, RecordBatch) -> Result<()>,
-    {
-        for item in self.parse_batches(reader, options) {
-            let TableBatch { table, batch } = item?;
-            sink(&table, batch)?;
-        }
-        Ok(())
-    }
-
-    /// Streams the single output table of this config as an
-    /// [`arrow::array::RecordBatchReader`].
-    ///
-    /// Many configs — and virtually all "huge document" ones — define exactly
-    /// one table with fields. For those, this adapter exposes the parse as
-    /// the Arrow ecosystem's standard reader abstraction, directly consumable
-    /// by `parquet::arrow::ArrowWriter`, DataFusion, or (through the C stream
-    /// interface) pyarrow.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidConfig`] when the config does not have exactly
-    /// one table with fields (structural tables don't count — they produce no
-    /// output). Use [`Parser::parse_batches`] for multi-table configs.
-    pub fn parse_single_table<R: BufRead>(
-        &self,
-        reader: R,
-        options: BatchOptions,
-    ) -> Result<SingleTableReader<'_, ReaderSource<R>>> {
-        let table_idx = self.single_output_table_index()?;
-        Ok(SingleTableReader {
-            schema: self.inner.table_schemas[table_idx].clone(),
-            stream: self.parse_batches(reader, options),
-        })
-    }
-
-    /// Zero-copy variant of [`Parser::parse_single_table`] for in-memory (or
-    /// memory-mapped) XML.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidConfig`] when the config does not have exactly
-    /// one table with fields, exactly like [`Parser::parse_single_table`].
-    pub fn parse_single_table_slice<'a>(
-        &'a self,
-        xml: &'a [u8],
-        options: BatchOptions,
-    ) -> Result<SingleTableReader<'a, SliceSource<'a>>> {
-        let table_idx = self.single_output_table_index()?;
-        Ok(SingleTableReader {
-            schema: self.inner.table_schemas[table_idx].clone(),
-            stream: self.parse_batches_slice(xml, options),
-        })
-    }
-
-    /// Index of the unique output table (non-empty `fields`), or the
-    /// `SingleTableRequired` config error.
-    fn single_output_table_index(&self) -> Result<usize> {
-        let mut output_tables = self
-            .inner
-            .config
-            .tables
-            .iter()
-            .enumerate()
-            .filter(|(_, tc)| !tc.fields.is_empty())
-            .map(|(idx, _)| idx);
-        let first = output_tables.next();
-        match (first, output_tables.next()) {
-            (Some(idx), None) => Ok(idx),
-            _ => Err(Error::InvalidConfig {
-                reason: ConfigIssue::SingleTableRequired {
-                    // Either no output table at all, or the two found plus
-                    // whatever the iterator still holds.
-                    output_tables: first.map_or(0, |_| 2 + output_tables.count()),
-                },
-            }),
-        }
-    }
-
-    /// Applies `ParserOptions` to the shared `quick_xml::Reader` config.
-    ///
-    /// Both entry points configure the reader identically; isolating that
-    /// here means each option lives in one place. `validate_closing_tags =
-    /// false` is the per-event optimization described in
-    /// `ParserOptions::validate_closing_tags`.
-    fn configure_reader<R>(&self, reader: &mut Reader<R>) {
-        let rc = reader.config_mut();
-        if self.inner.config.parser_options.trim_text {
-            rc.trim_text(true);
-        }
-        if !self.inner.config.parser_options.validate_closing_tags {
-            rc.check_end_names = false;
-        }
-    }
-
-    /// Shared parser driver used by both `parse` and `parse_slice`.
-    ///
-    /// The two entry points differ only in how they obtain events from their
-    /// reader and whether attribute parsing is required; everything else —
-    /// building the fresh per-parse converter, root-table priming, and
-    /// finalization — is identical. Accepting the event loop as a closure lets
-    /// each caller stay specialized (buffered vs zero-copy, attrs on vs off)
-    /// without duplicating the surrounding orchestration.
-    fn run_parse<R, F>(
-        &self,
-        reader: &mut Reader<R>,
-        run_events: F,
-    ) -> Result<IndexMap<String, RecordBatch>>
-    where
-        F: FnOnce(&mut Reader<R>, &mut PathTracker, &mut XmlToArrowConverter) -> Result<()>,
-    {
-        // usize::MAX thresholds: collect everything, never trigger a flush
-        // (root-table priming happens inside the converter constructor).
-        let mut xml_to_arrow_converter = XmlToArrowConverter::new(self, usize::MAX, usize::MAX);
-        let mut path_tracker = PathTracker::new(&self.inner.registry);
-
-        // The event loop aborts on the first error with the reader still
-        // parked at the failing event, so annotating the byte offset *here* —
-        // once per parse, not per event — loses no precision and keeps
-        // position work entirely out of the loop.
-        run_events(reader, &mut path_tracker, &mut xml_to_arrow_converter)
-            .map_err(|e| e.with_position(reader.buffer_position()))?;
-
-        xml_to_arrow_converter.finish()
-    }
-}
-
-/// Parses XML data from a reader into Arrow record batches based on a provided configuration.
-///
-/// This is a convenience wrapper that compiles `config` into a [`Parser`] and
-/// parses a single document. When parsing **many** documents with the same
-/// `Config`, construct a [`Parser`] once and reuse it — that amortizes the
-/// one-time path-compilation cost this wrapper pays on every call.
-///
-/// This function takes a reader implementing the `BufRead` trait (e.g., a
-/// `BufReader<File>` or a `&[u8]` slice) and a `Config` struct that defines the
-/// structure of the XML data and how it should be mapped to Arrow tables.
-///
-/// # Arguments
-///
-/// * `reader`: A reader object that provides access to the XML data.
-/// * `config`: A `Config` struct that specifies the tables, fields, and data types to extract from the XML.
-///
-/// # Returns
-///
-/// A `Result` containing:
-///
-/// *   `Ok(IndexMap<String, RecordBatch>)`: An `IndexMap` where keys are the table names (as defined
-///     in the config) and values are the corresponding Arrow `RecordBatch` objects.
-/// *   `Err(Error)`: An `Error` value if any error occurs during parsing, configuration, or Arrow table creation.
-///
-/// # Errors
-///
-/// Returns an error if configuration validation fails, XML parsing encounters invalid
-/// data, value conversion fails, or Arrow `RecordBatch` creation fails.
-///
-/// # Example
-///
-/// ```rust
-/// use xml2arrow::{Parser, config::{Config, TableConfig, FieldConfigBuilder, DType}};
-///
-/// let xml_content = r#"<data><item><value>123</value></item></data>"#;
-/// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build()?];
-/// let config = Config::builder()
-///     .table(TableConfig::builder("items", "/data").fields(fields).build())
-///     .build()?;
-/// let record_batches = Parser::new(&config)?.parse(xml_content.as_bytes())?;
-/// // ... use record_batches
-/// # Ok::<(), xml2arrow::Error>(())
-/// ```
-#[deprecated(
-    since = "0.20.0",
-    note = "construct a `Parser` and reuse it: `Parser::new(&config)?.parse(reader)`. The free function hides the one-time path-compilation cost, which it pays on every call"
-)]
-pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<String, RecordBatch>> {
-    Parser::new(config)?.parse(reader)
-}
-
-/// Parses XML data from an in-memory byte slice into Arrow record batches.
-///
-/// This is the zero-copy variant of [`parse_xml`]. When the XML data is already
-/// in memory, this function avoids per-event buffer copies by using quick-xml's
-/// slice reader, which returns events that borrow directly from the input.
-/// For streaming sources (files, network), use [`parse_xml`] instead.
-///
-/// Like [`parse_xml`], this compiles a throwaway [`Parser`] per call; reuse a
-/// [`Parser`] when parsing many slices with the same `Config`.
-///
-/// # Arguments
-///
-/// * `xml`: A byte slice containing the XML data.
-/// * `config`: A `Config` struct that specifies the tables, fields, and data types to extract.
-///
-/// # Returns
-///
-/// An `IndexMap<String, RecordBatch>` where keys are table names and values are Arrow batches.
-///
-/// # Errors
-///
-/// Returns an error if configuration validation fails, XML parsing encounters invalid
-/// data, value conversion fails, or Arrow `RecordBatch` creation fails.
-///
-/// # Example
-///
-/// ```rust
-/// use xml2arrow::{Parser, config::{Config, TableConfig, FieldConfigBuilder, DType}};
-///
-/// let xml = b"<data><item><value>123</value></item></data>";
-/// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build()?];
-/// let config = Config::builder()
-///     .table(TableConfig::builder("items", "/data").fields(fields).build())
-///     .build()?;
-/// let record_batches = Parser::new(&config)?.parse_slice(xml)?;
-/// # Ok::<(), xml2arrow::Error>(())
-/// ```
-#[deprecated(
-    since = "0.20.0",
-    note = "construct a `Parser` and reuse it: `Parser::new(&config)?.parse_slice(xml)`. The free function hides the one-time path-compilation cost, which it pays on every call"
-)]
-pub fn parse_xml_slice(xml: &[u8], config: &Config) -> Result<IndexMap<String, RecordBatch>> {
-    Parser::new(config)?.parse_slice(xml)
-}
-
-// --- Event loop implementations ---
-//
-// Two loop variants exist to match how events are read from quick-xml:
-//
-// 1) `process_xml_events` (buffered): uses `read_event_into(&mut buf)` which
-//    copies each event into a reusable buffer. Required for streaming readers.
-//
-// 2) `process_xml_events_slice` (zero-copy): uses `read_event()` on
-//    `Reader<&[u8]>` which returns events that borrow directly from the input
-//    slice, eliminating per-event copies.
-//
-// Both delegate to `handle_event` for the actual event processing so the
-// match-arm logic is written exactly once.
-//
-// A THIRD pump exists in `BatchStream::next` (streaming output): it reads
-// through the `EventSource` abstraction and steps one event at a time so a
-// batch can be yielded mid-parse. All three share `handle_event`, but the
-// read/Break/buffer discipline around it is written three times — any change
-// to the loops below must be mirrored there, and vice versa.
-
-/// The result of processing a single XML event, telling the event loop
-/// whether to continue reading or stop (on EOF or a stop-path match).
-enum LoopAction {
-    Continue,
-    Break,
-}
-
-/// Closes the currently entered element: pops its frame, pops the table scope
-/// it opened, finalizes a row if this element delimits one, and signals a break
-/// when it is a stop path.
-///
-/// Called by both `Event::End` and `Event::Empty` (which enters and closes in
-/// one event). Keeping the closing semantics in one place avoids drift between
-/// them.
-///
-/// Every decision here is a bit the frame has carried since `enter()` resolved
-/// it, so closing an element touches neither the registry nor the parent frame.
-/// `ends_row` in particular is the *precomputed* form of the rule this function
-/// used to evaluate — "the closing element is configured and its parent is a
-/// table" — see [`PathNodeInfo::ends_row`] for why the two are the same rule.
-/// Which table the row belongs to is unchanged: the innermost table still open,
-/// which is what makes an unconfigured subtree unable to perturb any output.
-#[inline]
-fn close_element(
-    path_tracker: &mut PathTracker,
-    xml_to_arrow_converter: &mut XmlToArrowConverter,
-) -> Result<LoopAction> {
-    // `None` at root depth: a stray end tag with no open element is a no-op.
-    let Some(frame) = path_tracker.leave() else {
-        return Ok(LoopAction::Continue);
-    };
-
-    // Order is load-bearing: `end_table` finalizes a declared `row: "."` while
-    // its own scope is still innermost, then pops it, and only then can
-    // `ends_row` finalize the *enclosing* table's row.
-    if frame.is_table {
-        xml_to_arrow_converter.end_table()?;
-    }
-    if frame.ends_row {
-        xml_to_arrow_converter.end_current_row()?;
-    }
-    // Stop after closing the configured path, so header-only reads exit without
-    // scanning the remainder of the document.
-    if frame.is_stop {
-        return Ok(LoopAction::Break);
-    }
-    Ok(LoopAction::Continue)
-}
-
-/// Builds the `TruncatedInput` error for the EOF completeness check. Outlined
-/// to keep `handle_event`'s body small — code-size growth there has cost more
-/// than 10% through lost inlining — even though this check itself runs only
-/// once per parse.
-#[cold]
-#[inline(never)]
-fn truncated_input_error(open_elements: usize) -> Error {
-    Error::TruncatedInput { open_elements }
-}
-
-/// Resolves a general reference in element text (`&#66;`, `&amp;`,
-/// `&custom;`) and appends the resolved bytes to the fields listening at
-/// `node_id`.
-///
-/// Two resolution steps cover the complete vocabulary a non-DTD-aware parser
-/// can handle: character references (`&#66;`, `&#x41;`) and the five
-/// predefined entities. A 4-byte stack buffer keeps the char-ref path
-/// allocation-free. An undeclared/custom entity cannot be resolved without
-/// DTD support; silently dropping it — the historical behavior — corrupted
-/// the extracted value, so it errors instead, but only when a configured
-/// field is actually capturing at this node.
-///
-/// Kept out of line (like `parse_attributes`): references are rare relative
-/// to Start/Text/End events, and inlining this — with its error construction
-/// — would grow `handle_event` for no hot-path benefit.
-#[inline(never)]
-fn handle_general_ref(
-    e: BytesRef<'_>,
-    node_id: PathNodeId,
-    xml_to_arrow_converter: &mut XmlToArrowConverter,
-) -> Result<()> {
-    if let Some(ch) = e.resolve_char_ref()? {
-        let mut utf8_buf = [0u8; 4];
-        let encoded = ch.encode_utf8(&mut utf8_buf);
-        xml_to_arrow_converter.set_field_value_for_node(node_id, encoded.as_bytes());
-        return Ok(());
-    }
-
-    // The predefined-entity lookup requires a `&str`, but the vocabulary
-    // (`amp`, `lt`, `gt`, `quot`, `apos`) is ASCII, so invalid UTF-8 simply
-    // fails to resolve.
-    let text = e.into_inner();
-    let resolved = std::str::from_utf8(&text)
-        .ok()
-        .and_then(escape::resolve_predefined_entity);
-    match resolved {
-        Some(entity_text) => {
-            xml_to_arrow_converter.set_field_value_for_node(node_id, entity_text.as_bytes());
-        }
-        None => {
-            if let Some((meta, row_index)) = xml_to_arrow_converter.active_field_meta(node_id) {
-                return Err(Error::ParseError {
-                    field: meta.name.clone(),
-                    path: meta.xml_path.clone(),
-                    value: String::from_utf8_lossy(&text).into_owned(),
-                    kind: ParseKind::UnresolvedEntity,
-                    // Raised mid-row; see `duplicate_value_error`.
-                    location: Box::new(ErrorLocation {
-                        row: Some(row_index),
-                        position: None,
-                    }),
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Processes a single XML event, updating path tracking, table builders, and field values.
-///
-/// This function encapsulates the core event-handling logic shared by both the
-/// buffered and zero-copy parsing paths. Extracting it avoids duplicating the
-/// match arms while keeping each loop wrapper focused solely on how it obtains
-/// the next event.
-///
-/// On every `Event::Start` / `Event::Empty`, `path_tracker.enter()` returns
-/// the new node together with a borrow of its `PathNodeInfo`. We extract the
-/// few fields the arm actually needs (`table_index`, `has_attribute_children`)
-/// before doing any further work on the converter, so the immutable borrow
-/// of the registry ends and the converter is free to be mutated. The parent's
-/// `is_table` flag — needed when this element later closes — was cached onto
-/// the path-tracker frame by `enter()`, so we never re-read `node_info[]` at
-/// `Event::End` time.
-///
-/// `inline(always)`, not `inline`: this function exists to be written once and
-/// shared by the event pumps, not to be *called* by them. It sits astride every
-/// XML event, so a call here costs argument setup, a return, and the loss of
-/// cross-function optimization on the hottest path in the crate — measured at
-/// around 6% more instructions when the inliner declined it after unrelated
-/// growth in the value-append helpers. Its size is deliberately kept low for
-/// the same reason: rare arms and error construction live in `#[cold]` /
-/// `#[inline(never)]` helpers so that what lands here stays small.
-///
-/// Whether it is inlined is checkable without a benchmark: if
-/// `nm target/release/deps/parse_benchmark-* | grep handle_event` prints
-/// anything, it is not.
-#[inline(always)]
-fn handle_event<const PARSE_ATTRIBUTES: bool>(
-    event: Event<'_>,
-    decoder: Decoder,
-    path_tracker: &mut PathTracker,
-    xml_to_arrow_converter: &mut XmlToArrowConverter,
-    attr_name_buffer: &mut Vec<u8>,
-) -> Result<LoopAction> {
-    match event {
-        Event::Start(e) => {
-            // `strip_namespaces` (default) resolves the local name, dropping any
-            // `ns:` prefix; disabling it uses the raw qualified name and skips
-            // quick-xml's per-name `:` scan — identical output for prefix-free
-            // documents (see `ParserOptions::strip_namespaces`).
-            let name_bytes = if xml_to_arrow_converter.strip_namespaces {
-                e.local_name().into_inner()
-            } else {
-                e.name().into_inner()
-            };
-
-            // Fused lookup: child resolution + node-info read in one pass.
-            // The `&PathNodeInfo` borrow is tied to the registry (not the
-            // converter), so the repeated-element check can run on it before
-            // the bits the rest of the arm needs are extracted into Copy
-            // locals.
-            let (node_id_opt, table_index, has_attrs) =
-                match path_tracker.enter(name_bytes, &xml_to_arrow_converter.compiled.registry) {
-                    Some((id, info)) => {
-                        // Re-entering a field element whose row value is
-                        // already set means the element appeared twice —
-                        // rejected while `info` is in hand (no extra
-                        // registry read; see check_element_not_repeated).
-                        if !info.field_indices.is_empty() {
-                            check_element_not_repeated(
-                                &mut xml_to_arrow_converter.table_builders,
-                                &xml_to_arrow_converter.builder_stack,
-                                info,
-                            )?;
-                        }
-                        (Some(id), info.table_index, info.has_attribute_children)
-                    }
-                    None => (None, None, false),
-                };
-
-            if let Some(table_idx) = table_index {
-                // node_id is Some when info was returned, so this unwrap holds.
-                xml_to_arrow_converter.start_table(table_idx, node_id_opt.unwrap());
-            }
-
-            if PARSE_ATTRIBUTES && has_attrs {
-                parse_attributes(
-                    decoder,
-                    e.attributes(),
-                    path_tracker,
-                    xml_to_arrow_converter,
-                    attr_name_buffer,
-                )?;
-            }
-        }
-        Event::Empty(e) => {
-            // `strip_namespaces` (default) resolves the local name, dropping any
-            // `ns:` prefix; disabling it uses the raw qualified name and skips
-            // quick-xml's per-name `:` scan — identical output for prefix-free
-            // documents (see `ParserOptions::strip_namespaces`).
-            let name_bytes = if xml_to_arrow_converter.strip_namespaces {
-                e.local_name().into_inner()
-            } else {
-                e.name().into_inner()
-            };
-
-            let (node_id_opt, table_index, has_attrs) =
-                match path_tracker.enter(name_bytes, &xml_to_arrow_converter.compiled.registry) {
-                    Some((id, info)) => {
-                        // Same repeated-element guard as Event::Start.
-                        if !info.field_indices.is_empty() {
-                            check_element_not_repeated(
-                                &mut xml_to_arrow_converter.table_builders,
-                                &xml_to_arrow_converter.builder_stack,
-                                info,
-                            )?;
-                        }
-                        (Some(id), info.table_index, info.has_attribute_children)
-                    }
-                    None => (None, None, false),
-                };
-
-            if let Some(table_idx) = table_index {
-                xml_to_arrow_converter.start_table(table_idx, node_id_opt.unwrap());
-            }
-
-            if PARSE_ATTRIBUTES && has_attrs {
-                parse_attributes(
-                    decoder,
-                    e.attributes(),
-                    path_tracker,
-                    xml_to_arrow_converter,
-                    attr_name_buffer,
-                )?;
-            }
-
-            // Empty elements have no children or text; close immediately. The
-            // frame `enter` just pushed carries the same bits an `Event::End`
-            // would pop, so the two paths cannot diverge.
-            return close_element(path_tracker, xml_to_arrow_converter);
-        }
-        Event::GeneralRef(e) => {
-            if let Some(node_id) = path_tracker.current() {
-                handle_general_ref(e, node_id, xml_to_arrow_converter)?;
-            }
-        }
-        Event::Text(e) => {
-            if let Some(node_id) = path_tracker.current() {
-                let text = e.into_inner();
-                xml_to_arrow_converter.set_field_value_for_node(node_id, &text);
-            }
-        }
-        Event::CData(e) => {
-            if let Some(node_id) = path_tracker.current() {
-                let text = e.into_inner();
-                xml_to_arrow_converter.set_field_value_for_node(node_id, &text);
-            }
-        }
-        Event::End(_) => {
-            return close_element(path_tracker, xml_to_arrow_converter);
-        }
-        Event::Eof => {
-            // A well-formed document closes every element it opened, so the
-            // tracker is back at root depth here. Anything else means the input
-            // ended mid-element — a truncated file, a killed writer, a short
-            // read — and the rows parsed so far are a plausible-looking
-            // *partial* result. Returning them silently is the worst failure
-            // mode this crate has, so fail instead.
-            //
-            // quick-xml's `check_end_names` only rejects *mismatched* end tags,
-            // never *missing* ones, so this is the only point at which
-            // truncation is detectable. `stop_at_paths` exits via
-            // `close_element`'s Break and never reaches this arm, so deliberate
-            // early stops keep working.
-            let depth = path_tracker.depth();
-            if depth > 0 && !xml_to_arrow_converter.allow_truncated_input {
-                return Err(truncated_input_error(depth));
-            }
-            return Ok(LoopAction::Break);
-        }
-        _ => (),
-    }
-    Ok(LoopAction::Continue)
-}
-
-/// Streaming (buffered) XML event loop for readers that implement `BufRead`.
-///
-/// This path copies each event into a reusable buffer via `read_event_into`.
-/// For in-memory byte slices, prefer `process_xml_events_slice` which avoids
-/// the copy entirely.
-fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
-    reader: &mut Reader<B>,
-    path_tracker: &mut PathTracker,
-    xml_to_arrow_converter: &mut XmlToArrowConverter,
-) -> Result<()> {
-    let mut buf = Vec::with_capacity(4096);
-    let mut attr_name_buffer = Vec::with_capacity(64);
-    // Decoder is `Copy` and reflects the reader's encoding, which does not
-    // change once parsing begins — read it once outside the hot loop.
-    let decoder = reader.decoder();
-
-    loop {
-        let event = reader.read_event_into(&mut buf)?;
-        let action = handle_event::<PARSE_ATTRIBUTES>(
-            event,
-            decoder,
-            path_tracker,
-            xml_to_arrow_converter,
-            &mut attr_name_buffer,
-        )?;
-        if matches!(action, LoopAction::Break) {
-            break;
-        }
-        buf.clear();
-    }
-    Ok(())
-}
-
-/// Zero-copy XML event loop for in-memory byte slices.
-///
-/// When the XML input is already in memory, `Reader<&[u8]>::read_event()`
-/// returns events that borrow directly from the input slice — no buffer
-/// allocation or per-event copy required. This is the fast path for the
-/// common case where the caller has the full XML in a `&[u8]` or `&str`.
-fn process_xml_events_slice<const PARSE_ATTRIBUTES: bool>(
-    reader: &mut Reader<&[u8]>,
-    path_tracker: &mut PathTracker,
-    xml_to_arrow_converter: &mut XmlToArrowConverter,
-) -> Result<()> {
-    let mut attr_name_buffer = Vec::with_capacity(64);
-    // Decoder is `Copy` and reflects the reader's encoding, which does not
-    // change once parsing begins — read it once outside the hot loop.
-    let decoder = reader.decoder();
-
-    loop {
-        let event = reader.read_event()?;
-        let action = handle_event::<PARSE_ATTRIBUTES>(
-            event,
-            decoder,
-            path_tracker,
-            xml_to_arrow_converter,
-            &mut attr_name_buffer,
-        )?;
-        if matches!(action, LoopAction::Break) {
-            break;
-        }
-    }
-    Ok(())
-}
-
-#[inline(never)]
-fn parse_attributes(
-    decoder: Decoder,
-    mut attributes: Attributes,
-    path_tracker: &mut PathTracker,
-    xml_to_arrow_converter: &mut XmlToArrowConverter,
-    attr_name_buffer: &mut Vec<u8>,
-) -> Result<()> {
-    // For trusted inputs, skip quick-xml's duplicate-attribute detection.
-    // That check is O(n²) in the element's attribute count and, more
-    // importantly, allocates a `Vec` per attribute-bearing element to record
-    // the seen key ranges — pure overhead when we don't act on duplicates.
-    if !xml_to_arrow_converter.validate_attributes {
-        attributes.with_checks(false);
-    }
-    // Hoisted out of the loop: same `:`-scan trade-off as element names, applied
-    // to each attribute key (see `ParserOptions::strip_namespaces`).
-    let strip_namespaces = xml_to_arrow_converter.strip_namespaces;
-    for attribute in attributes {
-        let attribute = attribute?;
-        let key = if strip_namespaces {
-            attribute.key.local_name().into_inner()
-        } else {
-            attribute.key.into_inner()
-        };
-
-        // Reuse buffer to avoid allocation: build "@key" as bytes
-        attr_name_buffer.clear();
-        attr_name_buffer.push(b'@');
-        attr_name_buffer.extend_from_slice(key);
-
-        // Attributes only need the node ID; the `&PathNodeInfo` borrow
-        // returned by enter() is dropped immediately so the converter can
-        // be mutated below.
-        let attr_node_id = path_tracker
-            .enter(attr_name_buffer, &xml_to_arrow_converter.compiled.registry)
-            .map(|(id, _)| id);
-        if let Some(id) = attr_node_id {
-            // Attribute values are almost always plain UTF-8 needing no
-            // processing; in that case `decoded_and_normalized_value` is
-            // wasted work — it runs a per-attribute decode + unescape, and
-            // `Utf8` fields are validated exactly once at row finalization
-            // (`append_current_value`) anyway while numeric fields parse
-            // straight from bytes. The slow path triggers on exactly the
-            // bytes a conforming parser must process: `&` starts an entity
-            // or character reference, and literal `\t`, `\r`, `\n` become
-            // spaces under XML 1.0 attribute-value normalization
-            // (https://www.w3.org/TR/xml/#AVNormalize). Values containing
-            // none of the four are byte-identical either way.
-            //
-            // Element text (`Event::Text`) intentionally stays raw: the XML
-            // spec applies this normalization to attribute values only.
-            let raw = attribute.value.as_ref();
-            if raw
-                .iter()
-                .any(|b| matches!(b, b'&' | b'\t' | b'\r' | b'\n'))
-            {
-                // `Implicit1_0` selects plain XML 1.0 normalization (no
-                // XML 1.1 extras), the same default the deprecated
-                // `decode_and_unescape_value` hardcoded.
-                let value =
-                    attribute.decoded_and_normalized_value(XmlVersion::Implicit1_0, decoder)?;
-                xml_to_arrow_converter.set_field_value_for_node(id, value.as_bytes());
-            } else {
-                xml_to_arrow_converter.set_field_value_for_node(id, raw);
-            }
-        }
-        path_tracker.leave();
-    }
-    Ok(())
-}
-
-// === Streaming (batched) output ===
-//
-// The collect-everything entry points above accumulate the whole document
-// into one RecordBatch per table; peak memory is proportional to the
-// dataset. The types below bound that: `BatchStream` steps the same
-// `handle_event` core one event at a time and emits a table's accumulated
-// rows whenever the table crosses a `BatchOptions` threshold. Flushing is
-// value-transparent (see `TableBuilder::flush`): concatenating a table's
-// streamed batches reproduces the collect-everything output exactly.
-
-/// Flush thresholds for the streaming entry points ([`Parser::parse_batches`]
-/// and friends). A table's batch is emitted as soon as *either* threshold is
-/// reached. Both are checked at row boundaries only, so a batch can exceed
-/// `max_bytes_per_batch` by at most one row's bytes.
-///
-/// Marked `#[non_exhaustive]`; construct via `Default` and adjust fields, or
-/// chain the `with_*` setters:
-///
-/// ```rust
-/// use xml2arrow::BatchOptions;
-/// let options = BatchOptions::default().with_max_rows_per_batch(1024);
-/// ```
-#[derive(Debug, Clone, Copy)]
-#[non_exhaustive]
-pub struct BatchOptions {
-    /// Emit a table's batch once it holds this many rows. Defaults to 8192
-    /// (the de-facto Arrow ecosystem working batch size). `0` is treated as
-    /// `1` — a yielded batch always has at least one row.
-    pub max_rows_per_batch: usize,
-    /// Also emit once a table has accumulated this many *raw value bytes*
-    /// (summed across its fields), whichever threshold is hit first. Defaults
-    /// to 128 MiB.
-    ///
-    /// This counts only the bytes of the parsed values, not the fixed per-row
-    /// overhead every column carries (Arrow offset buffers, validity bitmaps,
-    /// fixed-width value and `<level>` FK columns). It is therefore *not* an
-    /// exact cap on builder memory and under-counts it for short, empty, or
-    /// null values: treat [`Self::max_rows_per_batch`] as the real bound on
-    /// how large a batch's builders can grow, and this as a secondary guard
-    /// that keeps text-heavy batches from letting a `StringBuilder`'s
-    /// i32-offset 2 GiB ceiling be reached across many rows.
-    ///
-    /// Values above an internal ceiling (~1 GiB) are clamped down to it. The
-    /// ceiling sits below Arrow's 2 GiB per-`Utf8`-column offset limit rather
-    /// than at it, because the budget is only checked *after* a row has been
-    /// appended: the reserved headroom is what keeps the final row before a
-    /// flush from overflowing a column. A single row whose values exceed that
-    /// headroom (most plainly: one ≥ 1 GiB value) is unsupported and will still
-    /// panic on append, exactly as on the non-streaming path.
-    pub max_bytes_per_batch: usize,
-}
-
-impl Default for BatchOptions {
-    fn default() -> Self {
-        Self {
-            max_rows_per_batch: 8192,
-            max_bytes_per_batch: 128 * 1024 * 1024,
-        }
-    }
-}
-
-impl BatchOptions {
-    /// Returns `self` with `max_rows_per_batch` replaced.
-    #[must_use]
-    pub fn with_max_rows_per_batch(mut self, rows: usize) -> Self {
-        self.max_rows_per_batch = rows;
-        self
-    }
-
-    /// Returns `self` with `max_bytes_per_batch` replaced.
-    #[must_use]
-    pub fn with_max_bytes_per_batch(mut self, bytes: usize) -> Self {
-        self.max_bytes_per_batch = bytes;
-        self
-    }
-}
-
-/// One streamed batch: the table it belongs to and a `RecordBatch` of its
-/// rows. Yielded by [`BatchStream`].
-///
-/// Destructuring is the intended way to consume one:
-/// `let TableBatch { table, batch } = item?;`
-// Deliberately NOT `#[non_exhaustive]`, unlike `BatchOptions`. The two face
-// opposite directions: callers *construct* `BatchOptions` (where the attribute
-// earns its keep), but only ever *destructure* this — where it would cost every
-// caller a `..` in the pattern, permanently, to buy the ability to add a field.
-// Pre-1.0 that purchase is free anyway: every 0.x minor bump is already a
-// breaking change under Cargo's semver rules, so a field can be added in a
-// future 0.x. Revisit at the 1.0 boundary, when the field set is settled.
-#[derive(Debug, Clone)]
-pub struct TableBatch {
-    /// The configured table name. `Arc<str>`: all batches of one table share
-    /// the allocation, cloning is a refcount bump.
-    pub table: Arc<str>,
-    /// The rows accumulated since this table's previous batch.
-    pub batch: RecordBatch,
-}
-
-mod sealed {
-    pub trait Sealed {}
-}
-
-/// A source of XML events for [`BatchStream`] — the streaming counterpart of
-/// the buffered/zero-copy split in the collect-everything entry points.
-///
-/// Sealed: implemented only by [`ReaderSource`] (buffered, any `BufRead`) and
-/// [`SliceSource`] (zero-copy, in-memory slice). The trait exists so the
-/// streaming machinery is written once; its methods are an internal detail.
-pub trait EventSource: sealed::Sealed {
-    #[doc(hidden)]
-    fn read_event(&mut self) -> std::result::Result<Event<'_>, quick_xml::Error>;
-    #[doc(hidden)]
-    fn decoder(&self) -> Decoder;
-    #[doc(hidden)]
-    fn buffer_position(&self) -> u64;
-}
-
-/// Buffered [`EventSource`] over any `BufRead` (files, sockets,
-/// decompression adapters). Each event is copied into a reusable buffer —
-/// required for streaming readers, same trade-off as [`Parser::parse`].
-pub struct ReaderSource<R: BufRead> {
-    reader: Reader<R>,
-    buf: Vec<u8>,
-}
-
-impl<R: BufRead> sealed::Sealed for ReaderSource<R> {}
-
-impl<R: BufRead> EventSource for ReaderSource<R> {
-    fn read_event(&mut self) -> std::result::Result<Event<'_>, quick_xml::Error> {
-        self.buf.clear();
-        self.reader.read_event_into(&mut self.buf)
-    }
-
-    fn decoder(&self) -> Decoder {
-        self.reader.decoder()
-    }
-
-    fn buffer_position(&self) -> u64 {
-        self.reader.buffer_position()
-    }
-}
-
-/// Zero-copy [`EventSource`] over an in-memory byte slice; events borrow
-/// directly from the input, same trade-off as [`Parser::parse_slice`].
-pub struct SliceSource<'x> {
-    reader: Reader<&'x [u8]>,
-}
-
-impl sealed::Sealed for SliceSource<'_> {}
-
-impl EventSource for SliceSource<'_> {
-    fn read_event(&mut self) -> std::result::Result<Event<'_>, quick_xml::Error> {
-        self.reader.read_event()
-    }
-
-    fn decoder(&self) -> Decoder {
-        self.reader.decoder()
-    }
-
-    fn buffer_position(&self) -> u64 {
-        self.reader.buffer_position()
-    }
-}
-
-/// Where the streaming loop is in its lifecycle.
-#[derive(Clone, Copy, Debug)]
-enum StreamState {
-    /// Reading events; batches are emitted on threshold crossings.
-    Running,
-    /// Input exhausted (EOF or a stop-path match). Emitting each table's
-    /// remaining rows in config order, resuming at `next_table`.
-    Draining { next_table: usize },
-    /// Everything emitted, or an error was yielded. Only `None` from here.
-    Done,
-}
-
-/// Incremental XML → Arrow parse: an iterator of [`TableBatch`]es with
-/// bounded memory.
-///
-/// Created by [`Parser::parse_batches`] / [`Parser::parse_batches_slice`], or
-/// by [`Parser::into_batches`] when the stream needs to outlive the binding the
-/// parser is in; see [`Parser::parse_batches`] for the yielded guarantees.
-///
-/// The stream holds its own handle on the compiled parser, so one [`Parser`]
-/// can serve any number of concurrent streams and none of them keeps the
-/// original binding alive.
-///
-/// The iterator is fused: after `None` — or after yielding an `Err` — it
-/// only returns `None`.
-///
-/// # An error invalidates the batches already yielded
-///
-/// Because batches are handed out as they fill, a failure detected later in
-/// the document — a malformed value, or an
-/// [`Error::TruncatedInput`](crate::errors::Error) raised at EOF — arrives
-/// *after* the consumer already holds earlier batches. Those batches are not
-/// wrong in themselves, but they are an incomplete view of the document.
-///
-/// Treat any `Err` from this iterator as invalidating the whole stream, not as
-/// one bad batch to skip: discard what you have accumulated, or stage it
-/// somewhere you can roll back. The collect-everything entry points
-/// ([`Parser::parse`], [`Parser::parse_slice`]) do not have this problem —
-/// they return `Err` and nothing else.
-// `Iterator`'s own `#[must_use]` does not carry over to a concrete named type,
-// so without this `parser.parse_batches(reader, options);` compiles and parses
-// nothing at all — silently, since the work is entirely lazy.
-#[must_use = "a BatchStream is lazy — dropping it without iterating parses nothing"]
-pub struct BatchStream<'p, S> {
-    /// Owned, so the stream can outlive the binding it was created from. The
-    /// `'p` parameter is retained for source compatibility and no longer
-    /// reflects a real borrow — see `_parser_lifetime`.
-    parser: Parser,
-    source: S,
-    /// Copy of the reader's decoder, read once — the encoding cannot change
-    /// once parsing begins (mirrors the collect-everything loops).
-    decoder: Decoder,
-    path_tracker: PathTracker,
-    converter: XmlToArrowConverter,
-    attr_name_buffer: Vec<u8>,
-    state: StreamState,
-    /// The stream holds its `Parser` by value, so nothing here borrows. The
-    /// lifetime survives only because it is part of the published type, and
-    /// removing it would break every caller that names the type; the borrowing
-    /// constructors still tie it to the parser they were given, which is
-    /// strictly more restrictive than reality and therefore always sound. It
-    /// goes away in the next major release.
-    _parser_lifetime: PhantomData<&'p Parser>,
-}
-
-impl<'p, S: EventSource> BatchStream<'p, S> {
-    fn new(parser: Parser, source: S, options: BatchOptions) -> Self {
-        let decoder = source.decoder();
-        Self {
-            source,
-            decoder,
-            path_tracker: PathTracker::new(&parser.inner.registry),
-            converter: XmlToArrowConverter::new(
-                &parser,
-                options.max_rows_per_batch,
-                options.max_bytes_per_batch,
-            ),
-            attr_name_buffer: Vec::with_capacity(64),
-            state: StreamState::Running,
-            parser,
-            _parser_lifetime: PhantomData,
-        }
-    }
-
-    /// Flushes `table_idx`'s accumulated rows into a [`TableBatch`].
-    ///
-    /// `more_rows_expected` distinguishes a threshold flush, where the table
-    /// will keep accumulating and so wants its buffers sized, from the final
-    /// drain, where reserving would allocate for rows that never arrive.
-    fn flush_table(&mut self, table_idx: usize, more_rows_expected: bool) -> Result<TableBatch> {
-        let batch = self.converter.table_builders[table_idx].flush(more_rows_expected)?;
-        Ok(TableBatch {
-            table: self.parser.inner.table_names[table_idx].clone(),
-            batch,
-        })
-    }
-
-    /// Yields the next non-empty leftover table during the drain phase,
-    /// advancing to `Done` when none remain.
-    fn drain_next(&mut self) -> Option<Result<TableBatch>> {
-        let StreamState::Draining { next_table } = self.state else {
-            return None;
-        };
-        for table_idx in next_table..self.converter.table_builders.len() {
-            let table = &self.converter.table_builders[table_idx];
-            // Structural tables never emit; tables whose rows all went out
-            // in threshold flushes have nothing left. Skipping them keeps
-            // the "a yielded batch always has ≥ 1 row" contract.
-            if table.field_builders.is_empty() || table.rows_in_batch == 0 {
-                continue;
-            }
-            self.state = StreamState::Draining {
-                next_table: table_idx + 1,
-            };
-            return match self.flush_table(table_idx, false) {
-                Ok(item) => Some(Ok(item)),
-                Err(e) => {
-                    self.state = StreamState::Done;
-                    Some(Err(e))
-                }
-            };
-        }
-        self.state = StreamState::Done;
-        // Every row has been emitted, so this is the streaming counterpart of
-        // `XmlToArrowConverter::finish`'s sweep. Batches already yielded stay
-        // valid: the error says the *config* did not match the document, not
-        // that the rows are wrong.
-        self.converter.unmatched_fields_error().map(Err)
-    }
-}
-
-impl<'p, S: EventSource> Iterator for BatchStream<'p, S> {
-    type Item = Result<TableBatch>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            match self.state {
-                StreamState::Done => return None,
-                StreamState::Draining { .. } => return self.drain_next(),
-                StreamState::Running => {
-                    let event = match self.source.read_event() {
-                        Ok(event) => event,
-                        Err(e) => {
-                            self.state = StreamState::Done;
-                            return Some(Err(e.into()));
-                        }
-                    };
-                    // Runtime dispatch on `needs_attrs` where the collect
-                    // loops monomorphize: one perfectly-predicted branch per
-                    // event buys a single public stream type per source.
-                    // Keep the surrounding read/Break discipline in lockstep
-                    // with `process_xml_events` / `process_xml_events_slice`.
-                    let handled = if self.parser.inner.needs_attrs {
-                        handle_event::<true>(
-                            event,
-                            self.decoder,
-                            &mut self.path_tracker,
-                            &mut self.converter,
-                            &mut self.attr_name_buffer,
-                        )
-                    } else {
-                        handle_event::<false>(
-                            event,
-                            self.decoder,
-                            &mut self.path_tracker,
-                            &mut self.converter,
-                            &mut self.attr_name_buffer,
-                        )
-                    };
-                    let action = match handled {
-                        Ok(action) => action,
-                        Err(e) => {
-                            self.state = StreamState::Done;
-                            // Same once-per-parse annotation as `run_parse`:
-                            // the source is still parked at the failing event.
-                            return Some(Err(e.with_position(self.source.buffer_position())));
-                        }
-                    };
-                    // Transition on Break *before* emitting a pending flush:
-                    // a stop-path close can both finalize a row (tripping a
-                    // threshold) and end the parse. The flushed batch goes
-                    // out now; the next call continues draining.
-                    if matches!(action, LoopAction::Break) {
-                        self.state = StreamState::Draining { next_table: 0 };
-                    }
-                    if let Some(table_idx) = self.converter.pending_flush.take() {
-                        return match self.flush_table(table_idx, true) {
-                            Ok(item) => Some(Ok(item)),
-                            Err(e) => {
-                                self.state = StreamState::Done;
-                                Some(Err(e))
-                            }
-                        };
-                    }
-                }
-            }
-        }
-    }
-}
-
-impl<'p, S: EventSource> FusedIterator for BatchStream<'p, S> {}
-
-/// Manual `Debug` (rather than derive) so it exists for every source type —
-/// `Reader<R>` internals aren't `Debug` — and so users can `unwrap`/`expect`
-/// on `Result`s containing the stream in tests.
-impl<S> std::fmt::Debug for BatchStream<'_, S> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BatchStream")
-            .field("state", &self.state)
-            .finish_non_exhaustive()
-    }
-}
-
-/// A [`RecordBatchReader`] over the single output table of a config.
-///
-/// Created by [`Parser::parse_single_table`] /
-/// [`Parser::parse_single_table_slice`]. Yields the table's batches in row
-/// order; [`RecordBatchReader::schema`] returns the same `Arc<Schema>` every
-/// batch carries, available before the first byte is parsed.
-///
-/// Errors surface as `ArrowError` (the trait's error type): native Arrow
-/// errors pass through, everything else wraps as
-/// `ArrowError::ExternalError` with this crate's [`Error`] as the source.
-// Lazy like [`BatchStream`]. The enclosing `Result` already carries a
-// `must_use`, but that only catches discarding the whole call — this also
-// catches `parser.parse_single_table(..).unwrap();`, which throws the reader
-// away after successfully building it.
-#[must_use = "a SingleTableReader is lazy — dropping it without iterating parses nothing"]
-pub struct SingleTableReader<'p, S> {
-    schema: SchemaRef,
-    stream: BatchStream<'p, S>,
-}
-
-impl<'p, S: EventSource> Iterator for SingleTableReader<'p, S> {
-    type Item = std::result::Result<RecordBatch, arrow::error::ArrowError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        // The stream can only ever yield the one output table (structural
-        // tables never emit), so no name filtering is needed.
-        match self.stream.next()? {
-            Ok(table_batch) => Some(Ok(table_batch.batch)),
-            Err(Error::Arrow(e)) => Some(Err(e)),
-            Err(e) => Some(Err(arrow::error::ArrowError::ExternalError(Box::new(e)))),
-        }
-    }
-}
-
-impl<'p, S: EventSource> FusedIterator for SingleTableReader<'p, S> {}
-
-impl<'p, S: EventSource> RecordBatchReader for SingleTableReader<'p, S> {
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
-    }
-}
-
-/// Manual `Debug` for the same reasons as [`BatchStream`]'s — and because
-/// `Result<SingleTableReader, _>::unwrap_err()` in caller tests requires it.
-impl<S> std::fmt::Debug for SingleTableReader<'_, S> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SingleTableReader")
-            .field("schema", &self.schema)
-            .finish_non_exhaustive()
     }
 }
 
