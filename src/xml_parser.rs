@@ -9093,6 +9093,61 @@ mod tests {
         );
     }
 
+    /// A table name is interpolated into the derived link column *verbatim*,
+    /// including when it is not a plain identifier.
+    ///
+    /// This is a deliberate choice, pinned here so it is not "fixed" into
+    /// something cleverer. Configurations generated from an XSD often name
+    /// tables by their path, which yields a column like
+    /// `_/report/monitoring_stations/_id`. That is a legal Arrow field name
+    /// and everything that quotes identifiers handles it; the alternative —
+    /// sanitizing the name down to its last segment — buys prettier defaults
+    /// at the cost of a rule to explain, and generators can set `name:`
+    /// themselves. See `link_and_key_columns_can_be_renamed` for the fix a
+    /// generator is expected to apply.
+    #[test]
+    fn a_path_shaped_table_name_appears_in_the_link_column_verbatim() {
+        let batches = parse(
+            r#"<report><station id="A"><m><v>1</v></m></station></report>"#,
+            r#"
+            tables:
+              - name: /report/monitoring_stations/
+                xml_path: /report
+                row: station
+                fields:
+                  - {name: id, path: "@id", data_type: Utf8}
+              - name: measurements
+                xml_path: /report/station
+                row: m
+                links:
+                  - parent: /report/monitoring_stations/
+                fields:
+                  - {name: v, path: v, data_type: Int32}
+            "#,
+        );
+        let measurements = batches.get("measurements").unwrap();
+        assert_eq!(
+            measurements.schema().field(0).name(),
+            "_/report/monitoring_stations/_id"
+        );
+        assert_array_values!(
+            measurements,
+            "_/report/monitoring_stations/_id",
+            vec![0u64],
+            UInt64Array
+        );
+        // The key side is unaffected: `_id` is a constant, not derived.
+        assert_eq!(
+            batches
+                .get("/report/monitoring_stations/")
+                .unwrap()
+                .schema()
+                .field(0)
+                .name(),
+            "_id"
+        );
+    }
+
     /// A renamed key column, both sides.
     #[test]
     fn link_and_key_columns_can_be_renamed() {

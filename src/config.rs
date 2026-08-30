@@ -1095,6 +1095,19 @@ pub struct Link {
     pub index_of: Option<String>,
     /// Column name. Defaults to `_<parent>_id` for a `parent` link and
     /// `<element>_idx` for an `index_of` link.
+    ///
+    /// The `parent` default interpolates the referenced table's `name` exactly
+    /// as written, so a table named `/report/stations/` produces a column
+    /// named `_/report/stations/_id`. That is a legal Arrow field name and
+    /// everything downstream that quotes identifiers handles it, but it is
+    /// awkward to type and breaks unquoted SQL. A configuration whose table
+    /// names are not plain identifiers — one generated from an XSD, typically
+    /// — should set this, and [`TableConfig::row_id`] on the referenced table,
+    /// rather than take the defaults.
+    ///
+    /// Collisions are rejected rather than resolved: if two links, or a link
+    /// and a field, would produce the same column, `Config::validate` fails
+    /// and names this key as the fix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 }
