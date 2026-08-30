@@ -136,6 +136,7 @@ pub xml2arrow::config::Config::version: core::option::Option<u32>
 impl xml2arrow::config::Config
 pub fn xml2arrow::config::Config::builder() -> xml2arrow::config::ConfigBuilder
 pub fn xml2arrow::config::Config::from_yaml_file(impl core::convert::AsRef<std::path::Path>) -> xml2arrow::errors::Result<Self>
+pub fn xml2arrow::config::Config::from_yaml_str(&str) -> xml2arrow::errors::Result<Self>
 pub fn xml2arrow::config::Config::requires_attribute_parsing(&self) -> bool
 pub fn xml2arrow::config::Config::to_yaml_file(&self, impl core::convert::AsRef<std::path::Path>) -> xml2arrow::errors::Result<()>
 pub fn xml2arrow::config::Config::validate(&self) -> xml2arrow::errors::Result<()>
@@ -899,6 +900,7 @@ pub xml2arrow::Config::version: core::option::Option<u32>
 impl xml2arrow::config::Config
 pub fn xml2arrow::config::Config::builder() -> xml2arrow::config::ConfigBuilder
 pub fn xml2arrow::config::Config::from_yaml_file(impl core::convert::AsRef<std::path::Path>) -> xml2arrow::errors::Result<Self>
+pub fn xml2arrow::config::Config::from_yaml_str(&str) -> xml2arrow::errors::Result<Self>
 pub fn xml2arrow::config::Config::requires_attribute_parsing(&self) -> bool
 pub fn xml2arrow::config::Config::to_yaml_file(&self, impl core::convert::AsRef<std::path::Path>) -> xml2arrow::errors::Result<()>
 pub fn xml2arrow::config::Config::validate(&self) -> xml2arrow::errors::Result<()>
