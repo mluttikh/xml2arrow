@@ -187,6 +187,30 @@ relationship, which makes that a compile-time error — and adds a real join key
 container elements repeat and however the output was batched. The referenced
 table materializes `_id` automatically; tables nobody references gain no column.
 
+**Naming the key columns.** `parent:` derives its column as `_<parent table
+name>_id`, interpolating the table's `name` exactly as written. That is fine
+when table names are plain identifiers, and awkward when they are not — a
+table named `/report/stations/` yields a column named
+`_/report/stations/_id`. It is a legal Arrow field name and everything that
+quotes identifiers handles it, but it breaks unquoted SQL and is unpleasant to
+type.
+
+Set both names explicitly when your table names are paths — which is the usual
+case for a config generated from an XSD:
+
+```yaml
+  - name: /report/monitoring_stations/
+    row_id: station_id            # this table's own key
+  - name: /report/monitoring_stations/monitoring_station/measurements/
+    links:
+      - parent: /report/monitoring_stations/
+        name: station_id          # the foreign key
+```
+
+Collisions are never resolved silently: if two links, or a link and a field,
+would produce the same column, the config is rejected at load with a message
+naming `name:` as the fix.
+
 `index_of:` is the other kind — a `UInt32` positional ordinal that resets with
 its scope. It is **value-identical to the legacy `<level>` column** for the same
 path, so it exists to let you adopt `links:` without changing a single number.
