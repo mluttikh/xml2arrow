@@ -1,0 +1,11 @@
+# frozen snapshot — see tests/frozen_corpus.rs
+table: measurements
+rows: 3
+columns:
+  1. _stations_id: UInt64 (not null)
+  2. seq: Int32 (not null)
+  3. value: Float64 (not null)
+data:
+  "0" | "1" | "1.5"
+  "0" | "2" | "2.5"
+  "1" | "3" | "3.5"

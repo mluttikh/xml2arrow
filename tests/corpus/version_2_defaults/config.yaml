@@ -1,0 +1,27 @@
+# A fully migrated config, declaring `version: 2` to assert it: every table has
+# `row:`, no table uses `levels`, every field uses `path:`, and the nested table
+# declares how it relates to its parent.
+#
+# What the snapshot shows is the *defaults* that assertion buys. `site` keeps
+# its surrounding whitespace under v1 and loses it here, because v2 trims every
+# type rather than only the numeric ones. `note` is a missing non-nullable Utf8:
+# v1 yields "" for it and errors for a number in the same position, so this
+# document parses under v1 and is a MissingRequiredField under v2 — which is why
+# `note` opts back out with `on_missing: empty`, proving v2 sets defaults rather
+# than switching engines.
+version: 2
+tables:
+  - name: stations
+    xml_path: /report/stations
+    row: station
+    fields:
+      - {name: site, path: "@site", data_type: Utf8}
+      - {name: note, path: note, data_type: Utf8, on_missing: empty}
+  - name: measurements
+    xml_path: /report/stations/station/measurements
+    row: m
+    links:
+      - parent: stations
+    fields:
+      - {name: seq, path: "@seq", data_type: Int32}
+      - {name: value, path: value, data_type: Float64}

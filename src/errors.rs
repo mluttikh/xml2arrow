@@ -390,6 +390,35 @@ pub enum ConfigIssue {
         nested_table: String,
         nested_table_path: String,
     },
+    /// `version:` named a generation this build does not know. Guessing which
+    /// semantics were meant is exactly the wrong move for a key whose entire
+    /// job is to pin them.
+    UnsupportedConfigVersion {
+        version: u32,
+    },
+    /// `version: 2` asserts every table declares its row boundaries, and this
+    /// one leaves them inferred.
+    InferredRowInVersion2 {
+        table: String,
+    },
+    /// `version: 2` asserts no table uses `levels`. It names labels and takes
+    /// its values positionally; `links` names the relationship.
+    LevelsInVersion2 {
+        table: String,
+    },
+    /// `version: 2` asserts every field uses `path`. `xml_path` is the
+    /// deprecated spelling of the same key.
+    FieldXmlPathInVersion2 {
+        table: String,
+        field: String,
+    },
+    /// A table nested inside another declared no `links`, under `version: 2`.
+    /// Without one its rows carry nothing relating them to the enclosing
+    /// table's — which is the relationship `levels` used to express positionally.
+    NestedTableWithoutLinksInVersion2 {
+        table: String,
+        enclosing_table: String,
+    },
 }
 
 // --- Display -----------------------------------------------------------------
@@ -641,6 +670,29 @@ impl fmt::Display for ConfigIssue {
             } => write!(
                 f,
                 "Table '{table}' declares a row element at '{row_path}', but table '{nested_table}' (xml_path '{nested_table_path}') lies between them; rows finalize against the innermost open table, so '{nested_table}' would receive them"
+            ),
+            ConfigIssue::UnsupportedConfigVersion { version } => write!(
+                f,
+                "Unsupported config version {version}; this build understands 1 (the default, and every release so far) and 2"
+            ),
+            ConfigIssue::InferredRowInVersion2 { table } => write!(
+                f,
+                "version: 2 requires every table to declare its row boundaries, but table '{table}' has no 'row:'; add one (row: \".\" gives one row per table element) or remove 'version: 2'"
+            ),
+            ConfigIssue::LevelsInVersion2 { table } => write!(
+                f,
+                "version: 2 does not allow 'levels:', but table '{table}' uses it; replace it with 'links:' (index_of: keeps the same column values) or remove 'version: 2'"
+            ),
+            ConfigIssue::FieldXmlPathInVersion2 { table, field } => write!(
+                f,
+                "version: 2 does not allow 'xml_path:' on a field, but field '{field}' of table '{table}' uses it; rename the key to 'path:' — the value is unchanged — or remove 'version: 2'"
+            ),
+            ConfigIssue::NestedTableWithoutLinksInVersion2 {
+                table,
+                enclosing_table,
+            } => write!(
+                f,
+                "version: 2 requires a nested table to declare how it relates to the table enclosing it, but table '{table}' (inside '{enclosing_table}') declares no 'links:'; add a 'parent:' link for a join key, or 'index_of:' for the positional column 'levels' produced"
             ),
         }
     }

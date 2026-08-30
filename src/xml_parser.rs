@@ -187,21 +187,25 @@ struct ResolvedPolicy {
 impl ResolvedPolicy {
     /// Layers a field's policies over the config-wide defaults over the
     /// behavior this crate had before policies existed.
-    fn resolve(fc: &FieldConfig, defaults: Option<&ValuePolicies>) -> Self {
+    fn resolve(fc: &FieldConfig, defaults: Option<&ValuePolicies>, v2_defaults: bool) -> Self {
         let empty = ValuePolicies::default();
         let policies = fc.policies.over(defaults.unwrap_or(&empty));
         let is_utf8 = fc.data_type == DType::Utf8;
         Self {
             // Numeric and boolean parsing has always trimmed; `Utf8` has always
-            // taken the document's bytes as written.
-            trim: policies.trim.unwrap_or(!is_utf8),
+            // taken the document's bytes as written. Under `version: 2` every
+            // type trims, because which of the two a column got was decided by
+            // its Arrow type rather than by anything the author asked for.
+            trim: policies.trim.unwrap_or(v2_defaults || !is_utf8),
             // The historical asymmetry, stated once and then never re-derived:
             // nullable yields null, a non-nullable `Utf8` yields "", anything
-            // else non-nullable is an error.
+            // else non-nullable is an error. `version: 2` drops the middle
+            // case, so whether an absent element ends the parse stops depending
+            // on which type the column happens to be.
             on_missing: policies.on_missing.unwrap_or({
                 if fc.nullable {
                     OnMissing::Null
-                } else if is_utf8 {
+                } else if is_utf8 && !v2_defaults {
                     OnMissing::Empty
                 } else {
                     OnMissing::Error
@@ -1766,11 +1770,17 @@ impl Parser {
             .map(|tc| Arc::from(tc.name.as_str()))
             .collect();
         let defaults = config.defaults.as_ref();
+        // `version: 2` opts into the value defaults 1.0 will make mandatory.
+        // Validation has already established the config is fully migrated, so
+        // this is the only place the version reaches the parser at all.
+        let v2_defaults = config.version == Some(2);
         let field_metas = config
             .tables
             .iter()
             .flat_map(|tc| tc.fields.iter().map(move |fc| (tc, fc)))
-            .map(|(tc, fc)| FieldMeta::from_config(tc, fc, &ResolvedPolicy::resolve(fc, defaults)))
+            .map(|(tc, fc)| {
+                FieldMeta::from_config(tc, fc, &ResolvedPolicy::resolve(fc, defaults, v2_defaults))
+            })
             .collect();
 
         Ok(Self {
@@ -9373,6 +9383,125 @@ mod tests {
         let batch = batches.get("t").unwrap();
         assert_array_values!(batch, "a", &["x"], StringArray);
         assert_array_values!(batch, "b", &[" y "], StringArray);
+    }
+
+    /// What `version: 2` changes about *parsing*, as opposed to what it
+    /// rejects at load. Both differences are places where the historical
+    /// default was chosen by the column's Arrow type rather than by anything
+    /// the config author asked for.
+    mod version_2_defaults {
+        use super::*;
+
+        /// v1 trims numbers and booleans but not `Utf8`; v2 trims everything.
+        #[test]
+        fn every_type_trims() {
+            let batches = parse(
+                "<r><item><s> hi </s><n> 42 </n></item></r>",
+                r#"
+                version: 2
+                tables:
+                  - name: t
+                    xml_path: /r
+                    row: item
+                    fields:
+                      - {name: s, path: s, data_type: Utf8}
+                      - {name: n, path: n, data_type: Int32}
+                "#,
+            );
+            let batch = batches.get("t").unwrap();
+            assert_array_values!(batch, "s", &["hi"], StringArray);
+            assert_array_values!(batch, "n", &[42i32], Int32Array);
+        }
+
+        /// The same document under v1, so the delta is visible rather than
+        /// asserted. This is the pair the migration guide quotes.
+        #[test]
+        fn version_1_leaves_utf8_untrimmed() {
+            let batches = parse(
+                "<r><item><s> hi </s><n> 42 </n></item></r>",
+                r#"
+                tables:
+                  - name: t
+                    xml_path: /r
+                    row: item
+                    fields:
+                      - {name: s, path: s, data_type: Utf8}
+                      - {name: n, path: n, data_type: Int32}
+                "#,
+            );
+            let batch = batches.get("t").unwrap();
+            assert_array_values!(batch, "s", &[" hi "], StringArray);
+            assert_array_values!(batch, "n", &[42i32], Int32Array);
+        }
+
+        /// A missing non-nullable `Utf8` yields `""` under v1 and is an error
+        /// under v2 — the asymmetry that made "does an absent element stop the
+        /// parse?" depend on the column's type.
+        #[test]
+        fn a_missing_non_nullable_utf8_is_an_error() {
+            let config = config_from_yaml!(
+                r#"
+                version: 2
+                tables:
+                  - name: t
+                    xml_path: /r
+                    row: item
+                    fields:
+                      - {name: s, path: s, data_type: Utf8}
+                "#
+            );
+            let err = parse_document(&b"<r><item/></r>"[..], &config).unwrap_err();
+            assert!(
+                matches!(err, Error::MissingRequiredField { ref field, .. } if field.as_ref() == "s"),
+                "{err:?}"
+            );
+        }
+
+        /// v2 sets *defaults*, so a field that states what it wants still gets
+        /// it. Without this the flag would be a mode switch rather than a
+        /// starting point, and reverting one column would mean reverting all.
+        #[test]
+        fn a_field_can_still_opt_back_out() {
+            let batches = parse(
+                "<r><item><s> hi </s><missing_ok/></item></r>",
+                r#"
+                version: 2
+                tables:
+                  - name: t
+                    xml_path: /r
+                    row: item
+                    fields:
+                      - {name: s, path: s, data_type: Utf8, trim: false}
+                      - {name: m, path: m, data_type: Utf8, on_missing: empty}
+                "#,
+            );
+            let batch = batches.get("t").unwrap();
+            assert_array_values!(batch, "s", &[" hi "], StringArray);
+            assert_array_values!(batch, "m", &[""], StringArray);
+        }
+
+        /// A nullable column is unaffected: `null` was already the answer for
+        /// every type, so v2 changes nothing about it.
+        #[test]
+        fn nullable_columns_are_unchanged() {
+            let batches = parse(
+                "<r><item/></r>",
+                r#"
+                version: 2
+                tables:
+                  - name: t
+                    xml_path: /r
+                    row: item
+                    fields:
+                      - {name: s, path: s, data_type: Utf8, nullable: true}
+                      - {name: n, path: n, data_type: Int32, nullable: true}
+                "#,
+            );
+            let batch = batches.get("t").unwrap();
+            assert_eq!(batch.num_rows(), 1);
+            assert!(batch.column_by_name("s").unwrap().is_null(0));
+            assert!(batch.column_by_name("n").unwrap().is_null(0));
+        }
     }
 
     /// `save_row` walks `field_builders` once per finalized row, so a

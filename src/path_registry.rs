@@ -751,6 +751,7 @@ tables:
 
     fn create_test_config() -> Config {
         Config {
+            version: None,
             tables: vec![
                 TableConfig::new(
                     "items",

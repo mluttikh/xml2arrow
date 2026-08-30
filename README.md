@@ -215,6 +215,19 @@ missing non-nullable `Utf8` field yields `""` while a missing non-nullable
 number is an error. `on_missing: error` makes a column behave the same whatever
 its type.
 
+**`version: 2`.** Every key above is independently optional, so a config can be
+half migrated indefinitely and never say so. `version: 2` is how it says so — an
+assertion, not a switch. Declaring it requires the config to be fully migrated
+(every table declares `row:`, none uses `levels:`, every field uses `path:`, and
+a nested table declares its `links:`), and anything left over is rejected at load
+with a message naming it.
+
+In exchange the config opts into the two defaults 1.0 will make mandatory, both
+of which today depend on a column's Arrow type rather than on intent: `trim` is
+on for every type, and a missing non-nullable value is an error whatever the
+type. Per-field policies still win, and deleting the line reverts everything.
+See [MIGRATION.md](MIGRATION.md#7-optional-assert-you-are-done-with-version-2).
+
 **Supported data types:** `Boolean`, `Int8`, `UInt8`, `Int16`, `UInt16`, `Int32`,
 `UInt32`, `Int64`, `UInt64`, `Float32`, `Float64`, `Utf8`
 
