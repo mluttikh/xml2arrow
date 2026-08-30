@@ -157,17 +157,20 @@ struct ResolvedPolicy {
     on_repeat: OnRepeat,
     /// Literal values that count as missing.
     ///
-    /// A thin `Option<Box<Vec<_>>>` rather than a `Vec`, because it is `None`
-    /// in every config that does not set the key — and this struct sits inside
-    /// `FieldMeta` inside `FieldBuilder`, which `save_row` walks once per row.
-    /// A `Vec` spends 24 bytes of every field builder describing a list that
-    /// almost never exists, and `Box<[_]>` is a fat pointer costing 16; this is
-    /// 8, null-pointer-optimized to the same check.
+    /// A thin `Option<Arc<Vec<_>>>` rather than a `Vec`, for two reasons. It is
+    /// `None` in every config that does not set the key, and this struct sits
+    /// inside `FieldMeta` inside `FieldBuilder`, which `save_row` walks once
+    /// per row: a `Vec` would spend 24 bytes of every field builder describing
+    /// a list that almost never exists, and `Box<[_]>` is a fat pointer costing
+    /// 16, where this is 8, null-pointer-optimized to the same check. And the
+    /// policy is resolved once per parser but cloned into a builder per parse,
+    /// so sharing makes that clone a refcount bump instead of a deep copy of
+    /// every string.
     #[allow(
-        clippy::box_collection,
-        reason = "the extra indirection is the point: this field is measured by                   its inline size, not its heap layout. A Vec costs 24 bytes of                   every FieldBuilder — which save_row walks per row — to                   describe a list that is absent in almost every config. The                   allocation it warns about only happens for configs that set                   null_values at all."
+        clippy::rc_buffer,
+        reason = "measured by inline size and clone cost, not heap layout: a Vec                   costs 24 bytes of every FieldBuilder, which save_row walks per                   row, to describe a list absent in almost every config."
     )]
-    null_values: Option<Box<Vec<String>>>,
+    null_values: Option<Arc<Vec<String>>>,
 }
 
 impl ResolvedPolicy {
@@ -198,7 +201,7 @@ impl ResolvedPolicy {
             null_values: policies
                 .null_values
                 .filter(|values| !values.is_empty())
-                .map(Box::new),
+                .map(Arc::new),
         }
     }
 
@@ -224,11 +227,7 @@ impl FieldMeta {
     /// `xml_path` holds the *resolved* absolute path, not the spelling the
     /// config used. Error messages quote it, and someone chasing an error
     /// wants the location in the document, not `v`.
-    fn from_config(
-        table: &TableConfig,
-        fc: &FieldConfig,
-        defaults: Option<&ValuePolicies>,
-    ) -> Self {
+    fn from_config(table: &TableConfig, fc: &FieldConfig, policy: &ResolvedPolicy) -> Self {
         Self {
             name: fc.name.clone(),
             xml_path: resolve_field_path(table, fc)
@@ -236,7 +235,7 @@ impl FieldMeta {
                 .into_owned(),
             scale: fc.scale,
             offset: fc.offset,
-            policy: ResolvedPolicy::resolve(fc, defaults),
+            policy: policy.clone(),
         }
     }
 }
@@ -480,13 +479,13 @@ impl FieldBuilder {
     fn new(
         table_config: &TableConfig,
         field_config: &FieldConfig,
-        defaults: Option<&ValuePolicies>,
+        policy: &ResolvedPolicy,
         max_value_bytes: usize,
     ) -> Self {
         let array_builder = TypedArrayBuilder::from_dtype(field_config.data_type);
         let has_transform = field_config.scale.is_some() || field_config.offset.is_some();
         Self {
-            meta: FieldMeta::from_config(table_config, field_config, defaults),
+            meta: FieldMeta::from_config(table_config, field_config, policy),
             array_builder,
             has_value: false,
             skip_rest_of_row: false,
@@ -730,7 +729,7 @@ impl TableBuilder {
         table_config: &TableConfig,
         plan: &TableLinkPlan,
         schema: Arc<Schema>,
-        defaults: Option<&ValuePolicies>,
+        policies: &[ResolvedPolicy],
         max_value_bytes: usize,
     ) -> Self {
         let mut index_builders = Vec::with_capacity(table_config.levels.len());
@@ -741,11 +740,11 @@ impl TableBuilder {
             .map(|spec| LinkBuilder::from_kind(spec.kind))
             .collect();
         let mut field_builders = Vec::with_capacity(table_config.fields.len());
-        for field_config in &table_config.fields {
+        for (field_config, policy) in table_config.fields.iter().zip(policies) {
             field_builders.push(FieldBuilder::new(
                 table_config,
                 field_config,
-                defaults,
+                policy,
                 max_value_bytes,
             ));
         }
@@ -1085,17 +1084,22 @@ impl XmlToArrowConverter {
         let config = &parser.inner.config;
         let max_value_bytes = config.parser_options.max_value_bytes.unwrap_or(usize::MAX);
         let mut table_builders = Vec::with_capacity(config.tables.len());
+        // `field_policies` is flat in table order, so walking the tables in
+        // order also walks it — no per-table index to store or look up.
+        let mut policies = parser.inner.field_policies.as_slice();
         for (table_idx, (table_config, schema)) in config
             .tables
             .iter()
             .zip(&parser.inner.table_schemas)
             .enumerate()
         {
+            let (table_policies, rest) = policies.split_at(table_config.fields.len());
+            policies = rest;
             table_builders.push(TableBuilder::new(
                 table_config,
                 link_plan(&parser.inner.link_plans, table_idx),
                 schema.clone(),
-                config.defaults.as_ref(),
+                table_policies,
                 max_value_bytes,
             ));
         }
@@ -1530,6 +1534,17 @@ struct Compiled {
     /// [`TableBatch`]es carry a clone; `Arc<str>` keeps that per-batch cost
     /// to a refcount bump.
     table_names: Vec<Arc<str>>,
+    /// Every field's value policy, resolved once and stored flat in
+    /// `config.tables` order — table 0's fields, then table 1's, and so on.
+    ///
+    /// Resolving layers a field's policies over the config-wide `defaults` over
+    /// a type-dependent default. That chain is fixed by the config, so walking
+    /// it belongs here and not in `FieldBuilder::new`, which runs for every
+    /// field of every table on *every* document. One flat `Vec` rather than a
+    /// `Vec` per table: the per-parse setup cost dominates parses of small
+    /// documents, and this way compiling a config adds one allocation to it
+    /// rather than one per table.
+    field_policies: Vec<ResolvedPolicy>,
 }
 
 impl Clone for Parser {
@@ -1734,6 +1749,13 @@ impl Parser {
             .iter()
             .map(|tc| Arc::from(tc.name.as_str()))
             .collect();
+        let defaults = config.defaults.as_ref();
+        let field_policies = config
+            .tables
+            .iter()
+            .flat_map(|tc| &tc.fields)
+            .map(|fc| ResolvedPolicy::resolve(fc, defaults))
+            .collect();
 
         Ok(Self {
             inner: Arc::new(Compiled {
@@ -1743,6 +1765,7 @@ impl Parser {
                 link_plans,
                 table_schemas,
                 table_names,
+                field_policies,
             }),
         })
     }
