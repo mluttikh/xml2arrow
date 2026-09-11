@@ -508,9 +508,10 @@ pub enum ConfigIssue {
         /// The field still spelled `xml_path:`.
         field: String,
     },
-    /// A table nested inside another declared no `links`, under `version: 2`.
-    /// Without one its rows carry nothing relating them to the enclosing
-    /// table's — which is the relationship `levels` used to express positionally.
+    /// A table nested inside another omitted `links:` entirely, under
+    /// `version: 2`. Omitting it is how a migration silently drops the
+    /// relationship `levels` used to express positionally, so the key must be
+    /// present — `links: []` when the table deliberately has no link.
     NestedTableWithoutLinksInVersion2 {
         /// The nested table with no links.
         table: String,
@@ -790,7 +791,7 @@ impl fmt::Display for ConfigIssue {
                 enclosing_table,
             } => write!(
                 f,
-                "version: 2 requires a nested table to declare how it relates to the table enclosing it, but table '{table}' (inside '{enclosing_table}') declares no 'links:'; add a 'parent:' link for a join key, or 'index_of:' for the positional column 'levels' produced"
+                "version: 2 requires a nested table to declare how it relates to the table enclosing it, but table '{table}' (inside '{enclosing_table}') declares no 'links:'; add a 'parent:' link for a join key, 'index_of:' for the positional column 'levels' produced, or 'links: []' if it deliberately has no link"
             ),
         }
     }

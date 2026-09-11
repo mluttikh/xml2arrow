@@ -294,8 +294,10 @@ pub struct Config {
     /// `2` is an **assertion, not a switch**. It does not select a different
     /// engine; it says "this config is fully migrated", and validation holds it
     /// to that: every table declares [`TableConfig::row`], no table uses
-    /// `levels`, and every field uses `path` rather than the deprecated
-    /// `xml_path`. A config that has not finished migrating is rejected at load
+    /// `levels`, every field uses `path` rather than the deprecated
+    /// `xml_path`, and every table nested inside another declares
+    /// [`TableConfig::links`] — `links: []` when it deliberately has none. A
+    /// config that has not finished migrating is rejected at load
     /// with a message naming what is left, rather than parsing under semantics
     /// its author did not intend.
     ///
@@ -758,10 +760,17 @@ impl Config {
                 }
             }
             // A table with no ancestor has nothing to relate to, so `links` is
-            // rightly absent. One nested inside another and declaring none has
-            // dropped the relationship `levels` used to carry positionally —
-            // silently, and only for the tables where it matters.
-            if table.links.as_ref().is_none_or(Vec::is_empty)
+            // rightly absent. One nested inside another must say how it
+            // relates — and "it doesn't" is a valid answer, written
+            // `links: []`. What is rejected is *omitting* the key, which is
+            // how a migration silently drops the relationship `levels` used to
+            // carry positionally.
+            //
+            // So only an absent key fails, never an empty list. Treating `[]`
+            // as absent left no way to say "deliberately unlinked": a v1
+            // table with `levels: []` could not reach version 2 without its
+            // output gaining a column.
+            if table.links.is_none()
                 && let Some(enclosing) = self.enclosing_table_of(table)
             {
                 return Err(ConfigIssue::NestedTableWithoutLinksInVersion2 {
@@ -1202,6 +1211,13 @@ pub struct TableConfig {
     /// a compile-time error rather than a column of plausible wrong numbers.
     ///
     /// See [`Link`] for the two kinds and their guarantees.
+    ///
+    /// An empty list, `links: []`, is a declaration in its own right: the
+    /// table deliberately has no link to any enclosing table, and produces no
+    /// link column. It is distinct from omitting the key, which under
+    /// [`Config::version`] `2` is an error for a nested table — the difference
+    /// between "I decided there is no relationship" and "I forgot one".
+    /// `links: []` is also the value-identical form of a v1 `levels: []`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub links: Option<Vec<Link>>,
     /// Whether this table materializes its own key column, and under what name.
@@ -3254,6 +3270,95 @@ tables:
                     reason: ConfigIssue::NestedTableWithoutLinksInVersion2 { .. }
                 })
             ));
+        }
+
+        /// `links: []` is how a nested table says it deliberately has no
+        /// link. Only *omitting* the key is rejected — the difference between
+        /// "I decided" and "I forgot".
+        #[test]
+        fn an_empty_links_list_declares_a_deliberately_unlinked_table() {
+            let child = TableConfig::builder("measurements", "/report/stations/station/ms")
+                .row("m")
+                .links(vec![])
+                .field(
+                    FieldConfigBuilder::new("v", "v", DType::Int32)
+                        .build()
+                        .unwrap(),
+                )
+                .build();
+            let config = Config::builder()
+                .version(2)
+                .table(migrated_root())
+                .table(child)
+                .build();
+            assert!(config.is_ok(), "{config:?}");
+        }
+
+        /// A table with one row per document can be spelled two ways, and
+        /// they must behave alike: both make the tables below them nested,
+        /// and both are satisfied by `links: []` there. The rule depends on
+        /// where a table sits, never on how its path was written.
+        #[rstest]
+        #[case::root_path("/", "report")]
+        #[case::row_dot("/report", ".")]
+        fn both_spellings_of_a_document_level_table_are_treated_alike(
+            #[case] xml_path: &str,
+            #[case] row: &str,
+        ) {
+            let document = || {
+                TableConfig::builder("report", xml_path)
+                    .row(row)
+                    .field(
+                        FieldConfigBuilder::new("title", "/report/title", DType::Utf8)
+                            .build()
+                            .unwrap(),
+                    )
+                    .build()
+            };
+            let omitted = Config::builder()
+                .version(2)
+                .table(document())
+                .table(migrated_root())
+                .build();
+            assert!(
+                matches!(
+                    &omitted,
+                    Err(Error::InvalidConfig {
+                        reason: ConfigIssue::NestedTableWithoutLinksInVersion2 { table, .. }
+                    }) if table == "stations"
+                ),
+                "{omitted:?}"
+            );
+
+            let mut stations = migrated_root();
+            stations.links = Some(vec![]);
+            let declared = Config::builder()
+                .version(2)
+                .table(document())
+                .table(stations)
+                .build();
+            assert!(declared.is_ok(), "{declared:?}");
+        }
+
+        /// The error names every way out, including the one that adds no
+        /// column — otherwise a user who wants no link is left to guess.
+        #[test]
+        fn the_nested_table_error_offers_an_empty_links_list() {
+            let child = TableConfig::builder("measurements", "/report/stations/station/ms")
+                .row("m")
+                .field(
+                    FieldConfigBuilder::new("v", "v", DType::Int32)
+                        .build()
+                        .unwrap(),
+                )
+                .build();
+            let err = Config::builder()
+                .version(2)
+                .table(migrated_root())
+                .table(child)
+                .build()
+                .unwrap_err();
+            assert!(err.to_string().contains("'links: []'"), "{err}");
         }
 
         /// A table nobody encloses has nothing to link to, so absent `links`

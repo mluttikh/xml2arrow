@@ -107,7 +107,9 @@ tables:
                                #   makes it absolute; "a/b" is still relative).
     levels: [<level>, ...]     # Parent-link index columns — see "Nested tables".
                                # Optional; replaced by `links:` below.
-    links:                     # Declared relationships (optional; not with levels)
+    links:                     # Declared relationships (optional; not with levels).
+                               # `links: []` declares a table deliberately
+                               # unlinked — the version 2 form of `levels: []`.
       - parent: <table>        #   UInt64 join key → <table>._id
         name: <column>         #   default: _<table>_id
       - index_of: <path>       #   UInt32 positional ordinal (NOT a key).
@@ -215,8 +217,8 @@ its type.
 half migrated indefinitely and never say so. `version: 2` is how it says so — an
 assertion, not a switch. Declaring it requires the config to be fully migrated
 (every table declares `row:`, none uses `levels:`, every field uses `path:`, and
-a nested table declares its `links:`), and anything left over is rejected at load
-with a message naming it.
+a nested table declares its `links:` — `links: []` when it deliberately has
+none), and anything left over is rejected at load with a message naming it.
 
 In exchange the config opts into the two defaults 1.0 will make mandatory, both
 of which today depend on a column's Arrow type rather than on intent: `trim` is

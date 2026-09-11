@@ -701,6 +701,66 @@ fn test_unconfigured_elements_do_not_fabricate_rows() {
     assert_array_values!(batch, "id", &[1, 2], Int32Array);
 }
 
+#[test]
+fn test_version_2_accepts_a_deliberately_unlinked_nested_table() {
+    // Regression: `version: 2` treated `links: []` as if the key were absent,
+    // so a nested table had no way to declare it deliberately has no link. A
+    // version 1 table with `levels: []` — no parent columns — therefore could
+    // not reach version 2 without its output gaining a column. The README's
+    // worked example hits this through its root metadata table.
+    //
+    // `links: []` is now the version 2 spelling of `levels: []`, and this
+    // asserts the promise that makes it worth having: identical output.
+    let xml = r#"<report>
+        <title>Stations</title>
+        <stations>
+          <station id="a"/>
+          <station id="b"/>
+        </stations>
+    </report>"#;
+    let version_1 = parse_xml_file(
+        xml,
+        r#"
+        tables:
+          - name: report
+            xml_path: /
+            levels: []
+            fields:
+              - {name: title, xml_path: /report/title, data_type: Utf8}
+          - name: stations
+            xml_path: /report/stations
+            levels: []
+            fields:
+              - {name: id, xml_path: /report/stations/station/@id, data_type: Utf8}
+        "#,
+    );
+    let version_2 = parse_xml_file(
+        xml,
+        r#"
+        version: 2
+        tables:
+          - name: report
+            xml_path: /
+            row: report
+            fields:
+              - {name: title, path: title, data_type: Utf8}
+          - name: stations
+            xml_path: /report/stations
+            row: station
+            links: []
+            fields:
+              - {name: id, path: "@id", data_type: Utf8}
+        "#,
+    );
+    for table in ["report", "stations"] {
+        assert_eq!(
+            version_1.get(table).unwrap(),
+            version_2.get(table).unwrap(),
+            "table {table} differs between versions"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Realistic end-to-end scenario
 // ---------------------------------------------------------------------------
