@@ -588,6 +588,8 @@ impl core::panic::unwind_safe::UnwindSafe for xml2arrow::errors::UnmatchedField
 pub type xml2arrow::errors::Result<T> = core::result::Result<T, xml2arrow::errors::Error>
 pub mod xml2arrow::lint
 #[non_exhaustive] pub enum xml2arrow::lint::Lint
+pub xml2arrow::lint::Lint::ConfigVersion1
+pub xml2arrow::lint::Lint::ConfigVersion1::steps: alloc::vec::Vec<xml2arrow::lint::MigrationStep>
 pub xml2arrow::lint::Lint::ExcessLevels
 pub xml2arrow::lint::Lint::ExcessLevels::available: usize
 pub xml2arrow::lint::Lint::ExcessLevels::declared: usize
@@ -626,6 +628,34 @@ impl core::marker::Unpin for xml2arrow::lint::Lint
 impl core::marker::UnsafeUnpin for xml2arrow::lint::Lint
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::lint::Lint
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::lint::Lint
+#[non_exhaustive] pub enum xml2arrow::lint::MigrationStep
+pub xml2arrow::lint::MigrationStep::DeclareRow
+pub xml2arrow::lint::MigrationStep::DeclareRow::table: alloc::string::String
+pub xml2arrow::lint::MigrationStep::LinkNestedTable
+pub xml2arrow::lint::MigrationStep::LinkNestedTable::enclosing_table: alloc::string::String
+pub xml2arrow::lint::MigrationStep::LinkNestedTable::table: alloc::string::String
+pub xml2arrow::lint::MigrationStep::RenameFieldXmlPath
+pub xml2arrow::lint::MigrationStep::RenameFieldXmlPath::field: alloc::string::String
+pub xml2arrow::lint::MigrationStep::RenameFieldXmlPath::table: alloc::string::String
+pub xml2arrow::lint::MigrationStep::ReplaceLevels
+pub xml2arrow::lint::MigrationStep::ReplaceLevels::table: alloc::string::String
+impl core::clone::Clone for xml2arrow::lint::MigrationStep
+pub fn xml2arrow::lint::MigrationStep::clone(&self) -> xml2arrow::lint::MigrationStep
+impl core::cmp::Eq for xml2arrow::lint::MigrationStep
+impl core::cmp::PartialEq for xml2arrow::lint::MigrationStep
+pub fn xml2arrow::lint::MigrationStep::eq(&self, &xml2arrow::lint::MigrationStep) -> bool
+impl core::fmt::Debug for xml2arrow::lint::MigrationStep
+pub fn xml2arrow::lint::MigrationStep::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for xml2arrow::lint::MigrationStep
+pub fn xml2arrow::lint::MigrationStep::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for xml2arrow::lint::MigrationStep
+impl core::marker::Freeze for xml2arrow::lint::MigrationStep
+impl core::marker::Send for xml2arrow::lint::MigrationStep
+impl core::marker::Sync for xml2arrow::lint::MigrationStep
+impl core::marker::Unpin for xml2arrow::lint::MigrationStep
+impl core::marker::UnsafeUnpin for xml2arrow::lint::MigrationStep
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::lint::MigrationStep
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::lint::MigrationStep
 pub macro xml2arrow::config_from_yaml!
 #[non_exhaustive] pub enum xml2arrow::DType
 pub xml2arrow::DType::Boolean
@@ -727,6 +757,8 @@ impl core::marker::UnsafeUnpin for xml2arrow::errors::Error
 impl !core::panic::unwind_safe::RefUnwindSafe for xml2arrow::errors::Error
 impl !core::panic::unwind_safe::UnwindSafe for xml2arrow::errors::Error
 #[non_exhaustive] pub enum xml2arrow::Lint
+pub xml2arrow::Lint::ConfigVersion1
+pub xml2arrow::Lint::ConfigVersion1::steps: alloc::vec::Vec<xml2arrow::lint::MigrationStep>
 pub xml2arrow::Lint::ExcessLevels
 pub xml2arrow::Lint::ExcessLevels::available: usize
 pub xml2arrow::Lint::ExcessLevels::declared: usize
