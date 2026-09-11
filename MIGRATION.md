@@ -480,7 +480,7 @@ The parser holds the config to it at load, and rejects anything left over:
 | a table with no `row:` | the table |
 | a table still using `levels:` | the table |
 | a field still spelled `xml_path:` | the table and the field |
-| a nested table with no `links:` | the table and the one enclosing it |
+| a nested table with no `links:` key — write `links: []` if it deliberately has no link | the table and the one enclosing it |
 
 Nothing there is a *correctness* problem — every one of those configs parses
 perfectly well without the `version:` line. What they cannot do is parse under
