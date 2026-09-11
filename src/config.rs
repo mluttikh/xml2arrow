@@ -29,6 +29,7 @@ use std::{
 };
 
 use crate::errors::{ConfigIssue, ConversionKind, Error, Result};
+use crate::lint::MigrationStep;
 use arrow::datatypes::DataType;
 use serde::{Deserialize, Serialize};
 
@@ -737,26 +738,41 @@ impl Config {
             }
         }
 
+        // The same list the deprecation lint reports for a version 1 config,
+        // so what the lint says is left and what this rejects cannot disagree.
+        // The first entry is the error: the first problem in the order a
+        // reader meets them in the YAML.
+        match self.version_2_steps().into_iter().next() {
+            Some(step) => Err(step.into_config_issue().into()),
+            None => Ok(()),
+        }
+    }
+
+    /// Every change this configuration still needs before it can declare
+    /// `version: 2`, in the order a reader meets them in the YAML.
+    ///
+    /// Empty for a config that satisfies version 2 — whether or not it says
+    /// so. Shared by `validate` (which rejects on the first entry) and
+    /// `Config::lint` (which reports all of them as the deprecation notice).
+    pub(crate) fn version_2_steps(&self) -> Vec<MigrationStep> {
+        let mut steps = Vec::new();
         for table in &self.tables {
             if table.row.is_none() {
-                return Err(ConfigIssue::InferredRowInVersion2 {
+                steps.push(MigrationStep::DeclareRow {
                     table: table.name.clone(),
-                }
-                .into());
+                });
             }
             if !table.levels.is_empty() {
-                return Err(ConfigIssue::LevelsInVersion2 {
+                steps.push(MigrationStep::ReplaceLevels {
                     table: table.name.clone(),
-                }
-                .into());
+                });
             }
             for field in &table.fields {
                 if field.xml_path.is_some() {
-                    return Err(ConfigIssue::FieldXmlPathInVersion2 {
+                    steps.push(MigrationStep::RenameFieldXmlPath {
                         table: table.name.clone(),
                         field: field.name.clone(),
-                    }
-                    .into());
+                    });
                 }
             }
             // A table with no ancestor has nothing to relate to, so `links` is
@@ -770,17 +786,21 @@ impl Config {
             // as absent left no way to say "deliberately unlinked": a v1
             // table with `levels: []` could not reach version 2 without its
             // output gaining a column.
-            if table.links.is_none()
+            //
+            // Not reported for a table still using `levels:`: replacing those
+            // with `links:` is the step, and listing "add links" beside
+            // "replace levels" would be one change counted twice.
+            if table.levels.is_empty()
+                && table.links.is_none()
                 && let Some(enclosing) = self.enclosing_table_of(table)
             {
-                return Err(ConfigIssue::NestedTableWithoutLinksInVersion2 {
+                steps.push(MigrationStep::LinkNestedTable {
                     table: table.name.clone(),
                     enclosing_table: enclosing.name.clone(),
-                }
-                .into());
+                });
             }
         }
-        Ok(())
+        steps
     }
 
     /// The innermost other table whose scope contains `table`, if any.

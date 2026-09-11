@@ -8671,7 +8671,9 @@ mod tests {
         );
         // Resolved relative: /report/data + report/data/item.
         assert!(matches!(
-            relative_but_looks_absolute.lint().as_slice(),
+            relative_but_looks_absolute
+                .lint_excluding_deprecation()
+                .as_slice(),
             [Lint::FieldOutsideRow { row_path, .. }]
                 if row_path == "/report/data/report/data/item"
         ));
