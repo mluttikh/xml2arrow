@@ -437,6 +437,11 @@ Lints are data, never printed by the library, and purely advisory: they never
 change how a document parses. The inferred-boundary lint carries its own fix —
 the `row:` line to add — and goes quiet once you add it.
 
+A config that does not declare `version: 2` also gets one **deprecation
+notice**: configuration format version 1 is deprecated, and the notice lists
+exactly what `version: 2` would still reject in that config. It goes quiet once
+the config declares `version: 2`. See [MIGRATION.md](MIGRATION.md#8-deprecated-still-working).
+
 For the runtime counterpart — "this field's `xml_path` matched nothing in *this
 document*" — set `parser_options.error_on_unmatched_fields`, which reports every
 offending field at once.

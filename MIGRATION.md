@@ -533,14 +533,36 @@ semantics is the one job this key has.
 
 ## 8. Deprecated, still working
 
-All three keep working until 1.0.
+These all keep working until 1.0.
 
 | Deprecated | Replacement |
 |---|---|
+| configuration format version 1 — a config with no `version:`, or `version: 1` | `version: 2`, once the config is migrated (§3–§7) |
 | `parse_xml(reader, &config)` | `Parser::new(&config)?.parse(reader)` |
 | `parse_xml_slice(xml, &config)` | `Parser::new(&config)?.parse_slice(xml)` |
 | `parser.parse_streaming(reader, opts, sink)` | `for item in parser.parse_batches(reader, opts)` |
 | `xml_path:` on a **field** | `path:` — a key rename for absolute values (§4) |
+
+**Every configuration format version 1 config now carries a deprecation
+notice** in `Config::lint()` / `Parser::warnings()` — including configs that
+have adopted every §3–§6 key but not yet declared `version: 2`. It parses
+exactly as before; the notice is the only change. It lists what `version: 2`
+would still reject, grouped by kind, and is structured data for tooling
+(`Lint::ConfigVersion1 { steps }`, each a `MigrationStep`):
+
+```text
+This config uses configuration format version 1, which is deprecated. Before
+it can declare `version: 2`: 3 tables must declare `row:` rather than infer
+their rows (report, stations, measurements); 2 tables must replace `levels:`
+with `links:` (stations, measurements); 13 fields must rename the `xml_path:`
+key to `path:` (report.title, report.created_by, report.creation_time, …).
+Declaring `version: 2` also changes two defaults: `Utf8` values are trimmed,
+and a missing non-nullable `Utf8` value is an error rather than ""
+```
+
+A host that treats any warning as a failure will now see one for every version
+1 config. Filter out `Lint::ConfigVersion1` if you need the previous behaviour
+while you migrate.
 
 The free functions hide the one-time path-compilation cost and pay it on *every*
 call. Constructing a `Parser` once and reusing it is the whole "compile once,
