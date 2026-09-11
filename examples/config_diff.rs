@@ -12,8 +12,15 @@
 //! ```
 //!
 //! Reports, per table: whether it appears in both configs, its row count under
-//! each, and which columns were added or removed. Exits non-zero when anything
+//! each, which columns were added or removed, and — when the row counts match —
+//! which shared columns hold different *values*. Exits non-zero when anything
 //! differs, so it can gate a migration in CI.
+//!
+//! Values matter because the step most likely to change data changes nothing
+//! else. Declaring `version: 2` switches two value defaults — `Utf8` values are
+//! trimmed, and a missing non-nullable `Utf8` value becomes an error rather
+//! than `""` — without adding a row or a column. A diff of shapes alone reports
+//! that step as "No differences" while `"  padded  "` becomes `"padded"`.
 //!
 //! Deliberately a dev-only example rather than a shipped binary: it graduates
 //! to the CLI crate in Phase G, and until then it should cost users nothing —
@@ -22,6 +29,9 @@
 use std::collections::BTreeSet;
 use std::process::ExitCode;
 
+use arrow::array::{Array, RecordBatch};
+use arrow::datatypes::DataType;
+use arrow::util::display::array_value_to_string;
 use xml2arrow::{Config, Parser};
 
 fn main() -> ExitCode {
@@ -67,16 +77,30 @@ fn run(config_a: &str, config_b: &str, document: &str) -> Result<bool, Box<dyn s
                     .difference(&columns_after)
                     .map(String::as_str)
                     .collect();
-                let rows_changed = before.0 != after.0;
+                let rows_changed = before.num_rows() != after.num_rows();
+                // Values are compared only when the row counts agree. Rows are
+                // matched by position, and once a table gains or loses rows
+                // every later position compares different rows — the row-count
+                // line is then the whole story, and a column of cell
+                // differences would only bury it.
+                let value_changes = if rows_changed {
+                    Vec::new()
+                } else {
+                    value_changes(before, after)
+                };
 
-                if !rows_changed && added.is_empty() && removed.is_empty() {
-                    println!("  = {name}: unchanged ({} rows)", before.0);
+                if !rows_changed
+                    && added.is_empty()
+                    && removed.is_empty()
+                    && value_changes.is_empty()
+                {
+                    println!("  = {name}: unchanged ({} rows)", before.num_rows());
                     continue;
                 }
                 identical = false;
                 println!("  ~ {name}:");
                 if rows_changed {
-                    println!("      rows: {} -> {}", before.0, after.0);
+                    println!("      rows: {} -> {}", before.num_rows(), after.num_rows());
                 }
                 if !added.is_empty() {
                     println!("      columns added:   {}", added.join(", "));
@@ -84,14 +108,17 @@ fn run(config_a: &str, config_b: &str, document: &str) -> Result<bool, Box<dyn s
                 if !removed.is_empty() {
                     println!("      columns removed: {}", removed.join(", "));
                 }
+                for change in &value_changes {
+                    println!("      values changed:  {change}");
+                }
             }
             (Some(before), None) => {
                 identical = false;
-                println!("  - {name}: removed (was {} rows)", before.0);
+                println!("  - {name}: removed (was {} rows)", before.num_rows());
             }
             (None, Some(after)) => {
                 identical = false;
-                println!("  + {name}: added ({} rows)", after.0);
+                println!("  + {name}: added ({} rows)", after.num_rows());
             }
             (None, None) => unreachable!("name came from one of the two maps"),
         }
@@ -106,16 +133,12 @@ fn run(config_a: &str, config_b: &str, document: &str) -> Result<bool, Box<dyn s
     Ok(identical)
 }
 
-/// `(row count, column names)` per table, which is the granularity the
-/// migration question is actually asked at. Values are deliberately not
-/// compared: a row-count or column change is the decision, and dumping cell
-/// diffs would bury it.
-type TableShape = (usize, Vec<String>);
-
+/// Parses `document` with the config at `config_path`, keeping whole batches:
+/// comparing values needs the values.
 fn parse_with(
     config_path: &str,
     document: &str,
-) -> Result<indexmap::IndexMap<String, TableShape>, Box<dyn std::error::Error>> {
+) -> Result<indexmap::IndexMap<String, RecordBatch>, Box<dyn std::error::Error>> {
     let config = Config::from_yaml_file(config_path)?;
     let parser = Parser::new(&config)?;
 
@@ -125,21 +148,74 @@ fn parse_with(
         eprintln!("lint [{config_path}]: {lint}");
     }
 
-    let batches = parser.parse_slice(&std::fs::read(document)?)?;
-    Ok(batches
-        .into_iter()
-        .map(|(name, batch)| {
-            let columns = batch
-                .schema()
-                .fields()
-                .iter()
-                .map(|f| f.name().clone())
-                .collect();
-            (name, (batch.num_rows(), columns))
-        })
-        .collect())
+    Ok(parser.parse_slice(&std::fs::read(document)?)?)
 }
 
-fn column_names(shape: &TableShape) -> BTreeSet<String> {
-    shape.1.iter().cloned().collect()
+fn column_names(batch: &RecordBatch) -> BTreeSet<String> {
+    batch
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect()
+}
+
+/// One line per shared column whose values differ: how many rows, and the
+/// first one as an example.
+///
+/// A summary rather than a cell dump. The question being answered is "did this
+/// change my data, and how" — one example of each kind of difference answers
+/// it, and a thousand-line diff of the same trimmed whitespace would not.
+fn value_changes(before: &RecordBatch, after: &RecordBatch) -> Vec<String> {
+    let mut changes = Vec::new();
+    for field in before.schema().fields() {
+        let name = field.name();
+        let (Some(a), Some(b)) = (before.column_by_name(name), after.column_by_name(name)) else {
+            continue; // added or removed — already reported
+        };
+        if a.data_type() != b.data_type() {
+            changes.push(format!(
+                "{name}: type {} -> {}",
+                a.data_type(),
+                b.data_type()
+            ));
+            continue;
+        }
+        // Logical equality over the whole column first; walking rows is only
+        // for columns that actually differ.
+        if a.to_data() == b.to_data() {
+            continue;
+        }
+        let mut differing = 0;
+        let mut first = None;
+        for row in 0..a.len() {
+            let (va, vb) = (render(a.as_ref(), row), render(b.as_ref(), row));
+            if va != vb {
+                differing += 1;
+                first.get_or_insert((row, va, vb));
+            }
+        }
+        if let Some((row, va, vb)) = first {
+            changes.push(format!(
+                "{name}: {differing} of {} rows, e.g. row {row}: {va} -> {vb}",
+                a.len()
+            ));
+        }
+    }
+    changes
+}
+
+/// A cell as the reader needs to see it. `Utf8` values are quoted, because the
+/// difference a migration most often makes to text is whitespace, and
+/// `  padded  -> padded` without quotes looks like no change at all.
+fn render(column: &dyn Array, row: usize) -> String {
+    if column.is_null(row) {
+        return "null".to_string();
+    }
+    let text = array_value_to_string(column, row).unwrap_or_else(|e| format!("<{e}>"));
+    if matches!(column.data_type(), DataType::Utf8 | DataType::LargeUtf8) {
+        format!("{text:?}")
+    } else {
+        text
+    }
 }

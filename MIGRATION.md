@@ -235,7 +235,8 @@ and declaring it explicitly changes nothing.
 
 ### Seeing the delta before you commit to it
 
-`config_diff` parses one document under two configs and reports what moved:
+`config_diff` parses one document under two configs and reports what moved —
+row counts, columns, and the values in columns the two share:
 
 ```bash
 cargo run --example config_diff -- before.yaml after.yaml document.xml
@@ -244,11 +245,19 @@ cargo run --example config_diff -- before.yaml after.yaml document.xml
 ```text
   ~ header:
       rows: 2 -> 1
+  ~ readings:
+      values changed:  label: 3 of 40 rows, e.g. row 7: "  north  " -> "north"
 
 Configs differ on this document.
 ```
 
+Values are compared only when a table's row count is unchanged, since rows are
+matched by position; each changed column gets a count and its first example
+rather than a full cell dump. Text is quoted so a whitespace change is visible.
+
 It exits non-zero when anything differs, so a migration can be gated in CI.
+Run it before adding `version: 2` in particular: that step changes values —
+trimming `Utf8` — without changing a single row count or column.
 
 ### Rules and limits
 
