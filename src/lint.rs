@@ -30,6 +30,98 @@ use std::borrow::Cow;
 use crate::config::{
     Config, DType, path_is_strictly_under, path_is_under, path_segments, resolve_field_path,
 };
+use crate::errors::ConfigIssue;
+
+/// One change a configuration still needs before it can declare `version: 2`.
+///
+/// Reported, all together, by [`Lint::ConfigVersion1`]. The same list drives
+/// `Config::validate` for a config that *does* declare `version: 2` — the first
+/// entry is the error — so what the lint says is left and what validation
+/// rejects cannot disagree.
+///
+/// `#[non_exhaustive]`: configuration format version 2 may tighten further
+/// before 1.0, and each new requirement arrives as a variant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MigrationStep {
+    /// The table leaves its row boundaries inferred; it must declare `row:`.
+    DeclareRow {
+        /// The table without a `row:`.
+        table: String,
+    },
+    /// The table uses `levels:`; it must declare `links:` instead.
+    /// `index_of:` links keep the column values exactly.
+    ReplaceLevels {
+        /// The table using `levels:`.
+        table: String,
+    },
+    /// The field is spelled with `xml_path:`; the key must be renamed to
+    /// `path:`. The value needs no change.
+    RenameFieldXmlPath {
+        /// The field's table.
+        table: String,
+        /// The field using `xml_path:`.
+        field: String,
+    },
+    /// A table nested inside another omits `links:`, so nothing in the config
+    /// says whether its rows relate to the enclosing table's. It must declare
+    /// the key — `links: []` if the table deliberately has no link.
+    LinkNestedTable {
+        /// The nested table.
+        table: String,
+        /// The nearest table enclosing it.
+        enclosing_table: String,
+    },
+}
+
+impl MigrationStep {
+    /// The validation error for a config that declares `version: 2` while this
+    /// step is still outstanding.
+    pub(crate) fn into_config_issue(self) -> ConfigIssue {
+        match self {
+            MigrationStep::DeclareRow { table } => ConfigIssue::InferredRowInVersion2 { table },
+            MigrationStep::ReplaceLevels { table } => ConfigIssue::LevelsInVersion2 { table },
+            MigrationStep::RenameFieldXmlPath { table, field } => {
+                ConfigIssue::FieldXmlPathInVersion2 { table, field }
+            }
+            MigrationStep::LinkNestedTable {
+                table,
+                enclosing_table,
+            } => ConfigIssue::NestedTableWithoutLinksInVersion2 {
+                table,
+                enclosing_table,
+            },
+        }
+    }
+}
+
+impl fmt::Display for MigrationStep {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MigrationStep::DeclareRow { table } => {
+                write!(f, "table '{table}': declare `row:`; its rows are inferred")
+            }
+            MigrationStep::ReplaceLevels { table } => write!(
+                f,
+                "table '{table}': replace `levels:` with `links:` (`index_of:` keeps the \
+                 same column values)"
+            ),
+            MigrationStep::RenameFieldXmlPath { table, field } => write!(
+                f,
+                "field '{field}' of table '{table}': rename the `xml_path:` key to `path:`; \
+                 the value is unchanged"
+            ),
+            MigrationStep::LinkNestedTable {
+                table,
+                enclosing_table,
+            } => write!(
+                f,
+                "table '{table}': declare `links:` relating it to '{enclosing_table}', which \
+                 encloses it — or `links: []` if it deliberately has no link"
+            ),
+        }
+    }
+}
 
 /// An advisory finding about a configuration.
 ///
@@ -124,6 +216,23 @@ pub enum Lint {
         /// The non-nullable `Utf8` fields that yield `""` when absent.
         fields: Vec<String>,
     },
+    /// The configuration uses configuration format version 1, which is
+    /// deprecated: it declares no `version:`, or `version: 1`.
+    ///
+    /// Version 1 keeps working, and this lint changes nothing about how a
+    /// document parses. Its job is to be the one place a version 1 user hears
+    /// about the deprecation without rereading the documentation, and to say
+    /// exactly what is left: `steps` is everything `version: 2` would still
+    /// reject, in the order it appears in the YAML.
+    ///
+    /// An empty `steps` means the config already uses only version 2 keys and
+    /// needs nothing but the `version: 2` line — which is the step that can
+    /// change values, since it switches two defaults (see
+    /// [`Config::version`](crate::Config::version)).
+    ConfigVersion1 {
+        /// What must change before the config can declare `version: 2`.
+        steps: Vec<MigrationStep>,
+    },
 }
 
 impl fmt::Display for Lint {
@@ -189,8 +298,109 @@ impl fmt::Display for Lint {
                 fields.len(),
                 fields.join(", "),
             ),
+            Lint::ConfigVersion1 { steps } => write_config_version_1(f, steps),
         }
     }
+}
+
+/// Renders [`Lint::ConfigVersion1`] as one paragraph: what is left, grouped by
+/// kind, each with a count and at most three names.
+///
+/// Grouped rather than listed because the configs most likely to be far from
+/// version 2 are the largest ones — a config generated from a schema can have
+/// hundreds of fields, every one spelled `xml_path:`, and one line per field
+/// would bury the other kinds of step under a wall of identical ones. The full
+/// list is in `steps` for anything that wants to act on it.
+fn write_config_version_1(f: &mut fmt::Formatter<'_>, steps: &[MigrationStep]) -> fmt::Result {
+    let (mut rows, mut levels, mut fields, mut links) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for step in steps {
+        match step {
+            MigrationStep::DeclareRow { table } => rows.push(table.clone()),
+            MigrationStep::ReplaceLevels { table } => levels.push(table.clone()),
+            MigrationStep::RenameFieldXmlPath { table, field } => {
+                fields.push(format!("{table}.{field}"))
+            }
+            MigrationStep::LinkNestedTable {
+                table,
+                enclosing_table,
+            } => links.push(format!("{table} inside {enclosing_table}")),
+        }
+    }
+
+    let mut left = Vec::new();
+    if !rows.is_empty() {
+        left.push(format!(
+            "{} must declare `row:` rather than infer {} rows ({})",
+            counted(rows.len(), "table", "tables"),
+            if rows.len() == 1 { "its" } else { "their" },
+            first_few(&rows),
+        ));
+    }
+    if !levels.is_empty() {
+        left.push(format!(
+            "{} must replace `levels:` with `links:` ({})",
+            counted(levels.len(), "table", "tables"),
+            first_few(&levels),
+        ));
+    }
+    if !fields.is_empty() {
+        left.push(format!(
+            "{} must rename the `xml_path:` key to `path:` ({})",
+            counted(fields.len(), "field", "fields"),
+            first_few(&fields),
+        ));
+    }
+    if !links.is_empty() {
+        left.push(format!(
+            "{} must declare `links:`, or `links: []` for none ({})",
+            counted(links.len(), "nested table", "nested tables"),
+            first_few(&links),
+        ));
+    }
+
+    write!(
+        f,
+        "This config uses configuration format version 1, which is deprecated. "
+    )?;
+    if left.is_empty() {
+        write!(
+            f,
+            "It already uses only version 2 keys; add `version: 2` to finish. "
+        )?;
+    } else {
+        write!(
+            f,
+            "Before it can declare `version: 2`: {}. ",
+            left.join("; ")
+        )?;
+    }
+    write!(
+        f,
+        "Declaring `version: 2` also changes two defaults: `Utf8` values are trimmed, and a \
+         missing non-nullable `Utf8` value is an error rather than \"\""
+    )
+}
+
+/// `1 table`, `3 tables`.
+fn counted(n: usize, singular: &str, plural: &str) -> String {
+    format!("{n} {}", if n == 1 { singular } else { plural })
+}
+
+/// Up to three names, then an ellipsis — enough to find the first ones, short
+/// enough that one kind of step cannot crowd out the others.
+fn first_few(names: &[String]) -> String {
+    const SHOWN: usize = 3;
+    let mut out = names
+        .iter()
+        .take(SHOWN)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if names.len() > SHOWN {
+        out.push_str(", …");
+    }
+    out
 }
 
 impl Config {
@@ -291,6 +501,16 @@ impl Config {
                 });
             }
         }
+
+        // Last, after the per-table findings: those describe what a document
+        // does *today*, which is more urgent than a deprecation. Absent and
+        // `1` are the same format; any other value is a validation error, not
+        // a version 1 config.
+        if matches!(self.version, None | Some(1)) {
+            lints.push(Lint::ConfigVersion1 {
+                steps: self.version_2_steps(),
+            });
+        }
         lints
     }
 
@@ -315,6 +535,21 @@ impl Config {
                         && path_is_strictly_under(table_path, &ancestor.xml_path)
                 })
                 .count()
+    }
+
+    /// [`Config::lint`] without the format notice.
+    ///
+    /// Every version 1 config now carries [`Lint::ConfigVersion1`], and nearly
+    /// every test config is version 1 — deliberately, since the lints that
+    /// describe inferred rows only arise there. A test about one of those
+    /// lints asserts the behavioural findings; the format notice has its own
+    /// tests.
+    #[cfg(test)]
+    pub(crate) fn lint_excluding_deprecation(&self) -> Vec<Lint> {
+        self.lint()
+            .into_iter()
+            .filter(|lint| !matches!(lint, Lint::ConfigVersion1 { .. }))
+            .collect()
     }
 
     /// Every configured direct child *element* of `table_path`, in first-seen
@@ -361,6 +596,234 @@ mod tests {
     use super::*;
     use crate::config_from_yaml;
 
+    /// The deprecation notice for configuration format version 1.
+    mod config_version_1 {
+        use super::*;
+        use crate::errors::Error;
+
+        fn steps(config: &Config) -> Option<Vec<MigrationStep>> {
+            config.lint().into_iter().find_map(|lint| match lint {
+                Lint::ConfigVersion1 { steps } => Some(steps),
+                _ => None,
+            })
+        }
+
+        /// A version 1 config with one of every step, in the order they appear.
+        fn legacy() -> Config {
+            config_from_yaml!(
+                r#"
+tables:
+  - name: stations
+    xml_path: /report/stations
+    levels: []
+    fields:
+      - {name: id, xml_path: /report/stations/station/@id, data_type: Utf8}
+  - name: measurements
+    xml_path: /report/stations/station/ms
+    levels: [station]
+    fields:
+      - {name: v, xml_path: /report/stations/station/ms/m/v, data_type: Int32}
+  - name: notes
+    xml_path: /report/stations/station/notes
+    row: note
+    fields:
+      - {name: text, path: text, data_type: Utf8}
+"#
+            )
+        }
+
+        #[test]
+        fn a_version_1_config_is_told_everything_that_is_left_in_order() {
+            assert_eq!(
+                steps(&legacy()).unwrap(),
+                vec![
+                    MigrationStep::DeclareRow {
+                        table: "stations".into()
+                    },
+                    MigrationStep::RenameFieldXmlPath {
+                        table: "stations".into(),
+                        field: "id".into(),
+                    },
+                    MigrationStep::DeclareRow {
+                        table: "measurements".into()
+                    },
+                    MigrationStep::ReplaceLevels {
+                        table: "measurements".into()
+                    },
+                    MigrationStep::RenameFieldXmlPath {
+                        table: "measurements".into(),
+                        field: "v".into(),
+                    },
+                    MigrationStep::LinkNestedTable {
+                        table: "notes".into(),
+                        enclosing_table: "stations".into(),
+                    },
+                ]
+            );
+        }
+
+        /// `measurements` uses `levels:` and has no `links:`, but is told
+        /// only to replace its levels — doing so is the linking step, and
+        /// reporting both would count one change twice.
+        #[test]
+        fn a_table_with_levels_is_not_also_told_to_add_links() {
+            let steps = steps(&legacy()).unwrap();
+            assert!(!steps.iter().any(|s| matches!(
+                s,
+                MigrationStep::LinkNestedTable { table, .. } if table == "measurements"
+            )));
+        }
+
+        /// `links: []` is a declaration — "deliberately unlinked" — so a
+        /// table carrying it has nothing left to do on that front.
+        #[test]
+        fn a_table_declaring_links_empty_is_not_told_to_add_links() {
+            let config = config_from_yaml!(
+                r#"
+tables:
+  - {name: outer, xml_path: /r/os, row: o, fields: [{name: a, path: a, data_type: Int32}]}
+  - {name: inner, xml_path: /r/os/o/is, row: i, links: [], fields: [{name: b, path: b, data_type: Int32}]}
+"#
+            );
+            assert_eq!(steps(&config), Some(vec![]));
+        }
+
+        #[rstest::rstest]
+        #[case::absent("")]
+        #[case::explicit("version: 1\n")]
+        fn absent_and_version_1_are_the_same_format(#[case] header: &str) {
+            let yaml = format!(
+                "{header}tables:\n  - {{name: t, xml_path: /r, row: i, fields: [{{name: v, path: v, data_type: Int32}}]}}\n"
+            );
+            let config: Config = yaml_serde::from_str(&yaml).unwrap();
+            assert_eq!(steps(&config), Some(vec![]));
+        }
+
+        #[test]
+        fn a_config_that_declares_version_2_has_no_notice() {
+            let config = config_from_yaml!(
+                r#"
+version: 2
+tables:
+  - {name: t, xml_path: /r, row: i, fields: [{name: v, path: v, data_type: Int32}]}
+"#
+            );
+            assert_eq!(steps(&config), None);
+        }
+
+        /// Only the `version: 2` line is left — and that line is the one step
+        /// that can change values, so the message must still say so.
+        #[test]
+        fn a_config_using_only_version_2_keys_is_told_the_last_step_changes_defaults() {
+            let config = config_from_yaml!(
+                r#"
+tables:
+  - {name: t, xml_path: /r, row: i, fields: [{name: v, path: v, data_type: Utf8}]}
+"#
+            );
+            assert_eq!(steps(&config), Some(vec![]));
+            let message = config
+                .lint()
+                .into_iter()
+                .find(|l| matches!(l, Lint::ConfigVersion1 { .. }))
+                .unwrap()
+                .to_string();
+            assert!(
+                message.contains("already uses only version 2 keys"),
+                "{message}"
+            );
+            assert!(message.contains("trimmed"), "{message}");
+        }
+
+        /// The property `version_2_steps` exists to guarantee: the lint lists
+        /// nothing exactly when declaring `version: 2` would validate, and
+        /// otherwise the validation error is the lint's first step. A second
+        /// copy of the rules for either side could drift; one copy cannot.
+        #[test]
+        fn the_notice_and_version_2_validation_agree() {
+            let with_version = |config: &Config| {
+                let mut v2 = config.clone();
+                v2.version = Some(2);
+                v2
+            };
+            let configs = [
+                legacy(),
+                config_from_yaml!(
+                    r#"
+tables:
+  - {name: t, xml_path: /r, row: i, fields: [{name: v, path: v, data_type: Int32}]}
+"#
+                ),
+                // A root metadata table: the table below it is nested, and must
+                // say so — the lint and validation must agree on that too.
+                config_from_yaml!(
+                    r#"
+tables:
+  - {name: doc, xml_path: /, row: report, fields: [{name: title, path: title, data_type: Utf8}]}
+  - {name: s, xml_path: /report/ss, row: s, fields: [{name: v, path: v, data_type: Int32}]}
+"#
+                ),
+            ];
+            for config in configs {
+                let steps = steps(&config).expect("every case is version 1");
+                match with_version(&config).validate() {
+                    Ok(()) => assert!(steps.is_empty(), "validates, yet the lint lists {steps:?}"),
+                    Err(Error::InvalidConfig { reason }) => {
+                        let first = steps.first().expect("rejected, yet the lint lists nothing");
+                        assert_eq!(
+                            format!("{reason}"),
+                            format!("{}", first.clone().into_config_issue())
+                        );
+                    }
+                    Err(other) => panic!("unexpected error: {other}"),
+                }
+            }
+        }
+
+        /// Grouped by kind with a count and the first three names, so a config
+        /// generated from a schema — hundreds of `xml_path:` fields — gets a
+        /// paragraph rather than a page, and the other kinds stay visible.
+        #[test]
+        fn the_message_groups_steps_and_shows_a_few_names() {
+            let fields: String = (0..40)
+                .map(|i| format!("      - {{name: f{i}, xml_path: /r/i/f{i}, data_type: Int32}}\n"))
+                .collect();
+            let yaml = format!(
+                "tables:\n  - name: t\n    xml_path: /r\n    row: i\n    fields:\n{fields}"
+            );
+            let config: Config = yaml_serde::from_str(&yaml).unwrap();
+            let message = config
+                .lint()
+                .into_iter()
+                .find(|l| matches!(l, Lint::ConfigVersion1 { .. }))
+                .unwrap()
+                .to_string();
+            assert!(message.contains("40 fields must rename"), "{message}");
+            assert!(message.contains("t.f0, t.f1, t.f2, …"), "{message}");
+            assert!(!message.contains("t.f3"), "{message}");
+        }
+
+        #[test]
+        fn a_single_step_reads_in_the_singular() {
+            let config = config_from_yaml!(
+                r#"
+tables:
+  - {name: t, xml_path: /r, fields: [{name: v, path: /r/i/v, data_type: Int32}]}
+"#
+            );
+            let message = config
+                .lint()
+                .into_iter()
+                .find(|l| matches!(l, Lint::ConfigVersion1 { .. }))
+                .unwrap()
+                .to_string();
+            assert!(
+                message.contains("1 table must declare `row:` rather than infer its rows (t)"),
+                "{message}"
+            );
+        }
+    }
+
     #[test]
     fn single_child_element_is_not_linted() {
         let config = config_from_yaml!(
@@ -374,7 +837,7 @@ tables:
       - {name: unit, xml_path: /data/item/unit, data_type: Int32}
 "#
         );
-        assert_eq!(config.lint(), vec![]);
+        assert_eq!(config.lint_excluding_deprecation(), vec![]);
     }
 
     #[test]
@@ -391,7 +854,7 @@ tables:
 "#
         );
         assert_eq!(
-            config.lint(),
+            config.lint_excluding_deprecation(),
             vec![Lint::InferredRowBoundary {
                 table: "header".to_string(),
                 xml_path: "/report/header".to_string(),
@@ -420,7 +883,7 @@ tables:
       - {name: value, xml_path: /report/stations/station/m/value, data_type: Int32}
 "#
         );
-        let lints = config.lint();
+        let lints = config.lint_excluding_deprecation();
         assert_eq!(
             lints[0],
             Lint::InferredRowBoundary {
@@ -444,7 +907,7 @@ tables:
       - {name: b, xml_path: /data/item/deep/b, data_type: Int32}
 "#
         );
-        assert_eq!(config.lint(), vec![]);
+        assert_eq!(config.lint_excluding_deprecation(), vec![]);
     }
 
     #[test]
@@ -460,7 +923,7 @@ tables:
 "#
         );
         assert_eq!(
-            config.lint(),
+            config.lint_excluding_deprecation(),
             vec![Lint::NeverFinalizesRows {
                 table: "doc".to_string(),
                 xml_path: "/data".to_string(),
@@ -485,7 +948,7 @@ tables:
 "#
         );
         assert_eq!(
-            config.lint(),
+            config.lint_excluding_deprecation(),
             vec![Lint::StructuralTable {
                 table: "scope".to_string()
             }]
@@ -510,11 +973,15 @@ tables:
       - {name: v, xml_path: /data/items/item/v, data_type: Int32}
 "#
         );
-        assert!(config.lint().contains(&Lint::ExcessLevels {
-            table: "items".to_string(),
-            declared: 3,
-            available: 2,
-        }));
+        assert!(
+            config
+                .lint_excluding_deprecation()
+                .contains(&Lint::ExcessLevels {
+                    table: "items".to_string(),
+                    declared: 3,
+                    available: 2,
+                })
+        );
     }
 
     #[test]
@@ -558,11 +1025,15 @@ tables:
       - {name: title, xml_path: /report/title, data_type: Int32}
 "#
         );
-        assert!(config.lint().contains(&Lint::ExcessLevels {
-            table: "doc".to_string(),
-            declared: 1,
-            available: 0,
-        }));
+        assert!(
+            config
+                .lint_excluding_deprecation()
+                .contains(&Lint::ExcessLevels {
+                    table: "doc".to_string(),
+                    declared: 1,
+                    available: 0,
+                })
+        );
     }
 
     #[test]
@@ -604,11 +1075,15 @@ tables:
       - {name: v, xml_path: /report/items/item/v, data_type: Int32}
 "#
         );
-        assert!(config.lint().contains(&Lint::ExcessLevels {
-            table: "items".to_string(),
-            declared: 2,
-            available: 1,
-        }));
+        assert!(
+            config
+                .lint_excluding_deprecation()
+                .contains(&Lint::ExcessLevels {
+                    table: "items".to_string(),
+                    declared: 2,
+                    available: 1,
+                })
+        );
     }
 
     #[test]
@@ -627,7 +1102,7 @@ tables:
 "#
         );
         assert_eq!(
-            config.lint(),
+            config.lint_excluding_deprecation(),
             vec![Lint::ImplicitEmptyString {
                 table: "items".to_string(),
                 fields: vec!["name".to_string(), "label".to_string()],
@@ -647,7 +1122,7 @@ tables:
       - {name: title, xml_path: /report/title, data_type: Int32}
 "#
         );
-        assert_eq!(config.lint(), vec![]);
+        assert_eq!(config.lint_excluding_deprecation(), vec![]);
     }
 
     #[test]
@@ -746,7 +1221,7 @@ tables:
                   - {name: stray, xml_path: /report/data/summary, data_type: Utf8}
             "#
         );
-        let lints = config.lint();
+        let lints = config.lint_excluding_deprecation();
         let outside: Vec<&Lint> = lints
             .iter()
             .filter(|l| matches!(l, Lint::FieldOutsideRow { .. }))
@@ -784,7 +1259,7 @@ tables:
                 .iter()
                 .any(|l| matches!(l, Lint::FieldOutsideRow { .. })),
             "got {:?}",
-            config.lint()
+            config.lint_excluding_deprecation()
         );
     }
 }
