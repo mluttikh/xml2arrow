@@ -759,7 +759,7 @@ impl fmt::Display for ConfigIssue {
             ),
             ConfigIssue::RowIsRootTable { table } => write!(
                 f,
-                "Table '{table}' has xml_path '/' and declares a row resolving to it. The implicit document root never closes, so no row would ever be finalized and the table would produce no rows. Either omit 'row' (the document's top-level element already finalizes one row) or set xml_path to that element and keep row: \".\""
+                "Table '{table}' has xml_path '/' and declares a row resolving to it. The implicit document root never closes, so no row would ever be finalized and the table would produce no rows. Name the document's top-level element as the row instead (row: <element>), or set xml_path to that element and keep row: \".\""
             ),
             ConfigIssue::RowPathCrossesTable {
                 table,
