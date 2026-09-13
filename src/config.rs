@@ -11,14 +11,17 @@
 //!   mistake is an error at load rather than a wrong column at parse — which
 //!   is the trade this crate makes everywhere, since silently plausible data
 //!   is the worst failure it could produce.
-//! - **Newer keys are opt-in and additive.** [`TableConfig::row`],
-//!   [`TableConfig::links`] and [`FieldConfig::path`] each replace an older
-//!   mechanism, and a config that sets none of them behaves exactly as it did
-//!   before they existed. [`Config::version`] is how a config asserts it has
-//!   finished adopting them.
+//! - **There are two configuration formats.** A config whose
+//!   [`Config::version`] is `2` must use [`TableConfig::row`],
+//!   [`TableConfig::links`] and [`FieldConfig::path`]. A config without it is
+//!   configuration format version 1, which is deprecated: rows are inferred
+//!   and nested tables use [`TableConfig::levels`]. A version 1 config may
+//!   adopt the newer keys one at a time, and a config that sets none of them
+//!   behaves exactly as it did before they existed.
 //!
-//! See the crate-level documentation for a worked example, and `MIGRATION.md`
-//! for moving an existing config forward.
+//! See the crate-level documentation for a worked example, and the
+//! [configuration reference](https://github.com/mluttikh/xml2arrow/blob/main/docs/configuration.md)
+//! for every key.
 
 use std::{
     borrow::Cow,
@@ -1099,9 +1102,8 @@ impl ValuePolicies {
 ///   is a correct equi-join no matter how often container elements repeat or
 ///   how the stream was batched.
 /// - **`index_of`** produces a `UInt32` **positional ordinal** that resets with
-///   its enclosing scope. It is value-identical to the legacy `levels` columns
-///   for the same path, which is its purpose: adopting `links:` need not change
-///   a single value. It is *not* a join key.
+///   its enclosing scope. It holds the same values as a `levels` column that
+///   counts the same table's rows. It is *not* a join key.
 ///
 /// Marked `#[non_exhaustive]`: further link kinds arrive as new optional keys.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]

@@ -14,7 +14,9 @@ A Python version of this library is also available on GitHub: [https://github.co
 
 > **Upgrading from 0.19?** See [MIGRATION.md](MIGRATION.md). One mechanical
 > source change is required; truncated documents now error instead of returning
-> partial rows.
+> partial rows. Existing configs keep working, but their format, configuration
+> format version 1, is deprecated: see
+> [Migrating to configuration format version 2](docs/migrating-to-version-2.md).
 
 ## Overview
 
@@ -48,295 +50,59 @@ xml2arrow = "0.20.0"
 - 🌊 **Bounded-memory streaming** for documents larger than RAM — batched output via `parse_batches`, owned (`'static`) streams via `into_batches`, and a `RecordBatchReader` adapter for single-table configs
 - 🔒 **Safe on untrusted input** — no external entity resolution, no entity expansion, no silent truncation ([details](#-security--trust-model))
 - 🎛️ **Per-field value handling** — `trim`, `on_missing`, `on_invalid`,
-  `on_repeat`, `null_values`, each opting out of one historical quirk; `version: 2`
-  asserts a config is fully migrated and takes the 1.0 defaults early
+  `on_repeat` and `null_values` decide what happens to whitespace and to
+  missing, invalid and repeated values
 - 🔎 **Config lints** via `parser.warnings()` — advisory warnings about configs that are valid but behave surprisingly ([details](#checking-a-config-for-surprises))
 
 ## Usage
 
 ### 1. Write a configuration file
 
-The YAML configuration defines which parts of the XML document become tables and
-how their fields are typed. The full schema is:
+A YAML config says which elements become tables, which element makes a row, and
+where each column's value is:
 
 ```yaml
-version: 2                     # Optional. Asserts the config is fully migrated —
-                               # every table declares `row:` and uses `links:`
-                               # rather than `levels:`, every field uses `path:`
-                               # — and in exchange takes the defaults 1.0 will
-                               # make mandatory. Omitted means today's behavior.
-defaults:                      # Optional. Value policies applied to every field
-  trim: <true|false>           # that does not set its own; same keys as a
-  on_missing: <policy>         # field's, listed under `fields:` below.
-  on_invalid: <policy>
-  on_repeat: <policy>
-  null_values: [<str>]
-parser_options:
-  trim_text: <true|false>      # Trim whitespace from text nodes (default: false)
-  stop_at_paths: [<xml_path>]  # Stop parsing after these closing tags (optional,
-                               # useful for reading only a file header)
-  strip_namespaces: <bool>     # Strip ns: prefixes before matching (default: true).
-                               # Set false to match raw qualified names and skip
-                               # the per-name prefix scan (~4-7% faster); paths must
-                               # then spell out any prefix. Free for prefix-free XML.
-  allow_truncated_input: <bool> # Accept input that ends mid-element (default: false).
-                               # By default a truncated document is an error rather
-                               # than a silently short result — see "Security &
-                               # trust model". Enable only for recovery tooling.
-  error_on_unmatched_fields: <bool>  # Fail if a configured field never matched
-                               # anything in the document (default: false). Catches
-                               # misspelled xml_paths, whose symptom is otherwise a
-                               # silently all-null column. Note that stop_at_paths
-                               # leaves everything below the stop path unmatched, so
-                               # the two options pull against each other.
-  max_value_bytes: <number>    # Cap on the bytes a single field value may accumulate
-                               # across text/CDATA/entity events (default: unlimited).
+version: 2
 tables:
-  - name: <table_name>         # Name of the resulting Arrow RecordBatch
-    xml_path: <xml_path>       # Path to the element whose children are rows.
-                               # Use "/" to treat the whole document as one row.
-    row: <element>             # Which element finalizes a row (optional).
-                               # Omitted: inferred — a row ends whenever ANY
-                               #   configured direct child of xml_path closes,
-                               #   so two configured children yield two
-                               #   half-filled rows per container.
-                               # ".": one row per xml_path element itself —
-                               #   what metadata tables usually mean.
-                               # "name" / "a/b": relative to xml_path.
-                               # "/a/b/c": absolute (a LEADING SLASH is what
-                               #   makes it absolute; "a/b" is still relative).
-    levels: [<level>, ...]     # Parent-link index columns — see "Nested tables".
-                               # Optional; replaced by `links:` below.
-    links:                     # Declared relationships (optional; not with levels).
-                               # `links: []` declares a table deliberately
-                               # unlinked — the version 2 form of `levels: []`.
-      - parent: <table>        #   UInt64 join key → <table>._id
-        name: <column>         #   default: _<table>_id
-      - index_of: <path>       #   UInt32 positional ordinal (NOT a key).
-        name: <column>         #   Must name an enclosing table's ROW element,
-                               #   not its xml_path. Default column name:
-                               #   <element>_idx. Same value as <level>.
-    row_id: <name|false>       # This table's own key column. Defaults to `_id`
-                               # exactly when another table links to it.
+  - name: stations
+    xml_path: /report/stations      # the element that contains the rows
+    row: station                    # one row per <station>
     fields:
-      - name: <field_name>     # Arrow column name
-        path: <field_path>     # Where the value lives. Same rule as `row:`:
-                               #   "/a/b/c" is absolute (LEADING SLASH),
-                               #   "v" / "sensor/@id" is relative to the row
-                               #     element, and needs `row:` on the table.
-                               # Prefix the last segment with @ for attributes.
-        xml_path: <field_path> # The older name for the same thing, absolute
-                               # only. Set exactly one of `path`/`xml_path`;
-                               # `xml_path` is removed in 1.0.
-        data_type: <type>      # Arrow data type — see supported types below
-        nullable: <true|false> # Whether the field can be null (default: false)
-                               # If false, a missing/empty value is an error —
-                               # except Utf8 fields, which yield "" (see below)
-        trim: <true|false>     # Strip surrounding whitespace (optional).
-                               # Default: numeric/boolean trim, Utf8 does not.
-        on_missing: <policy>   # error | null | empty — what an absent or blank
-                               # value becomes. Default depends on the type:
-                               # nullable -> null, non-nullable Utf8 -> "",
-                               # anything else -> error.
-        on_invalid: <policy>   # error | null — what an unparseable value becomes
-                               # (default: error).
-        on_repeat: <policy>    # error | first | last — what a repeated element
-                               # does (default: error).
-        null_values: [<str>]   # Literals that count as missing ("N/A", "-").
-        scale: <number>        # Multiply float values by this factor (optional)
-        offset: <number>       # Add this value to float values after scaling (optional)
-                               # value = (value * scale) + offset
-```
+      - {name: id,   path: "@id", data_type: Utf8}
+      - {name: name, path: name,  data_type: Utf8}
 
-**Declaring rows (`row:`).** Without it, row boundaries are *inferred* from
-whichever fields happen to be configured — so adding a field can change a
-table's row count, and a metadata table with three fields produces three
-one-third-filled rows instead of one. `row:` states the boundary instead:
-
-```yaml
-tables:
-  - name: header
-    xml_path: /report/header
-    row: "."                   # one row per <header>, holding all three fields
-    fields: [title, created, version]   # (abbreviated)
-```
-
-It is opt-in per table, and it changes nothing else: `levels`, absolute field
-paths and scoping all behave as before, and a table that omits `row:` keeps the
-inferred rule even when a sibling table declares one. `Config::lint()` reports
-tables whose boundaries are inferred from more than one child element, with the
-suggested `row:` line in the message — see [Checking a config for surprises](#checking-a-config-for-surprises).
-
-**Relative field paths.** Once a table declares `row:`, its fields can be
-written relative to that row element, which removes the repetition of spelling
-the full path on every column:
-
-```yaml
-tables:
   - name: readings
     xml_path: /report/stations/station/readings
     row: reading
-    fields:
-      - {name: seq,   path: "@seq",         data_type: Int32}
-      - {name: value, path: value,          data_type: Int32}
-      - {name: unit,  path: sensor/@unit,   data_type: Utf8}
-```
-
-`path` and `xml_path` are two spellings of one location and compile to the same
-node, so switching an absolute `xml_path:` to `path:` is a key rename with no
-output change. Set exactly one of them per field.
-
-**Declared links (`links:`).** `levels` names *labels* and takes its values
-positionally; `links:` names the relationship, which turns a mismatch into a
-load-time error and adds a real join key. The two are compared, with what
-each produces, in [Linking nested tables](#2-linking-nested-tables) below.
-
-**Value policies.** Every policy above is optional and **absent means current
-behavior**, including the type-dependent quirks — setting one opts out of a
-specific quirk rather than switching engines. A `defaults:` block at the top of
-the config applies them to every field that sets none:
-
-```yaml
-defaults:
-  trim: true
-tables:
-  - name: items
-    xml_path: /report
-    row: item
-    fields:
-      - {name: n, path: n, data_type: Int32, nullable: true, on_invalid: null}
-      - {name: v, path: v, data_type: Utf8, nullable: true, on_repeat: last}
-```
-
-The most useful is `on_missing`, because the default is genuinely surprising: a
-missing non-nullable `Utf8` field yields `""` while a missing non-nullable
-number is an error. `on_missing: error` makes a column behave the same whatever
-its type.
-
-**`version: 2`.** Every key above is independently optional, so a config can be
-half migrated indefinitely and never say so. `version: 2` is how it says so — an
-assertion, not a switch. Declaring it requires the config to be fully migrated
-(every table declares `row:`, none uses `levels:`, every field uses `path:`, and
-a nested table declares its `links:` — `links: []` when it deliberately has
-none), and anything left over is rejected at load with a message naming it.
-
-In exchange the config opts into the two defaults 1.0 will make mandatory, both
-of which today depend on a column's Arrow type rather than on intent: `trim` is
-on for every type, and a missing non-nullable value is an error whatever the
-type. Per-field policies still win, and deleting the line reverts everything.
-See [MIGRATION.md](MIGRATION.md#7-optional-assert-you-are-done-with-version-2).
-
-**Supported data types:** `Boolean`, `Int8`, `UInt8`, `Int16`, `UInt16`, `Int32`,
-`UInt32`, `Int64`, `UInt64`, `Float32`, `Float64`, `Utf8`
-
-`Boolean` fields accept (case-insensitively): `true`, `false`, `1`, `0`, `yes`,
-`no`, `on`, `off`, `t`, `f`, `y`, `n`.
-
-**Whitespace and missing values:** numeric and boolean values may be surrounded
-by whitespace (`<v> 42 </v>`, `age=" 30 "`) regardless of the `trim_text`
-setting; a whitespace-only or empty value counts as *missing* — null when the
-field is `nullable`, an error otherwise. Trailing garbage after a number
-(`30 units`, `1.5` for an integer field) is a parse error, never a silent
-truncation. One exception to the missing-value rule: a missing non-nullable
-`Utf8` field yields an empty string `""` rather than an error.
-
-### 2. Linking nested tables
-
-When one table's rows sit inside another's, the child needs a column saying
-which parent row it belongs to. There are two mechanisms, and they are not
-equivalent.
-
-**`links:` — a real join key (recommended).** Name the relationship, and the
-child gets a `UInt64` foreign key pointing at the parent's `_id`:
-
-```yaml
-  - name: stations
-    xml_path: /report/monitoring_stations
-    row: monitoring_station
-    fields: [...]
-
-  - name: measurements
-    xml_path: /report/monitoring_stations/monitoring_station/measurements
-    row: measurement
     links:
-      - parent: stations        # UInt64 join key -> stations._id
-    fields: [...]
+      - parent: stations            # adds _stations_id, which joins to stations._id
+    fields:
+      - {name: time,  path: "@time", data_type: Utf8}
+      - {name: value, path: value,   data_type: Float64}
 ```
 
-```python
-measurements.join(stations, left_on="_stations_id", right_on="_id")
-```
+- **`row`** names the element that makes one row: `station` for one row per
+  `<station>`, or `"."` for one row per `xml_path` element, such as a header.
+- **`path`** is relative to the row element. A leading slash makes it absolute,
+  and `@` marks an attribute.
+- **`links`** relates a table to the table it sits inside. `parent:` adds a join
+  key, `index_of:` adds a position, and `links: []` adds nothing.
+- **Values** are trimmed, and a missing value is null in a `nullable` column
+  and an error otherwise. `on_missing`, `on_invalid`, `on_repeat`, `null_values`
+  and `trim` change that per field.
 
-The values are **global** row ordinals, never reset, so that join is correct
-however often container elements repeat and however the output was batched.
-The referenced table materializes `_id` automatically; tables nobody
-references gain no column.
+The [configuration reference](docs/configuration.md) documents every key, the
+supported data types and the parser options.
 
-**`levels:` — positional index columns (legacy).** Each string names an element
-at a nesting boundary above the row element and produces a zero-based `UInt32`
-column named `<level>`:
+> **Configuration format version 1 is deprecated.** A config without
+> `version: 2`, which includes every config written for 0.19 and earlier, is
+> read as version 1. It keeps working until 1.0, and `parser.warnings()` lists
+> what it still needs to change.
+> [Configuration format version 1](docs/configuration-v1.md) documents it, and
+> [Migrating to configuration format version 2](docs/migrating-to-version-2.md)
+> moves a config across in four steps.
 
-```yaml
-  - name: measurements
-    xml_path: /report/monitoring_stations/monitoring_station/measurements
-    levels: [station, measurement]
-    fields: [...]
-```
-
-This still works and is not going away before 1.0, but it takes its values
-*positionally* from whatever ancestor tables happen to enclose the table, and
-the counter resets with its scope. That is the difference that matters:
-
-> Two stations in separate containers, three measurements between them:
->
-> ```xml
-> <group><station><id>A</id><ms><m>1</m><m>2</m></ms></station></group>
-> <group><station><id>B</id><ms><m>3</m></ms></station></group>
-> ```
->
-> | measurement | `parent:` key | positional `<station>` |
-> |---|---|---|
-> | 1 | 0 | 0 |
-> | 2 | 0 | 0 |
-> | 3 | **1** | **0** |
->
-> The positional column resets with its scope, so it reports `0` for *both*
-> stations. Joining on it silently attributes B's measurement to A — a
-> plausible table, wrong data. This is a frozen corpus case, not a
-> hypothetical.
-
-**Naming the key columns.** Both are derived from the referenced table's
-`name` — `_id` on that table, `_<name>_id` on the one linking to it — and both
-can be set explicitly:
-
-```yaml
-  - name: stations
-    row_id: station_id            # this table's own key
-  - name: measurements
-    links:
-      - parent: stations
-        name: station_id          # the foreign key
-```
-
-Worth doing whenever the derived names are not what you want downstream; the
-derived form interpolates the table's `name` exactly as written, so a table
-whose name is not a plain identifier produces a column that is not one either.
-
-Collisions are never resolved silently: if two links, or a link and a field,
-would produce the same column, the config is rejected at load with a message
-naming `name:` as the fix.
-
-**`index_of:` — the third option, for adopting `links:` without changing a
-number.** A `UInt32` positional ordinal that resets with its scope, and
-**value-identical to the legacy `<level>` column** for the same path. Use it
-when you want to move off `levels` while keeping the output byte-identical. It
-is an ordinal, not a join key, and carries exactly the caveat above: where a
-container repeats, two different parents both report `0`.
-
-*A table defined purely to establish hierarchy — one with an empty `fields`
-list — acts only as a boundary and is excluded from the output map.*
-
-### 3. Parse the XML
+### 2. Parse the XML
 
 ```rust
 use std::fs::File;
@@ -413,7 +179,7 @@ for path in xml_files {
 Each call allocates fresh Arrow builders, so batches from one document never
 leak into the next. A `Parser` can also serve several streams concurrently.
 
-> **Deprecated since 0.20** (see [MIGRATION.md](MIGRATION.md#8-deprecated-still-working)): the free functions `parse_xml` and
+> **Deprecated since 0.20** (see [MIGRATION.md](MIGRATION.md#4-deprecated-still-working)): the free functions `parse_xml` and
 > `parse_xml_slice` do exactly `Parser::new(&config)?.parse(..)` /
 > `.parse_slice(..)`, paying the compilation cost on *every* call. They still
 > work, and will be removed in 1.0.
@@ -422,9 +188,10 @@ leak into the next. A `Parser` can also serve several streams concurrently.
 
 `Config::validate` (run by `Parser::new`) rejects configs that cannot work.
 `parser.warnings()` reports the next tier: configs that are valid but whose
-behavior commonly surprises — most importantly, tables whose **row boundaries
-are inferred** from several different child elements, which yield one
-partially-filled row per child element rather than one row per container.
+behavior commonly surprises — a field outside its table's row, say, or, in a
+version 1 config, **row boundaries inferred** from several different child
+elements, which yield one partially-filled row per child element rather than one
+row per container.
 
 ```rust
 let parser = Parser::new(&config)?;
@@ -437,12 +204,12 @@ Lints are data, never printed by the library, and purely advisory: they never
 change how a document parses. The inferred-boundary lint carries its own fix —
 the `row:` line to add — and goes quiet once you add it.
 
-A config that does not declare `version: 2` also gets one **deprecation
-notice**: configuration format version 1 is deprecated, and the notice lists
-exactly what `version: 2` would still reject in that config. It goes quiet once
-the config declares `version: 2`. See [MIGRATION.md](MIGRATION.md#8-deprecated-still-working).
+A version 1 config, one that does not declare `version: 2`, also gets a
+**deprecation notice** that lists exactly what `version: 2` would still reject
+in that config. See
+[Migrating to configuration format version 2](docs/migrating-to-version-2.md).
 
-For the runtime counterpart — "this field's `xml_path` matched nothing in *this
+For the runtime counterpart — "this field's path matched nothing in *this
 document*" — set `parser_options.error_on_unmatched_fields`, which reports every
 offending field at once.
 
@@ -489,7 +256,7 @@ Guarantees and behavior:
 
 - **Identical values**: concatenating a table's batches in yield order (e.g.
   with `arrow::compute::concat_batches`) reproduces exactly what
-  `parser.parse` would have returned — including the `<level>` index columns,
+  `parser.parse` would have returned — including key and position columns,
   which keep counting across batch boundaries.
 - Every batch of a table shares one schema, available up front (before
   parsing anything) via `parser.schema("table_name")`. Yielded batches always
@@ -643,6 +410,7 @@ three linked Arrow tables.
 ### Configuration (`stations.yaml`)
 
 ```yaml
+version: 2
 tables:
   - name: report
     xml_path: /
@@ -655,6 +423,7 @@ tables:
   - name: stations
     xml_path: /report/monitoring_stations
     row: monitoring_station
+    links: []                   # inside report's row, but needs no link to it
     fields:
       - {name: id,           path: "@id",                    data_type: Utf8}
       - {name: latitude,     path: location/latitude,        data_type: Float32}
