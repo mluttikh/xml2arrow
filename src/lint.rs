@@ -577,15 +577,26 @@ impl Config {
     /// Mirrors the registry's view rather than the config's: intermediate
     /// segments of a deep field path (`/a/b/c` contributes `b` to a table at
     /// `/a`) are trie nodes too, and a nested *table's* path counts as well,
-    /// because closing its element also ends the parent's row. Attribute
-    /// pseudo-nodes are excluded: `parse_attributes` enters and leaves them
-    /// without going through the row-finalizing close path.
+    /// because closing its element also ends the parent's row. So does a
+    /// `stop_at_paths` entry: registering it creates its node, and closing that
+    /// element ends a row even though no field reads it. Attribute pseudo-nodes
+    /// are excluded: `parse_attributes` enters and leaves them without going
+    /// through the row-finalizing close path.
     fn row_delimiting_children(&self, table_path: &str) -> Vec<String> {
         let depth = path_segments(table_path).count();
-        let all_paths = self.tables.iter().flat_map(|t| {
-            std::iter::once(Cow::Borrowed(t.xml_path.as_str()))
-                .chain(t.fields.iter().filter_map(|f| resolve_field_path(t, f)))
-        });
+        let all_paths = self
+            .tables
+            .iter()
+            .flat_map(|t| {
+                std::iter::once(Cow::Borrowed(t.xml_path.as_str()))
+                    .chain(t.fields.iter().filter_map(|f| resolve_field_path(t, f)))
+            })
+            .chain(
+                self.parser_options
+                    .stop_at_paths
+                    .iter()
+                    .map(|path| Cow::Borrowed(path.as_str())),
+            );
 
         let mut children: Vec<String> = Vec::new();
         for path in all_paths {
@@ -1184,6 +1195,32 @@ tables:
 "#
         );
         assert_eq!(config.lint(), vec![]);
+    }
+
+    /// A stop path under a table is a trie node like any configured child, so
+    /// its closing tag ends a row too, and it counts toward inferred rows.
+    #[test]
+    fn a_stop_path_under_a_table_counts_as_a_row_ending_child() {
+        let config = config_from_yaml!(
+            r#"
+parser_options:
+  stop_at_paths: [/data/marker]
+tables:
+  - name: items
+    xml_path: /data
+    levels: []
+    fields:
+      - {name: v, xml_path: /data/item/v, data_type: Int32, nullable: true}
+"#
+        );
+        assert_eq!(
+            config.lint_excluding_deprecation(),
+            vec![Lint::InferredRowBoundary {
+                table: "items".to_string(),
+                xml_path: "/data".to_string(),
+                child_elements: vec!["item".to_string(), "marker".to_string()],
+            }]
+        );
     }
 
     #[test]

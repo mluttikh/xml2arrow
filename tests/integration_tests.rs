@@ -842,6 +842,40 @@ fn test_null_values_make_a_utf8_value_missing() {
     );
 }
 
+#[test]
+fn test_a_stop_path_under_a_table_is_reported_as_ending_its_rows() {
+    // Regression: the `InferredRowBoundary` lint looked only at field and table
+    // paths, but a `stop_at_paths` entry under a table is a trie node whose
+    // closing tag also ends a row. This table's rows end at both <item> and
+    // <marker>, so it yields half-filled rows, yet the lint saw one child and
+    // said nothing.
+    let config = Config::from_yaml_str(
+        r#"
+        parser_options:
+          stop_at_paths: [/data/marker]
+        tables:
+          - name: items
+            xml_path: /data
+            levels: []
+            fields:
+              - {name: v, xml_path: /data/item/v, data_type: Int32, nullable: true}
+        "#,
+    )
+    .unwrap();
+    let inferred: Vec<Vec<String>> = config
+        .lint()
+        .into_iter()
+        .filter_map(|lint| match lint {
+            xml2arrow::Lint::InferredRowBoundary { child_elements, .. } => Some(child_elements),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        inferred,
+        vec![vec!["item".to_string(), "marker".to_string()]]
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Realistic end-to-end scenario
 // ---------------------------------------------------------------------------
