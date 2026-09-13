@@ -12,6 +12,7 @@
 //! use xml2arrow::{Parser, config_from_yaml};
 //!
 //! let config = config_from_yaml!(r#"
+//! version: 2
 //! tables:
 //!   - name: measurements
 //!     xml_path: /report/measurements
@@ -51,28 +52,31 @@
 //! - [`Error`] is the failure surface. Its `Display` output is stable, and
 //!   errors carry the row and byte offset where the problem was found.
 //!
-//! # Rows
+//! # Configuration formats
 //!
-//! A table's rows come from one repeating element. Say which with `row:`:
+//! The config above declares `version: 2`, so it uses configuration format
+//! version 2: every table names the element that makes a row with `row:`,
+//! fields give a `path:` relative to it, and a table nested inside another
+//! declares `links:`. The [configuration reference] documents every key.
 //!
-//! ```yaml
-//! xml_path: /report/measurements   # the container
-//! row: measurement                 # one row per <measurement>
-//! ```
+//! A config without `version: 2` uses configuration format version 1, the
+//! format of every release before 0.20. It is deprecated, and keeps working
+//! unchanged until 1.0: its rows are inferred from the configured fields, and
+//! nested tables use `levels:` position columns. [`Config::lint`] reports what
+//! such a config still needs to change, and the [migration guide] takes it
+//! there step by step.
 //!
-//! Without `row:`, boundaries are *inferred* — a row ends whenever any
-//! configured direct child of `xml_path` closes. That rule depends on which
-//! fields happen to be configured, so adding a column can change a table's row
-//! count. It is the historical default and still supported; [`Config::lint`]
-//! reports tables where it is likely to surprise.
+//! [configuration reference]: https://github.com/mluttikh/xml2arrow/blob/main/docs/configuration.md
+//! [migration guide]: https://github.com/mluttikh/xml2arrow/blob/main/docs/migrating-to-version-2.md
 //!
 //! # Compatibility
 //!
 //! No release removes or changes a public item without a deprecation period
-//! first. Newer configuration keys are additive: a config that sets none of
-//! them parses exactly as it did before they existed, which the crate holds
-//! itself to with a frozen output corpus. `MIGRATION.md` covers moving an
-//! existing config and codebase forward.
+//! first. A version 1 config parses exactly as it did before version 2
+//! existed, which the crate holds itself to with a frozen output corpus.
+//! [`MIGRATION.md`] covers moving a codebase to this release.
+//!
+//! [`MIGRATION.md`]: https://github.com/mluttikh/xml2arrow/blob/main/MIGRATION.md
 
 // Every public item carries documentation, and this keeps it that way: the
 // config keys and error variants *are* the interface, so an undocumented one
