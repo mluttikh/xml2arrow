@@ -22,9 +22,9 @@
 //! than `""` — without adding a row or a column. A diff of shapes alone reports
 //! that step as "No differences" while `"  padded  "` becomes `"padded"`.
 //!
-//! Deliberately a dev-only example rather than a shipped binary: it graduates
-//! to the CLI crate in Phase G, and until then it should cost users nothing —
-//! no dependency, no install surface, no compatibility promise.
+//! Deliberately a dev-only example rather than a shipped binary, so that it
+//! costs users nothing: no dependency, no install surface, no compatibility
+//! promise.
 
 use std::collections::BTreeSet;
 use std::process::ExitCode;
