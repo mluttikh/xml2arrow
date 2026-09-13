@@ -45,10 +45,10 @@ use serde::{Deserialize, Serialize};
 #[non_exhaustive]
 pub struct ParserOptions {
     /// Whether to trim whitespace from text nodes. Defaults to false.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub trim_text: bool,
     /// Optional XML paths where parsing should stop after the closing tag.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stop_at_paths: Vec<String>,
     /// Whether quick-xml should verify each closing tag's name matches the
     /// most recently opened tag. Defaults to `true` — malformed inputs
@@ -61,7 +61,7 @@ pub struct ParserOptions {
     /// our `PathTracker` will pop the top frame regardless, which can
     /// yield subtly wrong row counts. Only use when you trust the input
     /// to be well-formed (e.g. produced by your own pipeline).
-    #[serde(default = "default_true")]
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub validate_closing_tags: bool,
     /// Whether quick-xml should reject duplicate attribute names on a single
     /// element. Defaults to `true` — duplicates surface as a parsing error.
@@ -76,7 +76,7 @@ pub struct ParserOptions {
     /// Because field values accumulate by appending, a duplicated attribute's
     /// values are concatenated rather than reported as an error. Only disable
     /// when the input is trusted to be well-formed.
-    #[serde(default = "default_true")]
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub validate_attributes: bool,
     /// Whether to strip XML namespace prefixes from element and attribute
     /// names before matching them against configured paths. Defaults to
@@ -94,7 +94,7 @@ pub struct ParserOptions {
     /// `sensor`). For namespace-free input the two modes produce identical
     /// results, so disabling is free; only disable when your input either
     /// uses no prefixes or your config already encodes them.
-    #[serde(default = "default_true")]
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub strip_namespaces: bool,
     /// Whether to accept input that ends while elements are still open.
     /// Defaults to `false`.
@@ -110,7 +110,7 @@ pub struct ParserOptions {
     /// parsing early at a *known* point instead, use
     /// [`stop_at_paths`](Self::stop_at_paths), which is unaffected by this
     /// option.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub allow_truncated_input: bool,
     /// Whether to fail the parse when a configured field never captured a
     /// value anywhere in the document. Defaults to `false`.
@@ -131,7 +131,7 @@ pub struct ParserOptions {
     /// accurate but rarely what the caller means, and the error says so rather
     /// than blaming the spelling. Use one or the other, or split the config so
     /// that the header-only parse configures only header fields.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub error_on_unmatched_fields: bool,
     /// Maximum number of bytes a single field value may accumulate, or `None`
     /// (the default) for no limit.
@@ -146,8 +146,16 @@ pub struct ParserOptions {
     /// materializes each individual event before we see it, so one enormous
     /// text node is still buffered once by the reader. The guard is what keeps
     /// many such events from adding up.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_value_bytes: Option<usize>,
+}
+
+impl ParserOptions {
+    /// Whether every option is at its default, so a written config can leave
+    /// the whole block out.
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 impl Default for ParserOptions {
@@ -167,6 +175,18 @@ impl Default for ParserOptions {
 
 fn default_true() -> bool {
     true
+}
+
+// A config written back out (`Config::to_yaml_file`, or a converted config)
+// carries only the keys that differ from their defaults, so it reads like one a
+// person would write. Each skipped key deserializes to exactly the value that
+// was skipped, which keeps the round trip lossless.
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Splits an XML path into its segments using the same rules as the path
@@ -325,7 +345,7 @@ pub struct Config {
     /// A vector of `TableConfig` structs, each defining a table to be extracted from the XML.
     pub tables: Vec<TableConfig>,
     /// Parser options.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ParserOptions::is_default")]
     pub parser_options: ParserOptions,
     /// Value-handling policies applied to every field that does not set its
     /// own. Absent leaves every field on current behavior.
@@ -1203,17 +1223,6 @@ pub struct TableConfig {
     pub name: String,
     /// The XML path to the table elements. For example `/data/dataset/table`.
     pub xml_path: String,
-    /// The levels of nesting for this table. This is used to create the indices for nested tables.
-    /// For example if the `xml_path` is `/data/dataset/table/item/properties` the levels should
-    /// be `["table", "properties"]`.
-    ///
-    /// Optional since 0.20: a table that declares [`TableConfig::links`] — or
-    /// that needs no parent columns at all — omits the key entirely rather than
-    /// writing `levels: []`. Existing configs are unaffected.
-    #[serde(default)]
-    pub levels: Vec<String>,
-    /// A vector of `FieldConfig` structs, each defining a field (column) in the table.
-    pub fields: Vec<FieldConfig>,
     /// The element whose closing tag finalizes a row — **declared** instead of
     /// inferred.
     ///
@@ -1261,6 +1270,20 @@ pub struct TableConfig {
     /// join always exist and unreferenced tables carry no extra column.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub row_id: Option<RowId>,
+    /// The levels of nesting for this table. This is used to create the indices for nested tables.
+    /// For example if the `xml_path` is `/data/dataset/table/item/properties` the levels should
+    /// be `["table", "properties"]`.
+    ///
+    /// Optional since 0.20: a table that declares [`TableConfig::links`] — or
+    /// that needs no parent columns at all — omits the key entirely rather than
+    /// writing `levels: []`. Existing configs are unaffected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub levels: Vec<String>,
+    /// A vector of `FieldConfig` structs, each defining a field (column) in the table.
+    ///
+    /// Last, so that a written config states where a table's rows are before
+    /// the list of columns, however long that list is.
+    pub fields: Vec<FieldConfig>,
 }
 
 impl TableConfig {
@@ -1520,13 +1543,15 @@ pub struct FieldConfig {
     /// `false`, a missing value raises `MissingRequiredField` — with one
     /// long-standing exception: **`Utf8` fields append an empty string
     /// instead of erroring**.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub nullable: bool,
     /// Multiplier applied to `Float32`/`Float64` values:
     /// `value = (value * scale) + offset`. Rejected on any other data type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scale: Option<f64>,
     /// Constant added to `Float32`/`Float64` values *after* scaling:
     /// `value = (value * scale) + offset`. Rejected on any other data type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset: Option<f64>,
     /// Value-handling policies for this field. Flattened, so they are written
     /// as ordinary field keys (`trim:`, `on_missing:`, …).
@@ -2679,6 +2704,65 @@ tables:
         .unwrap();
         assert_eq!(config.tables[0].row, None);
         assert!(!yaml_serde::to_string(&config).unwrap().contains("row"));
+    }
+
+    /// A written config carries only what differs from the defaults, states a
+    /// table's row before its fields, and reads back to exactly what was
+    /// written.
+    #[test]
+    fn a_written_config_omits_default_keys_and_round_trips() {
+        let config: Config = yaml_serde::from_str(
+            r#"
+            parser_options:
+              trim_text: true
+              validate_attributes: false
+            tables:
+              - name: t
+                xml_path: /a
+                row: item
+                fields:
+                  - {name: v, path: v, data_type: Float64, scale: 2.0}
+                  - {name: s, path: s, data_type: Utf8, nullable: true}
+            "#,
+        )
+        .unwrap();
+        let yaml = yaml_serde::to_string(&config).unwrap();
+        for left_at_default in [
+            "levels",
+            "offset",
+            "nullable: false",
+            "stop_at_paths",
+            "validate_closing_tags",
+            "strip_namespaces",
+            "allow_truncated_input",
+            "error_on_unmatched_fields",
+            "max_value_bytes",
+        ] {
+            assert!(
+                !yaml.contains(left_at_default),
+                "{left_at_default} in:\n{yaml}"
+            );
+        }
+        for set in [
+            "trim_text: true",
+            "validate_attributes: false",
+            "scale: 2.0",
+            "nullable: true",
+        ] {
+            assert!(yaml.contains(set), "{set} missing from:\n{yaml}");
+        }
+        assert!(yaml.find("row:").unwrap() < yaml.find("fields:").unwrap());
+        assert_eq!(yaml_serde::from_str::<Config>(&yaml).unwrap(), config);
+
+        let defaults_only = Config::builder()
+            .table(table_with_row("/a", "item"))
+            .build()
+            .unwrap();
+        assert!(
+            !yaml_serde::to_string(&defaults_only)
+                .unwrap()
+                .contains("parser_options")
+        );
     }
 
     // --- Relative field paths (`path:`) ---------------------------------------
