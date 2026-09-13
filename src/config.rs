@@ -1070,6 +1070,8 @@ pub struct ValuePolicies {
     /// `"-"`, `"null"`. Compared after trimming, case-sensitively.
     ///
     /// The resulting missing value is then handled by [`ValuePolicies::on_missing`].
+    /// For `Utf8`, trimming alone never makes a value missing, because `""` is
+    /// a string; add `""` here to treat blank text as missing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub null_values: Option<Vec<String>>,
 }

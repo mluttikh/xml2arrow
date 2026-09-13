@@ -790,6 +790,36 @@ fn test_version_2_is_not_warned_that_a_missing_utf8_value_yields_empty() {
     );
 }
 
+#[test]
+fn test_null_values_make_a_utf8_value_missing() {
+    // Regression: a `Utf8` value that matched `null_values` became "" instead
+    // of a missing value, so a nullable column held "" where the config asked
+    // for null, and a non-nullable one never raised. Blank text that `trim`
+    // reduces to "" is a different case: an empty string, and not missing.
+    let batches = parse_xml_file(
+        r#"<data><item><s>N/A</s></item><item><s>   </s></item><item><s>ok</s></item></data>"#,
+        r#"
+        tables:
+          - name: items
+            xml_path: /data
+            row: item
+            fields:
+              - {name: s, path: s, data_type: Utf8, nullable: true, trim: true, null_values: ["N/A"]}
+        "#,
+    );
+    let batch = batches.get("items").unwrap();
+    let s = batch
+        .column_by_name("s")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(
+        s.iter().collect::<Vec<_>>(),
+        vec![None, Some(""), Some("ok")]
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Realistic end-to-end scenario
 // ---------------------------------------------------------------------------

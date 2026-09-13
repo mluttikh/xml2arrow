@@ -186,8 +186,9 @@ Every value goes through the same steps:
 2. The value is **missing** when its element or attribute does not occur in the
    row, when the element has no text (`<v/>`), or when it equals one of
    **`null_values`**. A number or boolean that is empty after trimming is also
-   missing; a `Utf8` value that is empty after trimming is the empty string.
-   **`on_missing`** decides what a missing value becomes.
+   missing, since it has no empty value; `Utf8` text that is empty after
+   trimming is the empty string. **`on_missing`** decides what a missing value
+   becomes.
 3. Otherwise the value is parsed as the field's `data_type`. **`on_invalid`**
    decides what happens when that fails.
 4. When a row holds the element more than once with a value, **`on_repeat`**
@@ -205,7 +206,8 @@ Every value goes through the same steps:
   `Utf8`. A policy that cannot apply to a field is rejected when the config is
   loaded, not ignored.
 - `on_missing: null` can be written without quotes.
-- `null_values` are compared after trimming, and are case-sensitive.
+- `null_values` are compared after trimming, and are case-sensitive. For
+  `Utf8`, `null_values: [""]` makes blank text missing.
 - `on_repeat: first` keeps the whole first value, even when its text arrives in
   pieces; `last` keeps the final occurrence. An occurrence without a value, such
   as the `<v/>` in `<v/><v>2</v>`, does not count as a repeat.
