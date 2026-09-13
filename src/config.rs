@@ -838,7 +838,7 @@ impl Config {
     /// "Innermost" matters for the error message only: any enclosing table
     /// makes the missing link a problem, but naming the nearest one names the
     /// table the reader is most likely to link to.
-    fn enclosing_table_of(&self, table: &TableConfig) -> Option<&TableConfig> {
+    pub(crate) fn enclosing_table_of(&self, table: &TableConfig) -> Option<&TableConfig> {
         let scope = table.link_scope_path();
         self.tables
             .iter()
