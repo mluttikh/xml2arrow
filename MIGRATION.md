@@ -194,6 +194,10 @@ each work in a version 1 config, and `levels:` is no longer required.
   cargo run --example config_diff -- before.yaml after.yaml document.xml
   ```
 
+- `Config::to_version_2` takes those steps for you without changing the
+  output, and lists what it leaves for you to decide. From the command line:
+  `cargo run --example convert_config -- config.yaml > config-v2.yaml`.
+
 ---
 
 ## 4. Deprecated, still working
@@ -255,6 +259,9 @@ Nothing below requires action.
   callers that already hold the YAML — an embedded default, a config fetched
   over the network, or a test that would rather not touch the filesystem. It
   validates like the file version does.
+- **`Config::to_version_2`** converts a configuration to format version 2
+  without changing what it produces, and returns what it could not convert as
+  `Unconverted` entries.
 - **`From<ConfigIssue> for Error`**, so a tool that builds or checks configs
   can turn an issue into the error the library would have raised, with `?` or
   `.into()`, instead of writing `Error::InvalidConfig { reason }` by hand.

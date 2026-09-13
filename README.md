@@ -100,7 +100,8 @@ supported data types and the parser options.
 > what it still needs to change.
 > [Configuration format version 1](docs/configuration-v1.md) documents it, and
 > [Migrating to configuration format version 2](docs/migrating-to-version-2.md)
-> moves a config across in four steps.
+> moves a config across in four steps, which `Config::to_version_2` can take for
+> you without changing its output.
 
 ### 2. Parse the XML
 

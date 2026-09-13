@@ -7,6 +7,7 @@ can check before taking the next, and most of them leave the output unchanged.
 
 - [What changes](#what-changes)
 - [Before you start](#before-you-start)
+- [Converting automatically](#converting-automatically)
 - [Step 1: rename `xml_path:` to `path:`](#step-1-rename-xml_path-to-path)
 - [Step 2: declare each table's `row:`](#step-2-declare-each-tables-row)
 - [Step 3: replace `levels:` with `links:`](#step-3-replace-levels-with-links)
@@ -94,6 +95,62 @@ their rows (header, stations, readings); 2 tables must replace `levels:` with
 `path:` (header.title, header.created, stations.id, …). Declaring `version: 2`
 also changes two defaults: `Utf8` values are trimmed, and a missing
 non-nullable `Utf8` value is an error rather than ""
+```
+
+## Converting automatically
+
+`Config::to_version_2` takes the four steps below for you, and changes no
+output: every document parses to the same tables, columns, values and errors
+under the converted config as under the original. Where a step can only be
+taken by changing the output, it leaves that part as it was and says why. The
+converted config declares `version: 2` only when nothing is left.
+
+From a clone of this repository:
+
+```bash
+cargo run --example convert_config -- before.yaml > after.yaml
+```
+
+For the example config, everything converts except the header, whose rows end
+at two child elements:
+
+```text
+left for you: table 'header': its rows end at 2 child elements of /report/header (title, created), and no `row:` keeps that; `row: "."` gives one row per <header>, which changes the row count
+1 part(s) left: the config keeps its version until they are resolved. Resolve them, then convert again.
+```
+
+Declaring `row: "."` on `header` in `after.yaml` and converting that file again
+produces a version 2 config.
+
+What the converter writes:
+
+- `path:` in place of each field's `xml_path:`, with the same absolute value
+  ([step 1](#step-1-rename-xml_path-to-path)).
+- `row:` on each table whose rows end at one child element
+  ([step 2](#step-2-declare-each-tables-row)).
+- An `index_of:` link with `name:` for each `levels` entry, keeping every
+  column, and `links: []` on nested tables without `levels`
+  ([step 3](#step-3-replace-levels-with-links)).
+- `trim: false` on each `Utf8` field, and `on_missing: empty` on each
+  non-nullable one, unless the field or `defaults:` already sets them, so that
+  `version: 2` changes no value ([step 4](#step-4-declare-version-2)). Remove
+  them where you want the version 2 behavior.
+
+It never makes a change to the output for you: it does not choose a `row:` for
+a table whose rows are split, and it does not replace position columns with
+`parent:` join keys. Check the result on your own documents with `config_diff`.
+
+The written file is fresh. The original's comments and layout are not kept,
+and keys left at their defaults are left out.
+
+In Rust:
+
+```rust
+let conversion = Config::from_yaml_file("before.yaml")?.to_version_2()?;
+for part in &conversion.unconverted {
+    eprintln!("left for you: {part}");
+}
+conversion.config.to_yaml_file("after.yaml")?;
 ```
 
 ## Step 1: rename `xml_path:` to `path:`
