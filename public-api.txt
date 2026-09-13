@@ -142,6 +142,8 @@ pub fn xml2arrow::config::Config::to_yaml_file(&self, impl core::convert::AsRef<
 pub fn xml2arrow::config::Config::validate(&self) -> xml2arrow::errors::Result<()>
 impl xml2arrow::config::Config
 pub fn xml2arrow::config::Config::lint(&self) -> alloc::vec::Vec<xml2arrow::lint::Lint>
+impl xml2arrow::config::Config
+pub fn xml2arrow::config::Config::to_version_2(&self) -> xml2arrow::errors::Result<xml2arrow::migrate::Conversion>
 impl core::clone::Clone for xml2arrow::config::Config
 pub fn xml2arrow::config::Config::clone(&self) -> xml2arrow::config::Config
 impl core::cmp::PartialEq for xml2arrow::config::Config
@@ -656,6 +658,59 @@ impl core::marker::Unpin for xml2arrow::lint::MigrationStep
 impl core::marker::UnsafeUnpin for xml2arrow::lint::MigrationStep
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::lint::MigrationStep
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::lint::MigrationStep
+pub mod xml2arrow::migrate
+#[non_exhaustive] pub enum xml2arrow::migrate::Unconverted
+pub xml2arrow::migrate::Unconverted::ExcessLevels
+pub xml2arrow::migrate::Unconverted::ExcessLevels::available: usize
+pub xml2arrow::migrate::Unconverted::ExcessLevels::declared: usize
+pub xml2arrow::migrate::Unconverted::ExcessLevels::table: alloc::string::String
+pub xml2arrow::migrate::Unconverted::LevelCountsNonEnclosingTable
+pub xml2arrow::migrate::Unconverted::LevelCountsNonEnclosingTable::counted_table: alloc::string::String
+pub xml2arrow::migrate::Unconverted::LevelCountsNonEnclosingTable::level: alloc::string::String
+pub xml2arrow::migrate::Unconverted::LevelCountsNonEnclosingTable::table: alloc::string::String
+pub xml2arrow::migrate::Unconverted::LevelCountsSharedRowElement
+pub xml2arrow::migrate::Unconverted::LevelCountsSharedRowElement::counted_table: alloc::string::String
+pub xml2arrow::migrate::Unconverted::LevelCountsSharedRowElement::level: alloc::string::String
+pub xml2arrow::migrate::Unconverted::LevelCountsSharedRowElement::other_table: alloc::string::String
+pub xml2arrow::migrate::Unconverted::LevelCountsSharedRowElement::table: alloc::string::String
+pub xml2arrow::migrate::Unconverted::RowNotDeclarable
+pub xml2arrow::migrate::Unconverted::RowNotDeclarable::child_elements: alloc::vec::Vec<alloc::string::String>
+pub xml2arrow::migrate::Unconverted::RowNotDeclarable::table: alloc::string::String
+pub xml2arrow::migrate::Unconverted::RowNotDeclarable::xml_path: alloc::string::String
+impl core::clone::Clone for xml2arrow::migrate::Unconverted
+pub fn xml2arrow::migrate::Unconverted::clone(&self) -> xml2arrow::migrate::Unconverted
+impl core::cmp::Eq for xml2arrow::migrate::Unconverted
+impl core::cmp::PartialEq for xml2arrow::migrate::Unconverted
+pub fn xml2arrow::migrate::Unconverted::eq(&self, &xml2arrow::migrate::Unconverted) -> bool
+impl core::fmt::Debug for xml2arrow::migrate::Unconverted
+pub fn xml2arrow::migrate::Unconverted::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for xml2arrow::migrate::Unconverted
+pub fn xml2arrow::migrate::Unconverted::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for xml2arrow::migrate::Unconverted
+impl core::marker::Freeze for xml2arrow::migrate::Unconverted
+impl core::marker::Send for xml2arrow::migrate::Unconverted
+impl core::marker::Sync for xml2arrow::migrate::Unconverted
+impl core::marker::Unpin for xml2arrow::migrate::Unconverted
+impl core::marker::UnsafeUnpin for xml2arrow::migrate::Unconverted
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::migrate::Unconverted
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::migrate::Unconverted
+#[non_exhaustive] pub struct xml2arrow::migrate::Conversion
+pub xml2arrow::migrate::Conversion::config: xml2arrow::config::Config
+pub xml2arrow::migrate::Conversion::unconverted: alloc::vec::Vec<xml2arrow::migrate::Unconverted>
+impl core::clone::Clone for xml2arrow::migrate::Conversion
+pub fn xml2arrow::migrate::Conversion::clone(&self) -> xml2arrow::migrate::Conversion
+impl core::cmp::PartialEq for xml2arrow::migrate::Conversion
+pub fn xml2arrow::migrate::Conversion::eq(&self, &xml2arrow::migrate::Conversion) -> bool
+impl core::fmt::Debug for xml2arrow::migrate::Conversion
+pub fn xml2arrow::migrate::Conversion::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for xml2arrow::migrate::Conversion
+impl core::marker::Freeze for xml2arrow::migrate::Conversion
+impl core::marker::Send for xml2arrow::migrate::Conversion
+impl core::marker::Sync for xml2arrow::migrate::Conversion
+impl core::marker::Unpin for xml2arrow::migrate::Conversion
+impl core::marker::UnsafeUnpin for xml2arrow::migrate::Conversion
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::migrate::Conversion
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::migrate::Conversion
 pub macro xml2arrow::config_from_yaml!
 #[non_exhaustive] pub enum xml2arrow::DType
 pub xml2arrow::DType::Boolean
@@ -890,6 +945,41 @@ impl core::marker::Unpin for xml2arrow::config::RowId
 impl core::marker::UnsafeUnpin for xml2arrow::config::RowId
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::RowId
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::RowId
+#[non_exhaustive] pub enum xml2arrow::Unconverted
+pub xml2arrow::Unconverted::ExcessLevels
+pub xml2arrow::Unconverted::ExcessLevels::available: usize
+pub xml2arrow::Unconverted::ExcessLevels::declared: usize
+pub xml2arrow::Unconverted::ExcessLevels::table: alloc::string::String
+pub xml2arrow::Unconverted::LevelCountsNonEnclosingTable
+pub xml2arrow::Unconverted::LevelCountsNonEnclosingTable::counted_table: alloc::string::String
+pub xml2arrow::Unconverted::LevelCountsNonEnclosingTable::level: alloc::string::String
+pub xml2arrow::Unconverted::LevelCountsNonEnclosingTable::table: alloc::string::String
+pub xml2arrow::Unconverted::LevelCountsSharedRowElement
+pub xml2arrow::Unconverted::LevelCountsSharedRowElement::counted_table: alloc::string::String
+pub xml2arrow::Unconverted::LevelCountsSharedRowElement::level: alloc::string::String
+pub xml2arrow::Unconverted::LevelCountsSharedRowElement::other_table: alloc::string::String
+pub xml2arrow::Unconverted::LevelCountsSharedRowElement::table: alloc::string::String
+pub xml2arrow::Unconverted::RowNotDeclarable
+pub xml2arrow::Unconverted::RowNotDeclarable::child_elements: alloc::vec::Vec<alloc::string::String>
+pub xml2arrow::Unconverted::RowNotDeclarable::table: alloc::string::String
+pub xml2arrow::Unconverted::RowNotDeclarable::xml_path: alloc::string::String
+impl core::clone::Clone for xml2arrow::migrate::Unconverted
+pub fn xml2arrow::migrate::Unconverted::clone(&self) -> xml2arrow::migrate::Unconverted
+impl core::cmp::Eq for xml2arrow::migrate::Unconverted
+impl core::cmp::PartialEq for xml2arrow::migrate::Unconverted
+pub fn xml2arrow::migrate::Unconverted::eq(&self, &xml2arrow::migrate::Unconverted) -> bool
+impl core::fmt::Debug for xml2arrow::migrate::Unconverted
+pub fn xml2arrow::migrate::Unconverted::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for xml2arrow::migrate::Unconverted
+pub fn xml2arrow::migrate::Unconverted::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for xml2arrow::migrate::Unconverted
+impl core::marker::Freeze for xml2arrow::migrate::Unconverted
+impl core::marker::Send for xml2arrow::migrate::Unconverted
+impl core::marker::Sync for xml2arrow::migrate::Unconverted
+impl core::marker::Unpin for xml2arrow::migrate::Unconverted
+impl core::marker::UnsafeUnpin for xml2arrow::migrate::Unconverted
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::migrate::Unconverted
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::migrate::Unconverted
 #[non_exhaustive] pub struct xml2arrow::BatchOptions
 pub xml2arrow::BatchOptions::max_bytes_per_batch: usize
 pub xml2arrow::BatchOptions::max_rows_per_batch: usize
@@ -938,6 +1028,8 @@ pub fn xml2arrow::config::Config::to_yaml_file(&self, impl core::convert::AsRef<
 pub fn xml2arrow::config::Config::validate(&self) -> xml2arrow::errors::Result<()>
 impl xml2arrow::config::Config
 pub fn xml2arrow::config::Config::lint(&self) -> alloc::vec::Vec<xml2arrow::lint::Lint>
+impl xml2arrow::config::Config
+pub fn xml2arrow::config::Config::to_version_2(&self) -> xml2arrow::errors::Result<xml2arrow::migrate::Conversion>
 impl core::clone::Clone for xml2arrow::config::Config
 pub fn xml2arrow::config::Config::clone(&self) -> xml2arrow::config::Config
 impl core::cmp::PartialEq for xml2arrow::config::Config
@@ -975,6 +1067,23 @@ impl core::marker::Unpin for xml2arrow::config::ConfigBuilder
 impl core::marker::UnsafeUnpin for xml2arrow::config::ConfigBuilder
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::ConfigBuilder
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::ConfigBuilder
+#[non_exhaustive] pub struct xml2arrow::Conversion
+pub xml2arrow::Conversion::config: xml2arrow::config::Config
+pub xml2arrow::Conversion::unconverted: alloc::vec::Vec<xml2arrow::migrate::Unconverted>
+impl core::clone::Clone for xml2arrow::migrate::Conversion
+pub fn xml2arrow::migrate::Conversion::clone(&self) -> xml2arrow::migrate::Conversion
+impl core::cmp::PartialEq for xml2arrow::migrate::Conversion
+pub fn xml2arrow::migrate::Conversion::eq(&self, &xml2arrow::migrate::Conversion) -> bool
+impl core::fmt::Debug for xml2arrow::migrate::Conversion
+pub fn xml2arrow::migrate::Conversion::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for xml2arrow::migrate::Conversion
+impl core::marker::Freeze for xml2arrow::migrate::Conversion
+impl core::marker::Send for xml2arrow::migrate::Conversion
+impl core::marker::Sync for xml2arrow::migrate::Conversion
+impl core::marker::Unpin for xml2arrow::migrate::Conversion
+impl core::marker::UnsafeUnpin for xml2arrow::migrate::Conversion
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::migrate::Conversion
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::migrate::Conversion
 #[non_exhaustive] pub struct xml2arrow::FieldConfig
 pub xml2arrow::FieldConfig::data_type: xml2arrow::config::DType
 pub xml2arrow::FieldConfig::name: alloc::string::String

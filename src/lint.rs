@@ -582,7 +582,7 @@ impl Config {
     /// element ends a row even though no field reads it. Attribute pseudo-nodes
     /// are excluded: `parse_attributes` enters and leaves them without going
     /// through the row-finalizing close path.
-    fn row_delimiting_children(&self, table_path: &str) -> Vec<String> {
+    pub(crate) fn row_delimiting_children(&self, table_path: &str) -> Vec<String> {
         let depth = path_segments(table_path).count();
         let all_paths = self
             .tables

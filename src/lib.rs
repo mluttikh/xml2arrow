@@ -93,6 +93,9 @@ pub use errors::{Error, Result};
 pub mod lint;
 pub use lint::Lint;
 
+pub mod migrate;
+pub use migrate::{Conversion, Unconverted};
+
 mod path_registry;
 mod xml_parser;
 // The two free functions are deprecated (see their notes); re-exporting them
