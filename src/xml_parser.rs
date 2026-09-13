@@ -2455,28 +2455,45 @@ impl ResolvedPolicy {
     /// The two ways to have no value — the element never appeared, and it
     /// appeared holding nothing usable — converge here, so every caller past
     /// this point has one case to handle instead of two. `Utf8` is the one
-    /// type that must tell them apart (an empty capture is a present `""`,
-    /// not a missing value) and so calls `prepare` directly.
+    /// type that must tell them apart (empty text is a present `""`, not a
+    /// missing value) and so uses [`ResolvedPolicy::prepare_text`] instead.
     #[inline]
     fn prepare_if<'v>(&self, has_value: bool, value: &'v [u8]) -> Option<&'v [u8]> {
         if has_value { self.prepare(value) } else { None }
     }
 
     /// Applies `trim` and `null_values`, returning `None` when the value counts
-    /// as missing.
+    /// as missing. Empty text is missing here, because a number or boolean has
+    /// no empty value.
     #[inline]
     fn prepare<'v>(&self, value: &'v [u8]) -> Option<&'v [u8]> {
         let value = if self.trim { value.trim_ascii() } else { value };
-        if value.is_empty() {
-            return None;
-        }
-        if let Some(null_values) = &self.null_values
-            && let Ok(text) = std::str::from_utf8(value)
-            && null_values.iter().any(|nv| nv == text)
-        {
+        if value.is_empty() || self.is_null_value(value) {
             return None;
         }
         Some(value)
+    }
+
+    /// [`ResolvedPolicy::prepare`] for `Utf8`, where the empty string is a
+    /// value. Trimming only edits the text, so `<v>   </v>` is `""` just as
+    /// `a=""` is; only `null_values` makes present text missing, and
+    /// `null_values: [""]` is how a config says blank text should be.
+    #[inline]
+    fn prepare_text<'v>(&self, value: &'v [u8]) -> Option<&'v [u8]> {
+        let value = if self.trim { value.trim_ascii() } else { value };
+        if self.is_null_value(value) {
+            return None;
+        }
+        Some(value)
+    }
+
+    /// Whether `value` is one of the configured `null_values`. Compared as
+    /// bytes: a configured value is valid UTF-8, so equal bytes are equal text.
+    #[inline]
+    fn is_null_value(&self, value: &[u8]) -> bool {
+        self.null_values
+            .as_ref()
+            .is_some_and(|null_values| null_values.iter().any(|nv| nv.as_bytes() == value))
     }
 }
 
@@ -2782,13 +2799,13 @@ impl FieldBuilder {
         match &mut self.array_builder {
             TypedArrayBuilder::Utf8(b) => {
                 // A `Utf8` field takes the document's bytes as written, so
-                // `prepare` is a no-op unless the config asked for `trim` or
-                // `null_values`. An empty capture is *not* missing here: the
-                // historical behavior distinguishes "no value" from "" only by
-                // `has_value`, and `on_missing: empty` is how a config asks to
-                // keep that for a non-nullable field.
+                // `prepare_text` is a no-op unless the config asked for `trim`
+                // or `null_values`. Present text is never missing by itself:
+                // the empty string is a value, whether written as `a=""` or
+                // left by trimming `<v>   </v>`. Only an element with no text
+                // at all, or a `null_values` match, is missing.
                 let prepared = if has_value {
-                    fc.policy.prepare(value).or(Some(&[][..]))
+                    fc.policy.prepare_text(value)
                 } else {
                     None
                 };
@@ -9436,6 +9453,75 @@ mod tests {
         assert_array_values_option!(batch, "n", vec![Some(1i32), None, None], Int32Array);
     }
 
+    /// `null_values: [""]` is the explicit way to treat blank `Utf8` text as
+    /// missing: after trimming, blank text is `""`, which then matches.
+    #[test]
+    fn an_empty_null_value_makes_blank_utf8_missing() {
+        let batches = parse(
+            r#"<r><item a=""><s>   </s></item><item a="x"><s> y </s></item></r>"#,
+            r#"
+            tables:
+              - name: t
+                xml_path: /r
+                row: item
+                fields:
+                  - {name: s, path: s, data_type: Utf8, nullable: true, trim: true, null_values: [""]}
+                  - {name: a, path: "@a", data_type: Utf8, nullable: true, null_values: [""]}
+            "#,
+        );
+        let batch = batches.get("t").unwrap();
+        let column = |name: &str| {
+            let array = batch.column_by_name(name).unwrap();
+            let strings = array.as_any().downcast_ref::<StringArray>().unwrap();
+            strings
+                .iter()
+                .map(|v| v.map(str::to_string))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(column("s"), vec![None, Some("y".to_string())]);
+        assert_eq!(column("a"), vec![None, Some("x".to_string())]);
+    }
+
+    /// For `Utf8`, a `null_values` match is missing, but trimming never makes
+    /// a value missing: it only edits the text, so blank text is `""`, just
+    /// as `a=""` is.
+    #[test]
+    fn utf8_null_values_are_missing_but_blank_text_is_empty() {
+        let batches = parse(
+            r#"<r><item a=""><s>N/A</s></item><item a=" "><s>   </s></item><item a="x"><s> y </s></item></r>"#,
+            r#"
+            tables:
+              - name: t
+                xml_path: /r
+                row: item
+                fields:
+                  - {name: s, path: s, data_type: Utf8, nullable: true, trim: true, null_values: ["N/A"]}
+                  - {name: a, path: "@a", data_type: Utf8, nullable: true, trim: true}
+            "#,
+        );
+        let batch = batches.get("t").unwrap();
+        let column = |name: &str| {
+            let array = batch.column_by_name(name).unwrap();
+            let strings = array.as_any().downcast_ref::<StringArray>().unwrap();
+            strings
+                .iter()
+                .map(|v| v.map(str::to_string))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            column("s"),
+            vec![None, Some(String::new()), Some("y".to_string())]
+        );
+        assert_eq!(
+            column("a"),
+            vec![
+                Some(String::new()),
+                Some(String::new()),
+                Some("x".to_string())
+            ]
+        );
+    }
+
     /// A `defaults:` block applies to every field, and a field's own setting
     /// wins over it.
     #[test]
@@ -9525,6 +9611,45 @@ mod tests {
                 "#
             );
             let err = parse_document(&b"<r><item/></r>"[..], &config).unwrap_err();
+            assert!(
+                matches!(err, Error::MissingRequiredField { ref field, .. } if field.as_ref() == "s"),
+                "{err:?}"
+            );
+        }
+
+        /// Trimming only edits the text, so whitespace-only text in a
+        /// non-nullable `Utf8` column is `""`, not a missing value that would
+        /// fail the parse. A config that wants blank text treated as missing
+        /// says so with `null_values: [""]`, and then it is an error like any
+        /// other missing value in a non-nullable column.
+        #[test]
+        fn whitespace_only_utf8_is_an_empty_string() {
+            let batches = parse(
+                "<r><item><s>   </s></item></r>",
+                r#"
+                version: 2
+                tables:
+                  - name: t
+                    xml_path: /r
+                    row: item
+                    fields:
+                      - {name: s, path: s, data_type: Utf8}
+                "#,
+            );
+            assert_array_values!(batches.get("t").unwrap(), "s", &[""], StringArray);
+
+            let config = config_from_yaml!(
+                r#"
+                version: 2
+                tables:
+                  - name: t
+                    xml_path: /r
+                    row: item
+                    fields:
+                      - {name: s, path: s, data_type: Utf8, null_values: [""]}
+                "#
+            );
+            let err = parse_document(&b"<r><item><s>   </s></item></r>"[..], &config).unwrap_err();
             assert!(
                 matches!(err, Error::MissingRequiredField { ref field, .. } if field.as_ref() == "s"),
                 "{err:?}"
