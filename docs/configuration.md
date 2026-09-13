@@ -148,6 +148,7 @@ These are checked when the config is loaded:
 | `path:` | Resolves to |
 |---|---|
 | `value` | `<row>/value` |
+| `"."` | the row element itself, for its own text, as in `<m>1.5</m>` |
 | `location/latitude` | `<row>/location/latitude` |
 | `"@id"` | the `id` attribute of the row element |
 | `sensor/@unit` | the `unit` attribute of `<row>/sensor` |
