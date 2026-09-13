@@ -572,22 +572,23 @@ impl Config {
     /// Checks an `index_of:` link — that the path names the row element of a
     /// table enclosing this one.
     ///
-    /// Restricted to an enclosing *table*, deliberately: such a table already
-    /// counts exactly this, so the ordinal costs nothing at parse time and is
-    /// identical to the legacy `<level>` value for the same path. An arbitrary
-    /// path would need a per-node occurrence counter maintained on every
-    /// element open.
+    /// Restricted to a *table's* row element, deliberately: this table's own,
+    /// or an enclosing table's. Such a table already counts exactly this, so
+    /// the ordinal costs nothing at parse time and is identical to the legacy
+    /// `<level>` value for that table. An arbitrary path would need a per-node
+    /// occurrence counter maintained on every element open.
     fn validate_index_of_link(
         &self,
         table: &TableConfig,
         scope: &str,
         index_of: &str,
     ) -> Result<()> {
-        let is_ancestor_table = self.tables.iter().any(|t| {
-            let other = t.link_scope_path();
-            paths_equal(&other, index_of) && path_is_strictly_under(scope, &other)
-        });
-        if !is_ancestor_table {
+        let counts_a_table = paths_equal(scope, index_of)
+            || self.tables.iter().any(|t| {
+                let other = t.link_scope_path();
+                paths_equal(&other, index_of) && path_is_strictly_under(scope, &other)
+            });
+        if !counts_a_table {
             return Err(ConfigIssue::IndexOfNotAncestorTable {
                 table: table.name.clone(),
                 index_of: index_of.to_string(),
@@ -1091,7 +1092,8 @@ impl ValuePolicies {
     }
 }
 
-/// One declared relationship between a table and an ancestor of it.
+/// One declared link column: how a table's rows relate to the rows that
+/// contain them, or where each row sits among its siblings.
 ///
 /// Exactly one of [`Link::parent`] and [`Link::index_of`] must be set — they
 /// are different kinds of column with different guarantees, and the difference
@@ -1118,10 +1120,12 @@ pub struct Link {
     pub parent: Option<String>,
     /// Path whose occurrences are counted, producing a `UInt32` ordinal.
     ///
-    /// Must name an ancestor **table's** row element. That restriction is what
-    /// keeps the counter free: the ancestor table already maintains exactly
-    /// this counter to serve its `levels` columns, so no per-element
-    /// bookkeeping is added to the parse.
+    /// Must name a **table's** row element: an enclosing table's, for the
+    /// position of the row that contains this one, or this table's own, for
+    /// each row's position among its siblings. That restriction is what keeps
+    /// the counter free: the table already maintains exactly this counter to
+    /// serve its `levels` columns, so no per-element bookkeeping is added to
+    /// the parse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index_of: Option<String>,
     /// Column name. Defaults to `_<parent>_id` for a `parent` link and
@@ -2951,6 +2955,17 @@ tables:
                 reason: ConfigIssue::IndexOfNotAncestorTable { .. }
             })
         ));
+    }
+
+    /// The table's own row element is a table's row element too: its counter
+    /// is the one a version 1 table's last `levels` column reads.
+    #[test]
+    fn an_index_of_naming_the_tables_own_row_is_accepted() {
+        let link = Link {
+            index_of: Some("/a/station/ms/m".to_string()),
+            ..Default::default()
+        };
+        assert!(linked(vec![link], vec![]).is_ok());
     }
 
     #[test]

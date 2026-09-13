@@ -20,7 +20,7 @@ can check before taking the next, and most of them leave the output unchanged.
 |---|---|---|---|
 | 1 | `xml_path:` on a field | `path:` | unchanged |
 | 2 | rows are inferred | `row:` | unchanged, except for tables whose rows were split |
-| 3 | `levels:` | `links:` | columns that count a table's own rows are removed; join keys are added if you use them |
+| 3 | `levels:` | `links:` | unchanged with `index_of:`; key columns replace the position columns if you use `parent:` |
 | 4 | `Utf8` whitespace kept; a missing non-nullable `Utf8` value is `""` | trimmed; an error | changes where it applies, unless you keep the old behavior per field |
 
 ## Before you start
@@ -167,17 +167,17 @@ and does not change the output.
 
 ## Step 3: replace `levels:` with `links:`
 
-Version 2 does not allow `levels:`. What replaces it depends on what each entry
-counts. Reading the entries from the outside in, each one counts the rows of one
-enclosing table; when there is one entry more than there are enclosing tables,
-the last one counts the table's own rows. (The full rule is under
-[`levels`](configuration-v1.md#levels).)
+Version 2 does not allow `levels:`. Each entry becomes an `index_of:` link that
+names the row element of the table the entry counts. Reading the entries from
+the outside in, each one counts the rows of one enclosing table; when there is
+one entry more than there are enclosing tables, the last one counts the table's
+own rows. (The full rule is under [`levels`](configuration-v1.md#levels).)
 
 | `levels:` entry | Replace it with | Output |
 |---|---|---|
 | none: `levels: []`, or no `levels:` | nothing, or `links: []` if the table is nested | unchanged |
 | counts an enclosing table's rows | `index_of:` that table's row element, with `name:` | unchanged |
-| counts the table's own rows | nothing: there is no equivalent | the column is removed |
+| counts the table's own rows | `index_of:` the table's own row element, with `name:` | unchanged |
 
 In the example, `<station>` on `readings` counts rows of the enclosing
 `stations` table. `<station>` on `stations` and `<reading>` on `readings` count
@@ -192,32 +192,34 @@ A nested table always needs `links:` in version 2, even one that had no
   - name: stations
     xml_path: /report/stations
     row: station
-    # levels: [station] removed: it counted this table's own rows
+    links:
+      - index_of: /report/stations/station                  # its own rows
+        name: "<station>"
 
   - name: readings
     xml_path: /report/stations/station/readings
     row: reading
     links:
-      - index_of: /report/stations/station
-        name: "<station>"   # the same column, with the same values
+      - index_of: /report/stations/station                  # the enclosing station
+        name: "<station>"
+      - index_of: /report/stations/station/readings/reading # its own rows
+        name: "<reading>"
 ```
 
-`readings.<station>` is unchanged, and the two columns that counted their own
-table's rows are gone:
+`name:` keeps each column's version 1 name, so the output is identical:
 
 ```text
   = header: unchanged (1 rows)
-  ~ readings:
-      columns removed: <reading>
-  ~ stations:
-      columns removed: <station>
+  = readings: unchanged (3 rows)
+  = stations: unchanged (2 rows)
 
-Configs differ on this document.
+No differences.
 ```
 
-With `stations.<station>` gone, the version 1 join on `<station>` has nothing to
-join to. A station's row number in the `stations` output is the same number, but
-only while `<stations>` occurs once per document. For a join, use keys instead.
+The version 1 join on `<station>` still works, with the weakness it always had:
+positions start again in every `<stations>` element, so once that element
+repeats, the join pairs readings with the wrong station. For a join, use keys
+instead.
 
 ### Using join keys (recommended)
 

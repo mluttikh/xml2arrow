@@ -421,7 +421,8 @@ pub enum ConfigIssue {
         /// The parent's scope, which does not contain the above.
         parent_path: String,
     },
-    /// An `index_of:` path that is not an ancestor table's row element.
+    /// An `index_of:` path that is neither the table's own row element nor an
+    /// enclosing table's.
     IndexOfNotAncestorTable {
         /// The table declaring the link.
         table: String,
@@ -739,7 +740,7 @@ impl fmt::Display for ConfigIssue {
             ),
             ConfigIssue::IndexOfNotAncestorTable { table, index_of } => write!(
                 f,
-                "Table '{table}' has index_of '{index_of}', which is not the row element of an enclosing table. Counting an arbitrary path is not supported: the ordinal is read from the enclosing table's existing row counter, which is what makes it free and what makes it identical to the legacy '<level>' value"
+                "Table '{table}' has index_of '{index_of}', which is neither its own row element nor that of an enclosing table. Counting an arbitrary path is not supported: the ordinal is read from that table's existing row counter, which is what makes it free and what makes it identical to the legacy '<level>' value"
             ),
             ConfigIssue::LinkColumnCollision { table, column } => write!(
                 f,
