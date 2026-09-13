@@ -761,6 +761,35 @@ fn test_version_2_accepts_a_deliberately_unlinked_nested_table() {
     }
 }
 
+#[test]
+fn test_version_2_is_not_warned_that_a_missing_utf8_value_yields_empty() {
+    // Regression: the `ImplicitEmptyString` lint ignored `version: 2` (and any
+    // stated `on_missing`), so it told a version 2 config that a missing
+    // non-nullable `Utf8` value yields "" — while the parser raised an error.
+    let config = xml2arrow::Config::from_yaml_str(
+        r#"
+        version: 2
+        tables:
+          - name: items
+            xml_path: /data
+            row: item
+            fields:
+              - {name: name, path: name, data_type: Utf8}
+        "#,
+    )
+    .unwrap();
+    let parser = xml2arrow::Parser::new(&config).unwrap();
+    assert!(parser.warnings().is_empty(), "{:?}", parser.warnings());
+
+    let err = parser
+        .parse_slice(b"<data><item></item></data>")
+        .unwrap_err();
+    assert!(
+        matches!(err, xml2arrow::Error::MissingRequiredField { .. }),
+        "{err}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Realistic end-to-end scenario
 // ---------------------------------------------------------------------------
