@@ -948,7 +948,7 @@ tables:
     /// document**, so its size is a hot-path cost paid per element, and growth
     /// here is invisible in review: adding one `bool` reads as free.
     ///
-    /// It is not. Phase C first carried `row: \".\"` as a fourth frame flag,
+    /// It is not. Declared rows first carried `row: \".\"` as a fourth frame flag,
     /// which took the entry from 8 to 12 bytes — a 50% growth of the parser's
     /// hottest structure to serve a case that can only arise when a *table*
     /// element closes. CodSpeed measured it as a consistent 1-2% across the

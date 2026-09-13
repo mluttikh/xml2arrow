@@ -155,7 +155,8 @@ pub enum Lint {
     /// Advisory rather than an error because the field still behaves exactly
     /// as it did before the `row:` line was added — its value attaches to
     /// whichever row finalizes next. That is rarely what the author meant, but
-    /// it is not a new failure, and Phase C does not break working configs.
+    /// it is not a new failure, and adding `row:` should not break a config that
+    /// works.
     FieldOutsideRow {
         /// The table declaring the row.
         table: String,
@@ -182,7 +183,7 @@ pub enum Lint {
     },
     /// A table declares no fields. It is excluded from the output entirely and
     /// exists only to feed its row counter to descendant tables' `levels`
-    /// index columns.
+    /// columns and `index_of:` links.
     StructuralTable {
         /// The table that declares no fields.
         table: String,
@@ -195,8 +196,8 @@ pub enum Lint {
     /// receive a value — the parse fails later with an opaque column-length
     /// mismatch, or silently produces nothing if the table stays empty.
     /// Reported here rather than rejected outright: a config in which the
-    /// affected table never yields a row works today, and this phase does not
-    /// break working configs.
+    /// affected table never yields a row works today, and rejecting it would
+    /// break that config.
     ExcessLevels {
         /// The table declaring the surplus levels.
         table: String,
@@ -1211,7 +1212,7 @@ tables:
         assert!(message.contains("'header'"));
         assert!(message.contains("title, created"));
         assert!(message.contains("<header>"));
-        // The lint's job in Phase C is to carry the fix, not just the diagnosis.
+        // The lint carries the fix, not just the diagnosis.
         assert!(message.contains("row:"));
     }
 
