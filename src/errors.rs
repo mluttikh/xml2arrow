@@ -780,7 +780,7 @@ impl fmt::Display for ConfigIssue {
             ),
             ConfigIssue::LevelsInVersion2 { table } => write!(
                 f,
-                "version: 2 does not allow 'levels:', but table '{table}' uses it; replace it with 'links:' (index_of: keeps the same column values) or remove 'version: 2'"
+                "version: 2 does not allow 'levels:', but table '{table}' uses it; replace it with 'links:' or remove 'version: 2'"
             ),
             ConfigIssue::FieldXmlPathInVersion2 { table, field } => write!(
                 f,

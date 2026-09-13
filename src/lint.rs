@@ -50,7 +50,10 @@ pub enum MigrationStep {
         table: String,
     },
     /// The table uses `levels:`; it must declare `links:` instead.
-    /// `index_of:` links keep the column values exactly.
+    ///
+    /// Not always value-preserving: an `index_of:` link reproduces a level
+    /// column that counts an enclosing table's rows, but nothing reproduces
+    /// the one counting the table's own rows.
     ReplaceLevels {
         /// The table using `levels:`.
         table: String,
@@ -101,11 +104,9 @@ impl fmt::Display for MigrationStep {
             MigrationStep::DeclareRow { table } => {
                 write!(f, "table '{table}': declare `row:`; its rows are inferred")
             }
-            MigrationStep::ReplaceLevels { table } => write!(
-                f,
-                "table '{table}': replace `levels:` with `links:` (`index_of:` keeps the \
-                 same column values)"
-            ),
+            MigrationStep::ReplaceLevels { table } => {
+                write!(f, "table '{table}': replace `levels:` with `links:`")
+            }
             MigrationStep::RenameFieldXmlPath { table, field } => write!(
                 f,
                 "field '{field}' of table '{table}': rename the `xml_path:` key to `path:`; \
