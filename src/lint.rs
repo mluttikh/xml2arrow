@@ -211,6 +211,10 @@ pub enum Lint {
     /// A long-standing asymmetry, listed here so configs that *rely* on it are
     /// visible: set `nullable: true` on these fields to distinguish "absent"
     /// from "present but empty".
+    ///
+    /// Only fields left on that default are reported. A field whose
+    /// `on_missing` is stated, on the field or under `defaults:`, has chosen
+    /// its behavior; and under `version: 2` the default is an error.
     ImplicitEmptyString {
         /// The table containing the fields.
         table: String,
@@ -489,10 +493,22 @@ impl Config {
                 });
             }
 
+            // Only where the "" is the type-dependent default nobody asked for.
+            // Under `version: 2` that default is an error, and a field (or
+            // `defaults:`) stating `on_missing` has chosen its behavior —
+            // neither relies on the asymmetry this lint points out.
             let implicit_empty: Vec<String> = table
                 .fields
                 .iter()
                 .filter(|f| f.data_type == DType::Utf8 && !f.nullable)
+                .filter(|f| {
+                    self.version != Some(2)
+                        && f.policies.on_missing.is_none()
+                        && self
+                            .defaults
+                            .as_ref()
+                            .is_none_or(|d| d.on_missing.is_none())
+                })
                 .map(|f| f.name.clone())
                 .collect();
             if !implicit_empty.is_empty() {
@@ -1109,6 +1125,64 @@ tables:
                 fields: vec!["name".to_string(), "label".to_string()],
             }]
         );
+    }
+
+    #[test]
+    fn non_nullable_utf8_fields_that_state_on_missing_are_not_reported() {
+        let config = config_from_yaml!(
+            r#"
+tables:
+  - name: items
+    xml_path: /data
+    row: item
+    fields:
+      - {name: name, path: name, data_type: Utf8, on_missing: error}
+      - {name: label, path: label, data_type: Utf8, on_missing: empty}
+      - {name: note, path: note, data_type: Utf8}
+"#
+        );
+        assert_eq!(
+            config.lint_excluding_deprecation(),
+            vec![Lint::ImplicitEmptyString {
+                table: "items".to_string(),
+                fields: vec!["note".to_string()],
+            }]
+        );
+    }
+
+    #[test]
+    fn an_on_missing_default_covers_every_field() {
+        let config = config_from_yaml!(
+            r#"
+defaults:
+  on_missing: error
+tables:
+  - name: items
+    xml_path: /data
+    row: item
+    fields:
+      - {name: name, path: name, data_type: Utf8}
+"#
+        );
+        assert_eq!(config.lint_excluding_deprecation(), vec![]);
+    }
+
+    #[test]
+    fn version_2_has_no_implicit_empty_strings_to_report() {
+        // Under `version: 2` a missing non-nullable `Utf8` value is an error,
+        // so a warning that it yields "" would be false.
+        let config = config_from_yaml!(
+            r#"
+version: 2
+tables:
+  - name: items
+    xml_path: /data
+    row: item
+    fields:
+      - {name: name, path: name, data_type: Utf8}
+"#
+        );
+        assert_eq!(config.lint(), vec![]);
     }
 
     #[test]
