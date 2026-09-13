@@ -254,6 +254,12 @@ pub(crate) fn resolve_field_path<'a>(
     // row, so the row is the only base that makes `sensor/@id` mean the same
     // thing wherever the table sits in the document.
     let row_path = table.row_path()?;
+    // `.` is the row element itself, as it is for `row:` against `xml_path`:
+    // how a field reads the row element's own text, as in `<m>1.5</m>`.
+    // Appended as a segment it would name an element that never occurs.
+    if path == "." {
+        return Some(Cow::Owned(row_path));
+    }
     Some(Cow::Owned(format!(
         "{}/{}",
         row_path.trim_end_matches('/'),
@@ -2709,6 +2715,14 @@ tables:
         Some("v"),
         None,
         "/report/data/item/v"
+    )]
+    #[case::dot_is_the_row_element("/report/ms", Some("m"), Some("."), None, "/report/ms/m")]
+    #[case::dot_on_a_dot_row_is_the_table_element(
+        "/report/header",
+        Some("."),
+        Some("."),
+        None,
+        "/report/header"
     )]
     fn field_paths_resolve(
         #[case] table_path: &str,

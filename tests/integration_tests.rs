@@ -762,6 +762,28 @@ fn test_version_2_accepts_a_deliberately_unlinked_nested_table() {
 }
 
 #[test]
+fn test_a_field_path_of_dot_reads_the_row_element() {
+    // Regression: `path: "."` resolved to `<row>/.`, an element that never
+    // occurs, so the field matched nothing and every row came out missing,
+    // with no error at load. It now means the row element itself, as `.` does
+    // for `row:`, which is how a field reads the row element's own text.
+    let batches = parse_xml_file(
+        r#"<data><values><v>1</v><v>2</v></values></data>"#,
+        r#"
+        version: 2
+        tables:
+          - name: values
+            xml_path: /data/values
+            row: v
+            fields:
+              - {name: v, path: ".", data_type: Int32}
+        "#,
+    );
+    let batch = batches.get("values").unwrap();
+    assert_array_values!(batch, "v", &[1, 2], Int32Array);
+}
+
+#[test]
 fn test_version_2_is_not_warned_that_a_missing_utf8_value_yields_empty() {
     // Regression: the `ImplicitEmptyString` lint ignored `version: 2` (and any
     // stated `on_missing`), so it told a version 2 config that a missing

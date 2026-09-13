@@ -8872,6 +8872,28 @@ mod tests {
         assert_array_values!(batch, "v", vec![1i32, 2], Int32Array);
     }
 
+    /// `.` is the row element itself, as it is for `row:`, so a field can read
+    /// the row element's own text alongside its attributes.
+    #[test]
+    fn a_dot_path_reads_the_row_element_text() {
+        let batches = parse(
+            r#"<report><ms><m unit="C">1</m><m unit="F">2</m></ms></report>"#,
+            r#"
+            tables:
+              - name: ms
+                xml_path: /report/ms
+                row: m
+                fields:
+                  - {name: value, path: ".", data_type: Int32}
+                  - {name: unit, path: "@unit", data_type: Utf8}
+            "#,
+        );
+        let batch = batches.get("ms").unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        assert_array_values!(batch, "value", vec![1i32, 2], Int32Array);
+        assert_array_values!(batch, "unit", &["C", "F"], StringArray);
+    }
+
     /// Error messages quote the *resolved* location: someone chasing a failure
     /// wants the path in the document, not the abbreviation in the config.
     #[test]
