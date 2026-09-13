@@ -203,7 +203,14 @@ fn build_link_plans(config: &Config) -> Vec<TableLinkPlan> {
         return Vec::new();
     }
 
-    let index_of_table = |path: &str, scope: &str| {
+    // An `index_of` path names the table whose rows it counts: the table's own
+    // row element counts its own rows, and an enclosing table's row element
+    // counts that table's. Another table sharing this table's scope encloses
+    // nothing, so it is never the answer.
+    let index_of_table = |table_idx: usize, path: &str, scope: &str| {
+        if paths_equal(path, scope) {
+            return Some(table_idx);
+        }
         config.tables.iter().position(|t| {
             let other = t.link_scope_path();
             paths_equal(&other, path) && !paths_equal(&other, scope)
@@ -236,7 +243,7 @@ fn build_link_plans(config: &Config) -> Vec<TableLinkPlan> {
                         Some(default_row_id_name(&config.tables[parent_idx]));
                 }
             } else if let Some(index_of) = link.index_of.as_deref()
-                && let Some(ancestor_idx) = index_of_table(index_of, &scope)
+                && let Some(ancestor_idx) = index_of_table(table_idx, index_of, &scope)
             {
                 plans[table_idx].links.push(LinkSpec {
                     kind: LinkKind::IndexOf,
@@ -2128,8 +2135,11 @@ impl XmlToArrowConverter {
             // be global: it is stable against the parent arriving in a later
             // batch, or in no batch at all under an early stop.
             //
-            // An `index_of` link takes the ancestor's per-scope counter, which
-            // is the same value a `<level>` column carries for that path.
+            // An `index_of` link takes the per-scope counter of the table it
+            // names, which is the same value a `<level>` column carries for
+            // that table. When it names this table itself, the counter still
+            // holds the finalizing row's position: `end_row` below is what
+            // advances it.
             //
             // Behind one test on a precomputed bool, because this runs per
             // finalized row and a table that declares no links — that is,
@@ -9073,6 +9083,68 @@ mod tests {
             legacy.get("measurements").unwrap(),
             linked.get("measurements").unwrap()
         );
+    }
+
+    /// Every `levels` column has an `index_of` equivalent, including one that
+    /// counts the table's own rows: `index_of` its own row element. So a
+    /// version 1 table reaches version 2 without losing a column or a value.
+    #[test]
+    fn index_of_the_tables_own_row_reproduces_its_level_column() {
+        let xml = r#"<report><stations>
+             <station id="A"><readings><reading>1</reading><reading>2</reading></readings></station>
+             <station id="B"><readings><reading>3</reading></readings></station>
+           </stations></report>"#;
+        let legacy = parse(
+            xml,
+            r#"
+            tables:
+              - name: stations
+                xml_path: /report/stations
+                levels: [station]
+                fields:
+                  - {name: id, xml_path: /report/stations/station/@id, data_type: Utf8}
+              - name: readings
+                xml_path: /report/stations/station/readings
+                levels: [station, reading]
+                fields:
+                  - {name: v, xml_path: /report/stations/station/readings/reading, data_type: Int32}
+            "#,
+        );
+        let linked = parse(
+            xml,
+            r#"
+            version: 2
+            tables:
+              - name: stations
+                xml_path: /report/stations
+                row: station
+                links:
+                  - index_of: /report/stations/station
+                    name: "<station>"
+                fields:
+                  - {name: id, path: "@id", data_type: Utf8}
+              - name: readings
+                xml_path: /report/stations/station/readings
+                row: reading
+                links:
+                  - index_of: /report/stations/station
+                    name: "<station>"
+                  - index_of: /report/stations/station/readings/reading
+                    name: "<reading>"
+                fields:
+                  - {name: v, path: /report/stations/station/readings/reading, data_type: Int32}
+            "#,
+        );
+        for table in ["stations", "readings"] {
+            assert_eq!(
+                legacy.get(table).unwrap(),
+                linked.get(table).unwrap(),
+                "table {table} differs"
+            );
+        }
+        let readings = linked.get("readings").unwrap();
+        assert_array_values!(readings, "<station>", vec![0u32, 0, 1], UInt32Array);
+        assert_array_values!(readings, "<reading>", vec![0u32, 1, 0], UInt32Array);
     }
 
     /// A table nobody references pays nothing.

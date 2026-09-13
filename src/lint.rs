@@ -51,9 +51,9 @@ pub enum MigrationStep {
     },
     /// The table uses `levels:`; it must declare `links:` instead.
     ///
-    /// Not always value-preserving: an `index_of:` link reproduces a level
-    /// column that counts an enclosing table's rows, but nothing reproduces
-    /// the one counting the table's own rows.
+    /// Every `levels` column has an `index_of:` equivalent with the same
+    /// values: a link naming the row element of the table the column counts,
+    /// whether that is an enclosing table or this table itself.
     ReplaceLevels {
         /// The table using `levels:`.
         table: String,

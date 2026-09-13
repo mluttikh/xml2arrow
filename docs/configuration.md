@@ -244,7 +244,7 @@ them. A table that is not nested needs no `links:`.
 | Link | Adds | Use it for |
 |---|---|---|
 | `parent: <table>` | a `UInt64` key column, and `_id` on the parent | joining rows to their parent rows |
-| `index_of: <path>` | a `UInt32` position column | the position of the enclosing row within its scope |
+| `index_of: <path>` | a `UInt32` position column | a row's position within its scope: its own, or that of the row around it |
 
 A table may declare several links. `links: []` declares that a nested table
 deliberately has none.
@@ -279,7 +279,9 @@ surrounding elements repeat, and however the output was split into batches.
 
 `index_of:` adds a column named after the element, here `station_idx`, holding
 the 0-based position of the enclosing `<station>` among the rows of its table.
-The path must be the absolute path of an enclosing table's row element.
+The path must be the absolute path of a table's row element: an enclosing
+table's, as here, or the table's own, which gives each row its position among
+its siblings.
 
 The position restarts at 0 in every occurrence of that table's `xml_path`, so
 **it is not a join key** when that element repeats:
@@ -385,7 +387,7 @@ tables:
     links:                          # required when nested; [] for no link
       - parent: <table name>        # UInt64 join key
         name: <column>              # default _<table>_id
-      - index_of: <absolute path>   # UInt32 position; an enclosing table's row element
+      - index_of: <absolute path>   # UInt32 position; this or an enclosing table's row element
         name: <column>              # default <element>_idx
     row_id: <column|true|false>     # default: _id when a parent: link refers to this table
     fields:
