@@ -94,7 +94,9 @@ says how the two relate (`links`). Here `readings._stations_id` joins to
 
 `version: 2` is checked, not just recorded. A config that declares it but still
 uses a version 1 construct is rejected when it is loaded, with a message that
-names the table or field. Any version other than `1` or `2` is rejected too.
+names the table or field. A config is one version or the other, so a config
+without the line that uses a key only version 2 has, such as `row:`, is rejected
+too. Any version other than `1` or `2` is rejected as well.
 
 Every key must be one this reference documents. A key it does not, usually a
 misspelling, is rejected when the config is loaded, with a message saying where

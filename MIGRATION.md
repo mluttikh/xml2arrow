@@ -79,16 +79,13 @@ fields with `FieldConfigBuilder`. Only code that *reads* the field is affected:
 // before
 println!("{}", field.xml_path);
 
-// after — either handle both spellings...
+// after — a version 1 config sets `xml_path`, a version 2 config sets `path`
 println!("{}", field.path.as_deref().or(field.xml_path.as_deref()).unwrap_or(""));
-// ...or, if you only ever wrote absolute paths, the one you set:
-println!("{}", field.path.as_deref().unwrap_or_default());
 ```
 
-Note that `FieldConfigBuilder::new(name, path, dtype)` now populates `path`
-rather than `xml_path`. Its behavior is unchanged for absolute values — an
-absolute path means the same under either key — but a `FieldConfig` built this
-way has `xml_path == None`.
+`FieldConfigBuilder::new(name, path, dtype)` still populates `xml_path`, so a
+version 1 config built in code is unchanged. When the config declares
+`version: 2`, `ConfigBuilder::build` moves each field's location to `path`.
 
 ### DType
 
@@ -179,23 +176,26 @@ tables:
 
 **An existing config needs no change.** A config without `version: 2` is
 version 1, and parses exactly as before; the one visible change is the
-deprecation notice described in §4. A version 1 config may also adopt the new
-keys one at a time: `row:`, `path:`, `links:`, `row_id:` and the value policies
-each work in a version 1 config, and `levels:` is no longer required.
+deprecation notice described in §4. A config is version 1 or version 2 as a
+whole: `row:`, `path:`, `links:`, `row_id:`, `metadata:`, `defaults:` and the
+value policies are version 2 keys, and a version 1 config that sets one is
+rejected when it is loaded, with a message naming the key. `levels:` is no
+longer required in version 1.
 
 - [Configuration reference](docs/configuration.md): version 2.
 - [Configuration format version 1](docs/configuration-v1.md): the deprecated
   format, as it has always behaved.
 - [Migrating to configuration format version 2](docs/migrating-to-version-2.md):
-  four steps, each checked with the new `config_diff` example, which parses one
-  document under two configs and reports what differs:
+  convert, then adopt what version 2 changes one edit at a time, each checked
+  with the new `config_diff` example, which parses one document under two
+  configs and reports what differs:
 
   ```bash
   cargo run --example config_diff -- before.yaml after.yaml document.xml
   ```
 
-- `Config::to_version_2` takes those steps for you without changing the
-  output, and lists what it leaves for you to decide. From the command line:
+- `Config::to_version_2` converts a config without changing the output, and
+  lists what it leaves for you to decide. From the command line:
   `cargo run --example convert_config -- config.yaml > config-v2.yaml`.
 
 ---
@@ -210,13 +210,12 @@ These all keep working until 1.0.
 | `parse_xml(reader, &config)` | `Parser::new(&config)?.parse(reader)` |
 | `parse_xml_slice(xml, &config)` | `Parser::new(&config)?.parse_slice(xml)` |
 | `parser.parse_streaming(reader, opts, sink)` | `for item in parser.parse_batches(reader, opts)` |
-| `xml_path:` on a **field** | `path:` — a key rename for absolute values ([step 1](docs/migrating-to-version-2.md#step-1-rename-xml_path-to-path)) |
+| `xml_path:` on a **field** | `path:` in version 2 — a key rename for absolute values ([converting by hand](docs/migrating-to-version-2.md#converting-by-hand)) |
 
 **Every version 1 config now carries a deprecation notice** in `Config::lint()`
-/ `Parser::warnings()` — including configs that use every new key but have not
-declared `version: 2`. The config parses exactly as before; the notice is the
-only change. It lists what `version: 2` would still reject, grouped by kind, and
-is structured data for tooling (`Lint::ConfigVersion1 { steps }`, each a
+/ `Parser::warnings()`. The config parses exactly as before; the notice is the
+only change. It lists what `version: 2` would reject, grouped by kind, and is
+structured data for tooling (`Lint::ConfigVersion1 { steps }`, each a
 `MigrationStep`):
 
 ```text
@@ -231,7 +230,7 @@ non-nullable `Utf8` value is an error rather than ""
 
 A host that treats any warning as a failure will now see one for every version
 1 config. Filter out `Lint::ConfigVersion1` if you need the previous behavior
-while you migrate.
+until you migrate.
 
 The free functions hide the one-time path-compilation cost and pay it on *every*
 call. Constructing a `Parser` once and reusing it is the whole "compile once,
@@ -261,10 +260,11 @@ Nothing below requires action.
   validates like the file version does.
 - **`Config::to_version_2`** converts a configuration to format version 2
   without changing what it produces, and returns what it could not convert as
-  `Unconverted` entries.
+  `Unconverted` entries. The converted config declares `version: 2`, and loads
+  when there are none.
 - **`metadata:` on tables and fields**, your own key-value pairs, copied into
   the Arrow schema and field metadata of every batch, and so into Parquet files
-  and pyarrow tables. Available in both configuration versions; keys beginning
+  and pyarrow tables. Configuration format version 2 only; keys beginning
   `ARROW:` are rejected, as Arrow reserves them.
 - **`From<ConfigIssue> for Error`**, so a tool that builds or checks configs
   can turn an issue into the error the library would have raised, with `?` or

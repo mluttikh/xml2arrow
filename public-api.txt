@@ -415,6 +415,9 @@ pub xml2arrow::errors::ConfigIssue::InapplicablePolicy::table: alloc::string::St
 pub xml2arrow::errors::ConfigIssue::IndexOfNotAncestorTable
 pub xml2arrow::errors::ConfigIssue::IndexOfNotAncestorTable::index_of: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::IndexOfNotAncestorTable::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::KeyRequiresVersion2
+pub xml2arrow::errors::ConfigIssue::KeyRequiresVersion2::key: &'static str
+pub xml2arrow::errors::ConfigIssue::KeyRequiresVersion2::location: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::LinkColumnCollision
 pub xml2arrow::errors::ConfigIssue::LinkColumnCollision::column: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::LinkColumnCollision::table: alloc::string::String
@@ -628,11 +631,6 @@ pub xml2arrow::lint::Lint::FieldInsideNestedTable::field_path: alloc::string::St
 pub xml2arrow::lint::Lint::FieldInsideNestedTable::nested_table: alloc::string::String
 pub xml2arrow::lint::Lint::FieldInsideNestedTable::nested_table_path: alloc::string::String
 pub xml2arrow::lint::Lint::FieldInsideNestedTable::table: alloc::string::String
-pub xml2arrow::lint::Lint::FieldOutsideRow
-pub xml2arrow::lint::Lint::FieldOutsideRow::field: alloc::string::String
-pub xml2arrow::lint::Lint::FieldOutsideRow::field_path: alloc::string::String
-pub xml2arrow::lint::Lint::FieldOutsideRow::row_path: alloc::string::String
-pub xml2arrow::lint::Lint::FieldOutsideRow::table: alloc::string::String
 pub xml2arrow::lint::Lint::ImplicitEmptyString
 pub xml2arrow::lint::Lint::ImplicitEmptyString::fields: alloc::vec::Vec<alloc::string::String>
 pub xml2arrow::lint::Lint::ImplicitEmptyString::table: alloc::string::String
@@ -671,11 +669,6 @@ pub xml2arrow::lint::MigrationStep::DeclareRow::table: alloc::string::String
 pub xml2arrow::lint::MigrationStep::LinkNestedTable
 pub xml2arrow::lint::MigrationStep::LinkNestedTable::enclosing_table: alloc::string::String
 pub xml2arrow::lint::MigrationStep::LinkNestedTable::table: alloc::string::String
-pub xml2arrow::lint::MigrationStep::MoveFieldIntoRow
-pub xml2arrow::lint::MigrationStep::MoveFieldIntoRow::field: alloc::string::String
-pub xml2arrow::lint::MigrationStep::MoveFieldIntoRow::field_path: alloc::string::String
-pub xml2arrow::lint::MigrationStep::MoveFieldIntoRow::row_path: alloc::string::String
-pub xml2arrow::lint::MigrationStep::MoveFieldIntoRow::table: alloc::string::String
 pub xml2arrow::lint::MigrationStep::MoveFieldToNestedTable
 pub xml2arrow::lint::MigrationStep::MoveFieldToNestedTable::field: alloc::string::String
 pub xml2arrow::lint::MigrationStep::MoveFieldToNestedTable::field_path: alloc::string::String
@@ -730,11 +723,6 @@ pub xml2arrow::migrate::Unconverted::LevelCountsNonEnclosingTable
 pub xml2arrow::migrate::Unconverted::LevelCountsNonEnclosingTable::counted_table: alloc::string::String
 pub xml2arrow::migrate::Unconverted::LevelCountsNonEnclosingTable::level: alloc::string::String
 pub xml2arrow::migrate::Unconverted::LevelCountsNonEnclosingTable::table: alloc::string::String
-pub xml2arrow::migrate::Unconverted::LevelCountsSharedRowElement
-pub xml2arrow::migrate::Unconverted::LevelCountsSharedRowElement::counted_table: alloc::string::String
-pub xml2arrow::migrate::Unconverted::LevelCountsSharedRowElement::level: alloc::string::String
-pub xml2arrow::migrate::Unconverted::LevelCountsSharedRowElement::other_table: alloc::string::String
-pub xml2arrow::migrate::Unconverted::LevelCountsSharedRowElement::table: alloc::string::String
 pub xml2arrow::migrate::Unconverted::RowNotDeclarable
 pub xml2arrow::migrate::Unconverted::RowNotDeclarable::child_elements: alloc::vec::Vec<alloc::string::String>
 pub xml2arrow::migrate::Unconverted::RowNotDeclarable::table: alloc::string::String
@@ -892,11 +880,6 @@ pub xml2arrow::Lint::FieldInsideNestedTable::field_path: alloc::string::String
 pub xml2arrow::Lint::FieldInsideNestedTable::nested_table: alloc::string::String
 pub xml2arrow::Lint::FieldInsideNestedTable::nested_table_path: alloc::string::String
 pub xml2arrow::Lint::FieldInsideNestedTable::table: alloc::string::String
-pub xml2arrow::Lint::FieldOutsideRow
-pub xml2arrow::Lint::FieldOutsideRow::field: alloc::string::String
-pub xml2arrow::Lint::FieldOutsideRow::field_path: alloc::string::String
-pub xml2arrow::Lint::FieldOutsideRow::row_path: alloc::string::String
-pub xml2arrow::Lint::FieldOutsideRow::table: alloc::string::String
 pub xml2arrow::Lint::ImplicitEmptyString
 pub xml2arrow::Lint::ImplicitEmptyString::fields: alloc::vec::Vec<alloc::string::String>
 pub xml2arrow::Lint::ImplicitEmptyString::table: alloc::string::String
@@ -1042,11 +1025,6 @@ pub xml2arrow::Unconverted::LevelCountsNonEnclosingTable
 pub xml2arrow::Unconverted::LevelCountsNonEnclosingTable::counted_table: alloc::string::String
 pub xml2arrow::Unconverted::LevelCountsNonEnclosingTable::level: alloc::string::String
 pub xml2arrow::Unconverted::LevelCountsNonEnclosingTable::table: alloc::string::String
-pub xml2arrow::Unconverted::LevelCountsSharedRowElement
-pub xml2arrow::Unconverted::LevelCountsSharedRowElement::counted_table: alloc::string::String
-pub xml2arrow::Unconverted::LevelCountsSharedRowElement::level: alloc::string::String
-pub xml2arrow::Unconverted::LevelCountsSharedRowElement::other_table: alloc::string::String
-pub xml2arrow::Unconverted::LevelCountsSharedRowElement::table: alloc::string::String
 pub xml2arrow::Unconverted::RowNotDeclarable
 pub xml2arrow::Unconverted::RowNotDeclarable::child_elements: alloc::vec::Vec<alloc::string::String>
 pub xml2arrow::Unconverted::RowNotDeclarable::table: alloc::string::String

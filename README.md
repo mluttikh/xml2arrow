@@ -98,12 +98,12 @@ supported data types and the parser options.
 
 > **Configuration format version 1 is deprecated.** A config without
 > `version: 2`, which includes every config written for 0.19 and earlier, is
-> read as version 1. It keeps working until 1.0, and `parser.warnings()` lists
-> what it still needs to change.
+> read as version 1, and a config is one version or the other. Version 1 keeps
+> working until 1.0, and `parser.warnings()` lists what it needs to change.
 > [Configuration format version 1](docs/configuration-v1.md) documents it, and
 > [Migrating to configuration format version 2](docs/migrating-to-version-2.md)
-> moves a config across in four steps, which `Config::to_version_2` can take for
-> you without changing its output.
+> moves a config across: `Config::to_version_2` converts it without changing
+> its output.
 
 ### 2. Parse the XML
 
@@ -204,11 +204,11 @@ for lint in parser.warnings() {
 ```
 
 Lints are data, never printed by the library, and purely advisory: they never
-change how a document parses. The inferred-boundary lint carries its own fix —
-the `row:` line to add — and goes quiet once you add it.
+change how a document parses. The inferred-boundary lint carries its own fix,
+the `row:` line version 2 needs, and a version 2 config never reports it.
 
 A version 1 config, one that does not declare `version: 2`, also gets a
-**deprecation notice** that lists exactly what `version: 2` would still reject
+**deprecation notice** that lists exactly what `version: 2` would reject
 in that config. See
 [Migrating to configuration format version 2](docs/migrating-to-version-2.md).
 

@@ -16,12 +16,14 @@ The harness is `tests/frozen_corpus.rs`; read its module docs for the mechanics.
 
 ## What this is for
 
-The transition to declared row semantics promises that a configuration which
-does not opt in keeps producing byte-identical output for the whole 0.x line —
-every new capability (`row:`, `path:`, `links:`) is opt-in per table, and a
-config that adopts none of them must be unaffected by all of them. That promise
-is only worth something if it is checked mechanically, on every commit, rather
-than by review — this corpus is the check.
+The transition to declared row semantics promises that a version 1
+configuration keeps producing byte-identical output for the whole 0.x line.
+Every new capability (`row:`, `path:`, `links:`) belongs to configuration format
+version 2, which a config opts into as a whole with `version: 2`, and a config
+that does not must be unaffected by all of them. That promise is only worth
+something if it is checked mechanically, on every commit, rather than by review —
+this corpus is the check. The version 2 cases pin that format's behavior the same
+way.
 
 Every case additionally runs through all three entry points (buffered,
 zero-copy, and streaming with a batch size small enough to force flushes) and
@@ -30,13 +32,13 @@ a refactor that changes one path and not the others fails here.
 
 ## The corpus deliberately freezes behavior we intend to change
 
-Several snapshots record semantics that the next major version replaces. That is
-the point: when the replacement lands behind an opt-in, these cases must still
-show the *old* values, proving the opt-in is genuinely opt-in.
+Several snapshots record version 1 semantics that version 2 replaces. That is
+the point: with the replacement behind `version: 2`, these cases must still show
+the *old* values, proving that a version 1 config is unaffected.
 
 | Case | Frozen behavior | Changed by |
 |---|---|---|
-| `metadata_multi_child_rows` | two half-filled rows, one per configured child element | declared `row:` |
+| `metadata_multi_child_rows` | two half-filled rows, one per configured child element | declared `row:` (see `declared_row_dot_metadata`) |
 | `repeated_container_resets_levels` | `<block>` = `0, 0, 1, 0` — the counter resets when the container re-opens, so a single-column join misattributes the last row | `parent:` links (global `UInt64` keys) |
 | `structural_table_excluded` | a `fields: []` table is absent from the output but still feeds an index column | `index_of:` links |
 | `utf8_missing_yields_empty_string` | a missing non-nullable `Utf8` yields `""` where every other type errors | per-field `on_missing` |
@@ -69,7 +71,7 @@ Output changed. Read the diff and decide which it is:
 
 - **a bug** — fix the code;
 - **an intentional change** — during the 0.x line it must be reachable only
-  through an opt-in, so a case that opts into nothing must not have moved.
+  through `version: 2`, so a version 1 case must not have moved.
   Document what changed and why, then re-record.
 
 Re-recording is a deliberate act. A pull request that re-records a snapshot

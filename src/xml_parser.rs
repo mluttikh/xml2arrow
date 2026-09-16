@@ -3255,7 +3255,6 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::config_from_yaml;
-    use crate::lint::Lint;
     use approx::abs_diff_eq;
     use arrow::array::{
         BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
@@ -8629,12 +8628,11 @@ mod tests {
 
     // --- Declared row boundaries (`row:`) -------------------------------------
     //
-    // The inferred rule finalizes a row whenever any configured direct child of
-    // a table's `xml_path` closes. `row:` names the element instead. These tests
-    // pin three things: that declaring a row fixes the half-filled-metadata
-    // shape, that all three spellings land on the same node, and — the part
-    // that makes the phase opt-in rather than a change — that a table which
-    // declares nothing keeps the inferred behavior even when a sibling opts in.
+    // Version 1 finalizes a row whenever any configured direct child of a
+    // table's `xml_path` closes. Version 2's `row:` names the element instead.
+    // These tests pin that declaring a row fixes the half-filled-metadata shape,
+    // that the spellings land on the same node, and that naming the element the
+    // inferred rule already used changes nothing.
 
     const METADATA_XML: &str = r#"
         <report>
@@ -8645,29 +8643,23 @@ mod tests {
             </header>
         </report>"#;
 
-    /// Config for [`METADATA_XML`], with `row_key` spliced in as the table's
-    /// row declaration (empty string = leave boundaries inferred).
-    fn metadata_config(row_key: &str) -> String {
-        format!(
-            r#"
-            tables:
-              - name: header
-                xml_path: /report/header
-                {row_key}
-                levels: []
-                fields:
-                  - {{name: title, xml_path: /report/header/title, data_type: Utf8}}
-                  - {{name: created, xml_path: /report/header/created, data_type: Utf8}}
-                  - {{name: version, xml_path: /report/header/version, data_type: Utf8}}
-            "#
-        )
-    }
+    /// A version 1 config for [`METADATA_XML`], whose rows are inferred.
+    const METADATA_CONFIG: &str = r#"
+        tables:
+          - name: header
+            xml_path: /report/header
+            levels: []
+            fields:
+              - {name: title, xml_path: /report/header/title, data_type: Utf8}
+              - {name: created, xml_path: /report/header/created, data_type: Utf8}
+              - {name: version, xml_path: /report/header/version, data_type: Utf8}
+        "#;
 
     /// The bug `row:` exists to fix: three configured children, so the inferred
     /// rule finalizes three rows, each holding one of the three values.
     #[test]
     fn inferred_boundaries_still_split_metadata_into_partial_rows() {
-        let batches = parse(METADATA_XML, &metadata_config(""));
+        let batches = parse(METADATA_XML, METADATA_CONFIG);
         assert_eq!(batches.get("header").unwrap().num_rows(), 3);
     }
 
@@ -8675,7 +8667,20 @@ mod tests {
     /// occurrence, which is what a metadata table always meant.
     #[test]
     fn row_dot_yields_one_row_per_table_element() {
-        let batches = parse(METADATA_XML, &metadata_config(r#"row: ".""#));
+        let batches = parse(
+            METADATA_XML,
+            r#"
+            version: 2
+            tables:
+              - name: header
+                xml_path: /report/header
+                row: "."
+                fields:
+                  - {name: title, path: title, data_type: Utf8}
+                  - {name: created, path: created, data_type: Utf8}
+                  - {name: version, path: version, data_type: Utf8}
+            "#,
+        );
         let batch = batches.get("header").unwrap();
         assert_eq!(batch.num_rows(), 1);
         // One row holding all three values, rather than three holding one each.
@@ -8693,14 +8698,14 @@ mod tests {
                  <header><title>b</title><version>2</version></header>
                </report>"#,
             r#"
+            version: 2
             tables:
               - name: header
                 xml_path: /report/header
                 row: "."
-                levels: []
                 fields:
-                  - {name: title, xml_path: /report/header/title, data_type: Utf8}
-                  - {name: version, xml_path: /report/header/version, data_type: Utf8}
+                  - {name: title, path: title, data_type: Utf8}
+                  - {name: version, path: version, data_type: Utf8}
             "#,
         );
         let batch = batches.get("header").unwrap();
@@ -8720,13 +8725,13 @@ mod tests {
                  </data>
                </report>"#,
             r#"
+            version: 2
             tables:
               - name: items
                 xml_path: /report/data
                 row: items/item
-                levels: []
                 fields:
-                  - {name: v, xml_path: /report/data/items/item/v, data_type: Int32}
+                  - {name: v, path: /report/data/items/item/v, data_type: Int32}
             "#,
         );
         let batch = batches.get("items").unwrap();
@@ -8746,13 +8751,13 @@ mod tests {
         let config = |row: &str| {
             format!(
                 r#"
+                version: 2
                 tables:
                   - name: items
                     xml_path: /report/data
                     {row}
-                    levels: []
                     fields:
-                      - {{name: v, xml_path: /report/data/item/v, data_type: Int32}}
+                      - {{name: v, path: /report/data/item/v, data_type: Int32}}
                 "#
             )
         };
@@ -8769,47 +8774,50 @@ mod tests {
     /// it decides the meaning, so a slash-less multi-segment path is relative
     /// and stacks onto `xml_path` rather than replacing it.
     ///
-    /// Getting it wrong is not silent — every field lands outside the resolved
-    /// row subtree, which is exactly what `FieldOutsideRow` reports.
+    /// Getting it wrong is not silent: every absolute field lands outside the
+    /// resolved row element, which is rejected at load.
     #[test]
     fn a_leading_slash_is_what_makes_a_row_path_absolute() {
-        let relative_but_looks_absolute = config_from_yaml!(
+        let err = Config::from_yaml_str(
             r#"
+            version: 2
             tables:
               - name: items
                 xml_path: /report/data
                 row: report/data/item
-                levels: []
                 fields:
-                  - {name: v, xml_path: /report/data/item/v, data_type: Int32}
-            "#
-        );
+                  - {name: v, path: /report/data/item/v, data_type: Int32}
+            "#,
+        )
+        .unwrap_err();
         // Resolved relative: /report/data + report/data/item.
-        assert!(matches!(
-            relative_but_looks_absolute
-                .lint_excluding_deprecation()
-                .as_slice(),
-            [Lint::FieldOutsideRow { row_path, .. }]
-                if row_path == "/report/data/report/data/item"
-        ));
+        assert!(
+            matches!(
+                &err,
+                Error::InvalidConfig {
+                    reason: ConfigIssue::FieldOutsideRow { row_path, .. }
+                } if row_path == "/report/data/report/data/item"
+            ),
+            "{err:?}"
+        );
     }
 
-    /// The plan's promise for the unambiguous case: naming the one element the
-    /// inferred rule was already using changes nothing at all. This is what
-    /// makes adopting `row:` on a well-behaved table a no-op.
+    /// Naming the one element the inferred rule was already using changes
+    /// nothing at all, which is what lets a version 1 table with one row element
+    /// convert to version 2 unchanged.
     #[test]
     fn declaring_the_inferred_element_changes_no_output() {
         let xml = r#"<report><data><item><v>1</v></item><item><v>2</v></item></data></report>"#;
-        let with_row = r#"
+        let declared = r#"
+            version: 2
             tables:
               - name: items
                 xml_path: /report/data
                 row: item
-                levels: []
                 fields:
-                  - {name: v, xml_path: /report/data/item/v, data_type: Int32}
+                  - {name: v, path: v, data_type: Int32}
             "#;
-        let without_row = r#"
+        let inferred = r#"
             tables:
               - name: items
                 xml_path: /report/data
@@ -8817,76 +8825,34 @@ mod tests {
                 fields:
                   - {name: v, xml_path: /report/data/item/v, data_type: Int32}
             "#;
-        assert_eq!(parse(xml, with_row), parse(xml, without_row));
+        assert_eq!(parse(xml, declared), parse(xml, inferred));
     }
 
-    /// C3, the granularity contract: opting one table in must not move another.
-    /// This also exercises a node carrying **both** row bits — `<header>` ends
-    /// its own declared row before its scope is popped, then delimits the outer
-    /// table's row on the way out, exactly as it did before it declared one.
+    /// A `row: "."` table finalizes its row as its own element closes, before
+    /// its scope is popped, so it still reads the enclosing table's count.
     #[test]
-    fn declaring_a_row_on_one_table_leaves_its_parent_alone() {
-        let xml = r#"<report>
-                       <name>R1</name>
-                       <header><title>T</title><created>C</created></header>
-                     </report>"#;
-        let config = |header_row: &str| {
-            format!(
-                r#"
-                tables:
-                  - name: report
-                    xml_path: /report
-                    levels: []
-                    fields:
-                      - {{name: name, xml_path: /report/name, data_type: Utf8}}
-                  - name: header
-                    xml_path: /report/header
-                    {header_row}
-                    levels: []
-                    fields:
-                      - {{name: title, xml_path: /report/header/title, data_type: Utf8}}
-                      - {{name: created, xml_path: /report/header/created, data_type: Utf8}}
-                "#
-            )
-        };
-
-        let inferred = parse(xml, &config(""));
-        let declared = parse(xml, &config(r#"row: ".""#));
-
-        // The inner table is the only thing that moved: 2 half-filled rows -> 1.
-        assert_eq!(inferred.get("header").unwrap().num_rows(), 2);
-        assert_eq!(declared.get("header").unwrap().num_rows(), 1);
-        // The outer table is untouched — <name> and <header> both still
-        // delimit its rows, because it declared nothing.
-        assert_eq!(
-            inferred.get("report").unwrap(),
-            declared.get("report").unwrap()
-        );
-    }
-
-    /// A row declared on a table nested inside another still receives its
-    /// parent-link index columns, because `row:` changes only which element
-    /// finalizes the row, never how `levels` are collected.
-    #[test]
-    fn declared_rows_keep_their_level_indices() {
+    fn a_row_dot_table_keeps_its_link_indices() {
         let batches = parse(
             r#"<report>
                  <station><meta><id>a</id><kind>x</kind></meta></station>
                  <station><meta><id>b</id><kind>y</kind></meta></station>
                </report>"#,
             r#"
+            version: 2
             tables:
               - name: stations
                 xml_path: /report
-                levels: []
+                row: station
                 fields: []
               - name: meta
                 xml_path: /report/station/meta
                 row: "."
-                levels: [station]
+                links:
+                  - index_of: /report/station
+                    name: "<station>"
                 fields:
-                  - {name: id, xml_path: /report/station/meta/id, data_type: Utf8}
-                  - {name: kind, xml_path: /report/station/meta/kind, data_type: Utf8}
+                  - {name: id, path: id, data_type: Utf8}
+                  - {name: kind, path: kind, data_type: Utf8}
             "#,
         );
         let batch = batches.get("meta").unwrap();
@@ -8897,47 +8863,47 @@ mod tests {
 
     // --- Relative field paths (`path:`) ---------------------------------------
     //
-    // `path` and `xml_path` are two spellings of one location, resolved to the
-    // same trie node. These tests prove that "same node" claim on the output
-    // rather than trusting it, since the whole phase is ergonomics with no
-    // semantic content.
+    // Version 2's `path` names the location version 1's `xml_path` does, either
+    // absolutely or relative to the row, resolved to the same trie node. These
+    // tests prove that "same node" claim on the output rather than trusting it.
 
-    /// The same mapping written three ways must produce identical batches:
-    /// `path` and `xml_path` name one location, so which key it was written
-    /// under cannot be observable in the output.
+    /// The same mapping written in version 1 and in both version 2 spellings
+    /// must produce identical batches: the key a location was written under
+    /// cannot be observable in the output.
     ///
     /// Fields are given as a YAML flow sequence so the case string never
     /// carries a newline into the interpolation — indentation is what makes
     /// these configs valid, and a multi-line splice silently breaks it.
     #[rstest]
-    #[case::legacy_absolute(
-        r#"[{name: v, xml_path: /report/data/item/v, data_type: Int32}, {name: id, xml_path: "/report/data/item/@id", data_type: Utf8}]"#
-    )]
-    #[case::new_key_absolute(
+    #[case::absolute(
         r#"[{name: v, path: /report/data/item/v, data_type: Int32}, {name: id, path: "/report/data/item/@id", data_type: Utf8}]"#
     )]
     #[case::relative(
         r#"[{name: v, path: v, data_type: Int32}, {name: id, path: "@id", data_type: Utf8}]"#
     )]
     fn field_path_spellings_are_equivalent(#[case] fields: &str) {
-        const LEGACY: &str = r#"[{name: v, xml_path: /report/data/item/v, data_type: Int32}, {name: id, xml_path: "/report/data/item/@id", data_type: Utf8}]"#;
+        const VERSION_1: &str = r#"
+            tables:
+              - name: items
+                xml_path: /report/data
+                levels: []
+                fields: [{name: v, xml_path: /report/data/item/v, data_type: Int32}, {name: id, xml_path: "/report/data/item/@id", data_type: Utf8}]
+            "#;
         let xml = r#"<report><data>
              <item id="a"><v>1</v></item>
              <item id="b"><v>2</v></item>
            </data></report>"#;
-        let config = |fields: &str| {
-            format!(
-                r#"
-                tables:
-                  - name: items
-                    xml_path: /report/data
-                    row: item
-                    levels: []
-                    fields: {fields}
-                "#
-            )
-        };
-        assert_eq!(parse(xml, &config(fields)), parse(xml, &config(LEGACY)));
+        let version_2 = format!(
+            r#"
+            version: 2
+            tables:
+              - name: items
+                xml_path: /report/data
+                row: item
+                fields: {fields}
+            "#
+        );
+        assert_eq!(parse(xml, &version_2), parse(xml, VERSION_1));
     }
 
     /// A relative path may be more than one segment deep.
@@ -8948,11 +8914,11 @@ mod tests {
                  <item><sensor id="s1"><reading>7</reading></sensor></item>
                </data></report>"#,
             r#"
+            version: 2
             tables:
               - name: items
                 xml_path: /report/data
                 row: item
-                levels: []
                 fields:
                   - {name: reading, path: sensor/reading, data_type: Int32}
                   - {name: sensor_id, path: sensor/@id, data_type: Utf8}
@@ -8973,11 +8939,11 @@ mod tests {
                  <item><v>1</v></item><item><v>2</v></item>
                </items></data></report>"#,
             r#"
+            version: 2
             tables:
               - name: items
                 xml_path: /report/data
                 row: items/item
-                levels: []
                 fields:
                   - {name: v, path: v, data_type: Int32}
             "#,
@@ -8994,6 +8960,7 @@ mod tests {
         let batches = parse(
             r#"<report><ms><m unit="C">1</m><m unit="F">2</m></ms></report>"#,
             r#"
+            version: 2
             tables:
               - name: ms
                 xml_path: /report/ms
@@ -9015,11 +8982,11 @@ mod tests {
     fn errors_report_the_resolved_path() {
         let config = config_from_yaml!(
             r#"
+            version: 2
             tables:
               - name: items
                 xml_path: /report/data
                 row: item
-                levels: []
                 fields:
                   - {name: v, path: v, data_type: Int32}
             "#
@@ -9065,6 +9032,7 @@ mod tests {
         let batches = parse(
             REPEATED_CONTAINER_XML,
             r#"
+            version: 2
             tables:
               - name: stations
                 xml_path: /report/group
@@ -9100,6 +9068,7 @@ mod tests {
         let batches = parse(
             REPEATED_CONTAINER_XML,
             r#"
+            version: 2
             tables:
               - name: stations
                 xml_path: /report/group
@@ -9135,25 +9104,23 @@ mod tests {
             tables:
               - name: stations
                 xml_path: /report
-                row: station
                 levels: []
                 fields: []
               - name: measurements
                 xml_path: /report/station
-                row: m
                 levels: [station]
                 fields:
-                  - {name: v, path: v, data_type: Int32}
+                  - {name: v, xml_path: /report/station/m/v, data_type: Int32}
             "#,
         );
         let linked = parse(
             xml,
             r#"
+            version: 2
             tables:
               - name: stations
                 xml_path: /report
                 row: station
-                levels: []
                 fields: []
               - name: measurements
                 xml_path: /report/station
@@ -9241,11 +9208,11 @@ mod tests {
         let batches = parse(
             r#"<report><station id="A"><m><v>1</v></m></station></report>"#,
             r#"
+            version: 2
             tables:
               - name: stations
                 xml_path: /report
                 row: station
-                levels: []
                 fields:
                   - {name: id, path: "@id", data_type: Utf8}
             "#,
@@ -9262,6 +9229,7 @@ mod tests {
         let batches = parse(
             REPEATED_CONTAINER_XML,
             r#"
+            version: 2
             tables:
               - name: stations
                 xml_path: /report/group
@@ -9305,8 +9273,9 @@ mod tests {
     #[test]
     fn a_path_shaped_table_name_appears_in_the_link_column_verbatim() {
         let batches = parse(
-            r#"<report><station id="A"><m><v>1</v></m></station></report>"#,
+            r#"<report><station id="A"><ms><m><v>1</v></m></ms></station></report>"#,
             r#"
+            version: 2
             tables:
               - name: /report/monitoring_stations/
                 xml_path: /report
@@ -9314,7 +9283,7 @@ mod tests {
                 fields:
                   - {name: id, path: "@id", data_type: Utf8}
               - name: measurements
-                xml_path: /report/station
+                xml_path: /report/station/ms
                 row: m
                 links:
                   - parent: /report/monitoring_stations/
@@ -9349,18 +9318,18 @@ mod tests {
     #[test]
     fn link_and_key_columns_can_be_renamed() {
         let batches = parse(
-            r#"<report><station id="A"><m><v>1</v></m></station></report>"#,
+            r#"<report><station id="A"><ms><m><v>1</v></m></ms></station></report>"#,
             r#"
+            version: 2
             tables:
               - name: stations
                 xml_path: /report
                 row: station
                 row_id: station_key
-                levels: []
                 fields:
                   - {name: id, path: "@id", data_type: Utf8}
               - name: measurements
-                xml_path: /report/station
+                xml_path: /report/station/ms
                 row: m
                 links:
                   - parent: stations
@@ -9436,47 +9405,44 @@ mod tests {
 
     // --- Per-field value policies -------------------------------------------
     //
-    // Every policy defaults to the behavior this crate already had, so these
-    // tests are all of the form "the quirk, then the opt-out beside it".
+    // Version 2 only. Its defaults trim every value and make a missing
+    // non-nullable value an error whatever the type; a policy states a
+    // different choice for one field, or for all of them under `defaults:`.
 
-    /// The long-standing asymmetry: a missing non-nullable `Utf8` yields `""`
-    /// while a missing non-nullable number is an error. `on_missing` is how a
-    /// config stops relying on which type a column happens to be.
+    /// Version 1 yields `""` for a missing non-nullable `Utf8` value, where
+    /// version 2 raises an error. `on_missing: empty` keeps the version 1 value
+    /// for one field, which is how the converter keeps a column unchanged.
     #[test]
-    fn on_missing_overrides_the_type_dependent_default() {
+    fn on_missing_empty_keeps_the_version_1_empty_string() {
         let xml = "<r><item><other>x</other></item></r>";
-        // Default: the Utf8 field silently becomes "".
-        let batches = parse(
+        let version_1 = parse(
             xml,
             r#"
             tables:
               - name: t
                 xml_path: /r
-                row: item
+                levels: []
                 fields:
-                  - {name: s, path: s, data_type: Utf8}
-                  - {name: other, path: other, data_type: Utf8}
+                  - {name: s, xml_path: /r/item/s, data_type: Utf8}
+                  - {name: other, xml_path: /r/item/other, data_type: Utf8}
             "#,
         );
-        assert_array_values!(batches.get("t").unwrap(), "s", &[""], StringArray);
+        assert_array_values!(version_1.get("t").unwrap(), "s", &[""], StringArray);
 
-        // Opted out: the same absence is now an error.
-        let config = config_from_yaml!(
+        let version_2 = parse(
+            xml,
             r#"
+            version: 2
             tables:
               - name: t
                 xml_path: /r
                 row: item
                 fields:
-                  - {name: s, path: s, data_type: Utf8, on_missing: error}
+                  - {name: s, path: s, data_type: Utf8, on_missing: empty}
                   - {name: other, path: other, data_type: Utf8}
-            "#
+            "#,
         );
-        let err = parse_document(xml.as_bytes(), &config).unwrap_err();
-        assert!(
-            matches!(err, Error::MissingRequiredField { .. }),
-            "got {err:?}"
-        );
+        assert_array_values!(version_2.get("t").unwrap(), "s", &[""], StringArray);
     }
 
     /// A nullable numeric can be asked to report absence as an error too.
@@ -9484,6 +9450,7 @@ mod tests {
     fn on_missing_error_applies_to_nullable_fields() {
         let config = config_from_yaml!(
             r#"
+            version: 2
             tables:
               - name: t
                 xml_path: /r
@@ -9508,6 +9475,7 @@ mod tests {
         let batches = parse(
             "<r><item><n>12</n></item><item><n>oops</n></item><item><n>34</n></item></r>",
             r#"
+            version: 2
             tables:
               - name: t
                 xml_path: /r
@@ -9530,6 +9498,7 @@ mod tests {
             "<r><item><v>a</v><v>b</v><v>c</v></item></r>",
             &format!(
                 r#"
+                version: 2
                 tables:
                   - name: t
                     xml_path: /r
@@ -9548,6 +9517,7 @@ mod tests {
     fn repeats_remain_an_error_by_default() {
         let config = config_from_yaml!(
             r#"
+            version: 2
             tables:
               - name: t
                 xml_path: /r
@@ -9578,6 +9548,7 @@ mod tests {
         let batches = parse(
             "<r><item><v>a&amp;b</v><v>second</v></item></r>",
             r#"
+            version: 2
             tables:
               - name: t
                 xml_path: /r
@@ -9589,27 +9560,27 @@ mod tests {
         assert_array_values!(batches.get("t").unwrap(), "v", &["a&b"], StringArray);
     }
 
-    /// `Utf8` keeps surrounding whitespace by default; `trim` opts out.
+    /// Version 2 trims `Utf8` by default; `trim: false` keeps the whitespace.
     #[test]
-    fn trim_applies_to_utf8_when_asked() {
+    fn trim_false_keeps_utf8_whitespace() {
         let xml = "<r><item><s> hi </s></item></r>";
         let config = |policy: &str| {
             format!(
                 r#"
+                version: 2
                 tables:
                   - name: t
                     xml_path: /r
                     row: item
-                    parser_options: {{}}
                     fields:
                       - {{name: s, path: s, data_type: Utf8{policy}}}
                 "#
             )
         };
-        let untrimmed = parse(xml, &config(""));
-        assert_array_values!(untrimmed.get("t").unwrap(), "s", &[" hi "], StringArray);
-        let trimmed = parse(xml, &config(", trim: true"));
+        let trimmed = parse(xml, &config(""));
         assert_array_values!(trimmed.get("t").unwrap(), "s", &["hi"], StringArray);
+        let untrimmed = parse(xml, &config(", trim: false"));
+        assert_array_values!(untrimmed.get("t").unwrap(), "s", &[" hi "], StringArray);
     }
 
     /// `null_values` turns sentinel strings into missing, which then goes
@@ -9619,6 +9590,7 @@ mod tests {
         let batches = parse(
             "<r><item><n>1</n></item><item><n>N/A</n></item><item><n>-</n></item></r>",
             r#"
+            version: 2
             tables:
               - name: t
                 xml_path: /r
@@ -9636,18 +9608,20 @@ mod tests {
     }
 
     /// `null_values: [""]` is the explicit way to treat blank `Utf8` text as
-    /// missing: after trimming, blank text is `""`, which then matches.
+    /// missing: after trimming, which version 2 does by default, blank text is
+    /// `""`, which then matches.
     #[test]
     fn an_empty_null_value_makes_blank_utf8_missing() {
         let batches = parse(
             r#"<r><item a=""><s>   </s></item><item a="x"><s> y </s></item></r>"#,
             r#"
+            version: 2
             tables:
               - name: t
                 xml_path: /r
                 row: item
                 fields:
-                  - {name: s, path: s, data_type: Utf8, nullable: true, trim: true, null_values: [""]}
+                  - {name: s, path: s, data_type: Utf8, nullable: true, null_values: [""]}
                   - {name: a, path: "@a", data_type: Utf8, nullable: true, null_values: [""]}
             "#,
         );
@@ -9666,19 +9640,20 @@ mod tests {
 
     /// For `Utf8`, a `null_values` match is missing, but trimming never makes
     /// a value missing: it only edits the text, so blank text is `""`, just
-    /// as `a=""` is.
+    /// as `a=""` is. Version 2 trims by default.
     #[test]
     fn utf8_null_values_are_missing_but_blank_text_is_empty() {
         let batches = parse(
             r#"<r><item a=""><s>N/A</s></item><item a=" "><s>   </s></item><item a="x"><s> y </s></item></r>"#,
             r#"
+            version: 2
             tables:
               - name: t
                 xml_path: /r
                 row: item
                 fields:
-                  - {name: s, path: s, data_type: Utf8, nullable: true, trim: true, null_values: ["N/A"]}
-                  - {name: a, path: "@a", data_type: Utf8, nullable: true, trim: true}
+                  - {name: s, path: s, data_type: Utf8, nullable: true, null_values: ["N/A"]}
+                  - {name: a, path: "@a", data_type: Utf8, nullable: true}
             "#,
         );
         let batch = batches.get("t").unwrap();
@@ -9711,20 +9686,21 @@ mod tests {
         let batches = parse(
             "<r><item><a> x </a><b> y </b></item></r>",
             r#"
+            version: 2
             defaults:
-              trim: true
+              trim: false
             tables:
               - name: t
                 xml_path: /r
                 row: item
                 fields:
                   - {name: a, path: a, data_type: Utf8}
-                  - {name: b, path: b, data_type: Utf8, trim: false}
+                  - {name: b, path: b, data_type: Utf8, trim: true}
             "#,
         );
         let batch = batches.get("t").unwrap();
-        assert_array_values!(batch, "a", &["x"], StringArray);
-        assert_array_values!(batch, "b", &[" y "], StringArray);
+        assert_array_values!(batch, "a", &[" x "], StringArray);
+        assert_array_values!(batch, "b", &["y"], StringArray);
     }
 
     /// What `version: 2` changes about *parsing*, as opposed to what it
@@ -9765,10 +9741,10 @@ mod tests {
                 tables:
                   - name: t
                     xml_path: /r
-                    row: item
+                    levels: []
                     fields:
-                      - {name: s, path: s, data_type: Utf8}
-                      - {name: n, path: n, data_type: Int32}
+                      - {name: s, xml_path: /r/item/s, data_type: Utf8}
+                      - {name: n, xml_path: /r/item/n, data_type: Int32}
                 "#,
             );
             let batch = batches.get("t").unwrap();

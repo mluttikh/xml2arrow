@@ -1,12 +1,12 @@
 //! Converting a configuration to format version 2.
 //!
-//! [`Config::to_version_2`] rewrites a configuration into format version 2
-//! without changing what it produces: every document parses to the same tables,
-//! columns, values and errors under the converted config as under the original.
-//! That promise decides every rewrite below. A part whose only version 2
-//! spellings would change the output is not rewritten; it is left as it was and
-//! reported as an [`Unconverted`] entry, because choosing between those
-//! spellings is the author's decision.
+//! [`Config::to_version_2`] rewrites a version 1 configuration into format
+//! version 2 without changing what it produces: every document parses to the
+//! same tables, columns, values and errors under the converted config as under
+//! the original. That promise decides every rewrite below. A part whose only
+//! version 2 spellings would change the output is not rewritten; it is left as
+//! it was and reported as an [`Unconverted`] entry, because choosing between
+//! those spellings is the author's decision.
 //!
 //! The rewrites, in the order they are applied:
 //!
@@ -17,37 +17,38 @@
 //! 2. **Field paths.** `xml_path:` becomes `path:` with the same absolute value.
 //! 3. **Levels.** Each `levels` entry becomes an `index_of:` link naming the row
 //!    element of the table whose rows it counts, with `name:` keeping the
-//!    `<level>` column name, so the column and its values are unchanged.
+//!    `<level>` column name, so the column and its values are unchanged. A
+//!    table's levels stay as they are while a table they count has no `row:`,
+//!    because the links name the row element the author chooses.
 //! 4. **Links.** A nested table that had no `levels` declares `links: []`.
 //! 5. **Value policies.** Version 2 trims `Utf8` values and makes a missing
-//!    non-nullable `Utf8` value an error. Each `Utf8` field that relied on the
-//!    version 1 behavior states it instead, as `trim: false` and, when the field
-//!    is not nullable, `on_missing: empty`, so declaring version 2 changes no
-//!    value.
+//!    non-nullable `Utf8` value an error. Each `Utf8` field states the version 1
+//!    behavior instead, as `trim: false` and, when the field is not nullable,
+//!    `on_missing: empty`, so declaring version 2 changes no value.
 //!
 //! An unknown key is never removed. Version 1 ignores it and version 2 rejects
 //! it, and while deleting it changes nothing, correcting a misspelling can:
 //! which one was meant is the author's to say. It is reported instead.
 //!
 //! A path with a `.` or `..` segment in a table's `xml_path`, a field's
-//! `xml_path` or `stop_at_paths` is not rewritten either. No element can match
+//! `xml_path` or `stop_at_paths` is not corrected either. No element can match
 //! it, and writing it correctly changes the output from nothing to something.
-//! The field keeps its `xml_path:` spelling, because a `path:` with such a
-//! segment is rejected in every version.
+//! It is reported instead.
 //!
-//! Two kinds of field are never rewritten, because version 2 rejects both and
+//! Two kinds of field are never moved, because version 2 rejects both and
 //! every way to satisfy it changes the output:
 //!
 //! - a field inside the `xml_path` of a table nested within its own. That
 //!   table captures every value there, so the field is never filled.
-//! - a field outside its table's row element, once the table has one. Its
-//!   value attaches to whichever row ends next.
+//! - a field outside its table's row element. Its value attaches to whichever
+//!   row ends next.
 //!
 //! Both are reported instead.
 //!
-//! When nothing is left over, the converted config declares `version: 2`.
-//! Otherwise it keeps the original's version, with every other step already
-//! taken, so what remains to do is exactly [`Conversion::unconverted`].
+//! The converted config always declares `version: 2`, since a config is one
+//! version or the other. When nothing is left over it loads. Otherwise it does
+//! not load until the author resolves what [`Conversion::unconverted`] lists,
+//! and every other rewrite is already taken.
 //!
 //! The result is a [`Config`], not text. Writing it out, with
 //! [`Config::to_yaml_file`] for example, produces a fresh file: the original's
@@ -56,8 +57,7 @@
 use std::fmt;
 
 use crate::config::{
-    Config, DType, Link, OnMissing, TableConfig, has_dot_segment, path_is_strictly_under,
-    path_segments, paths_equal,
+    Config, DType, Link, OnMissing, TableConfig, path_is_strictly_under, path_segments,
 };
 use crate::errors::Result;
 
@@ -65,12 +65,14 @@ use crate::errors::Result;
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Conversion {
-    /// The converted configuration. It parses every document exactly as the
-    /// original does, and declares `version: 2` when
-    /// [`unconverted`](Self::unconverted) is empty.
+    /// The converted configuration, which declares `version: 2`.
+    ///
+    /// When [`unconverted`](Self::unconverted) is empty, it loads and parses
+    /// every document exactly as the original does. Otherwise it does not load
+    /// until those parts are resolved.
     pub config: Config,
-    /// What could not be converted without changing the output, in table
-    /// order. The converted config leaves each of these parts as it was.
+    /// What could not be converted without changing the output. The converted
+    /// config leaves each of these parts as it was.
     pub unconverted: Vec<Unconverted>,
 }
 
@@ -109,6 +111,10 @@ pub enum Unconverted {
     /// With several, the table produces one partially-filled row per child
     /// element; `row: "."` is usually what was meant, and it changes the row
     /// count. With none, the table produces no rows at all.
+    ///
+    /// The `levels` of this table, and of every table whose levels count its
+    /// rows, are left as well: the `index_of:` links that replace them name the
+    /// row element chosen.
     RowNotDeclarable {
         /// The table whose rows are inferred.
         table: String,
@@ -137,19 +143,6 @@ pub enum Unconverted {
         level: String,
         /// The table whose rows the level counts.
         counted_table: String,
-    },
-    /// A `levels` entry counts the rows of a table that shares its row element
-    /// with another table, so an `index_of:` link naming that element could
-    /// resolve to either table's count.
-    LevelCountsSharedRowElement {
-        /// The table declaring the level.
-        table: String,
-        /// The level, as written in `levels`.
-        level: String,
-        /// The table whose rows the level counts.
-        counted_table: String,
-        /// The other table with the same row element.
-        other_table: String,
     },
     /// A field lies inside the `xml_path` of a table nested within its own,
     /// which captures every value there, so the field is never filled.
@@ -234,17 +227,6 @@ impl fmt::Display for Unconverted {
                 "table '{table}': level '{level}' counts the rows of '{counted_table}', which do \
                  not contain this table's rows, so no `index_of:` link can reproduce it"
             ),
-            Unconverted::LevelCountsSharedRowElement {
-                table,
-                level,
-                counted_table,
-                other_table,
-            } => write!(
-                f,
-                "table '{table}': level '{level}' counts the rows of '{counted_table}', which \
-                 shares its row element with '{other_table}', so an `index_of:` link could not \
-                 tell the two apart"
-            ),
             Unconverted::FieldInsideNestedTable {
                 table,
                 field,
@@ -273,20 +255,21 @@ impl Config {
     /// Converts this configuration to format version 2 without changing what
     /// it produces.
     ///
-    /// Every document parses to the same tables, columns, values and errors
-    /// under [`Conversion::config`] as under `self`. Parts that version 2 can
-    /// only spell in a way that changes the output are left as they were and
-    /// listed in [`Conversion::unconverted`]; the converted config declares
-    /// `version: 2` only when that list is empty. A config that already
+    /// The converted config always declares `version: 2`. Parts that version 2
+    /// can only spell in a way that changes the output are left as they were
+    /// and listed in [`Conversion::unconverted`]. When that list is empty, every
+    /// document parses to the same tables, columns, values and errors under
+    /// [`Conversion::config`] as under `self`. Otherwise the converted config
+    /// does not load until those parts are resolved. A config that already
     /// declares `version: 2` is returned unchanged.
     ///
     /// See the [`migrate`](crate::migrate) module for the rewrites.
     ///
     /// # Errors
     ///
-    /// Returns an error if this configuration is not valid. The converted
-    /// configuration is validated as well, so a returned [`Conversion`] always
-    /// loads.
+    /// Returns an error if this configuration is not valid. When nothing is
+    /// left unconverted the converted configuration is validated as well, so
+    /// it always loads.
     ///
     /// # Example
     ///
@@ -338,14 +321,14 @@ impl Config {
         state_utf8_policies(&mut config);
         report_misplaced_fields(&config, &mut unconverted);
 
+        config.version = Some(2);
         if unconverted.is_empty() {
             // Every rewrite was taken, so nothing version 2 rejects is left. A
             // step that is left anyway is a converter bug, which validation
-            // below then reports rather than returning a config that lies.
+            // then reports rather than returning a config that lies.
             debug_assert_eq!(config.version_2_steps(), Vec::new());
-            config.version = Some(2);
+            config.validate()?;
         }
-        config.validate()?;
         Ok(Conversion {
             config,
             unconverted,
@@ -376,11 +359,6 @@ fn declare_rows(original: &Config, config: &mut Config, unconverted: &mut Vec<Un
 /// Renames every field's `xml_path:` to `path:`.
 fn rename_field_paths(config: &mut Config) {
     for field in config.tables.iter_mut().flat_map(|t| t.fields.iter_mut()) {
-        // Left spelled `xml_path:` when it has a `.` or `..` segment, which a
-        // `path:` may not have in any version; it is reported instead.
-        if field.xml_path.as_deref().is_some_and(has_dot_segment) {
-            continue;
-        }
         if let Some(xml_path) = field.xml_path.take() {
             // `xml_path` ignores a leading slash, but `path` reads it as the
             // difference between absolute and relative, so it is written in.
@@ -400,21 +378,20 @@ fn replace_levels(original: &Config, config: &mut Config, unconverted: &mut Vec<
         .map(TableConfig::link_scope_path)
         .collect();
     for idx in 0..config.tables.len() {
-        // A table whose row could not be declared keeps its `levels` too:
-        // whether they convert depends on the row element the author chooses,
-        // and reporting them now would describe a problem that choice may
-        // remove. Converting again after choosing takes care of them.
         let table = &config.tables[idx];
-        if table.levels.is_empty() || table.row.is_none() {
+        if table.levels.is_empty() {
             continue;
         }
+        // Levels counting a table whose row could not be declared stay as they
+        // are: the links that replace them name the row element the author
+        // chooses, and reporting them now would describe a problem that choice
+        // may remove. The table's own row is one of them, unless the table is
+        // the root, which counts nothing of its own.
         let counted = counted_tables(original, idx);
-        // An `index_of:` may not have a `.` or `..` segment in any version, so
-        // a level counting a table whose path has one stays a level; that path
-        // is reported on its own.
-        if counted
-            .iter()
-            .any(|&counted_idx| has_dot_segment(&scopes[counted_idx]))
+        if table.row.is_none()
+            || counted
+                .iter()
+                .any(|&counted_idx| config.tables[counted_idx].row.is_none())
         {
             continue;
         }
@@ -445,20 +422,15 @@ fn link_nested_tables(config: &mut Config) {
     }
 }
 
-/// States the version 1 value handling on each `Utf8` field that relied on it.
+/// States the version 1 value handling on each `Utf8` field, which a version 1
+/// config cannot state for itself.
 fn state_utf8_policies(config: &mut Config) {
-    let defaults = config.defaults.clone().unwrap_or_default();
     for field in config.tables.iter_mut().flat_map(|t| t.fields.iter_mut()) {
         if field.data_type != DType::Utf8 {
             continue;
         }
-        // Only what neither the field nor `defaults:` states: a stated policy
-        // already means the same under either version.
-        let stated = field.policies.over(&defaults);
-        if stated.trim.is_none() {
-            field.policies.trim = Some(false);
-        }
-        if !field.nullable && stated.on_missing.is_none() {
+        field.policies.trim = Some(false);
+        if !field.nullable {
             field.policies.on_missing = Some(OnMissing::Empty);
         }
     }
@@ -546,26 +518,16 @@ fn level_links(
         .map(|(level, &counted_idx)| {
             let counted_scope = &scopes[counted_idx];
             // A table's own row element always names its own count. Another
-            // table's must contain this table's rows, and be the only table
-            // with that row element, for `index_of:` to resolve to its count.
-            if counted_idx != idx {
-                if !path_is_strictly_under(&scopes[idx], counted_scope) {
-                    return Err(Unconverted::LevelCountsNonEnclosingTable {
-                        table: table.name.clone(),
-                        level: level.clone(),
-                        counted_table: config.tables[counted_idx].name.clone(),
-                    });
-                }
-                if let Some(other) = (0..config.tables.len()).find(|&other| {
-                    other != counted_idx && paths_equal(&scopes[other], counted_scope)
-                }) {
-                    return Err(Unconverted::LevelCountsSharedRowElement {
-                        table: table.name.clone(),
-                        level: level.clone(),
-                        counted_table: config.tables[counted_idx].name.clone(),
-                        other_table: config.tables[other].name.clone(),
-                    });
-                }
+            // table's must contain this table's rows for `index_of:` to accept
+            // it. A table whose rows end at one element always does, unless this
+            // table's path reaches it through a `.` segment, which matches no
+            // element and so does not make it a child that ends those rows.
+            if counted_idx != idx && !path_is_strictly_under(&scopes[idx], counted_scope) {
+                return Err(Unconverted::LevelCountsNonEnclosingTable {
+                    table: table.name.clone(),
+                    level: level.clone(),
+                    counted_table: config.tables[counted_idx].name.clone(),
+                });
             }
             Ok(Link {
                 parent: None,
@@ -604,7 +566,8 @@ mod tests {
     }
 
     /// The migration guide's version 1 example: every part converts except the
-    /// header, whose rows end at two child elements.
+    /// header, whose rows end at two child elements. The result declares
+    /// version 2 all the same, and does not load until the header has a row.
     #[test]
     fn converts_everything_but_a_table_with_split_rows() {
         let config = config_from_yaml!(
@@ -639,7 +602,13 @@ mod tests {
             }]
         );
         let converted = &conversion.config;
-        assert_eq!(converted.version, None);
+        assert_eq!(converted.version, Some(2));
+        assert!(matches!(
+            converted.validate(),
+            Err(crate::Error::InvalidConfig {
+                reason: crate::errors::ConfigIssue::MissingRow { ref table }
+            }) if table == "header"
+        ));
         let [header, stations, readings] = converted.tables.as_slice() else {
             panic!("expected three tables");
         };
@@ -729,8 +698,7 @@ mod tests {
     }
 
     /// Version 2 would trim `Utf8` values and reject a missing non-nullable
-    /// one, so each `Utf8` field states the version 1 behavior it relied on,
-    /// and keeps whatever it already stated.
+    /// one, so each `Utf8` field states the version 1 behavior instead.
     #[test]
     fn utf8_fields_state_the_version_1_value_handling() {
         let config = config_from_yaml!(
@@ -738,12 +706,11 @@ mod tests {
             tables:
               - name: items
                 xml_path: /data
-                row: item
+                levels: []
                 fields:
-                  - {name: required, path: required, data_type: Utf8}
-                  - {name: optional, path: optional, data_type: Utf8, nullable: true}
-                  - {name: trimmed, path: trimmed, data_type: Utf8, trim: true}
-                  - {name: count, path: count, data_type: Int32}
+                  - {name: required, xml_path: /data/item/required, data_type: Utf8}
+                  - {name: optional, xml_path: /data/item/optional, data_type: Utf8, nullable: true}
+                  - {name: count, xml_path: /data/item/count, data_type: Int32}
             "#
         );
         let converted = config.to_version_2().unwrap().config;
@@ -757,29 +724,9 @@ mod tests {
             vec![
                 (Some(false), Some(OnMissing::Empty)),
                 (Some(false), None),
-                (Some(true), Some(OnMissing::Empty)),
                 (None, None),
             ]
         );
-    }
-
-    #[test]
-    fn a_policy_stated_in_defaults_is_not_repeated_on_fields() {
-        let config = config_from_yaml!(
-            r#"
-            defaults:
-              trim: true
-            tables:
-              - name: items
-                xml_path: /data
-                row: item
-                fields:
-                  - {name: s, path: s, data_type: Utf8}
-            "#
-        );
-        let field = &config.to_version_2().unwrap().config.tables[0].fields[0];
-        assert_eq!(field.policies.trim, None);
-        assert_eq!(field.policies.on_missing, Some(OnMissing::Empty));
     }
 
     #[test]
@@ -804,11 +751,12 @@ mod tests {
             }]
         );
         assert_eq!(conversion.config.tables[0].levels, ["data", "item"]);
-        assert_eq!(conversion.config.version, None);
+        assert_eq!(conversion.config.version, Some(2));
     }
 
-    /// Only a config that already declares `row:` can get here: a level whose
-    /// counted table's rows sit beside this table's rather than around them.
+    /// `inner` reaches `outer` through a `.` segment, so its element is not a
+    /// child that ends `outer`'s rows, and `outer`'s row element does not
+    /// contain `inner`'s rows.
     #[test]
     fn a_level_counting_a_table_that_does_not_contain_the_rows_is_left_and_reported() {
         let config = config_from_yaml!(
@@ -816,24 +764,27 @@ mod tests {
             tables:
               - name: outer
                 xml_path: /r
-                row: a
+                levels: []
                 fields:
-                  - {name: x, path: x, data_type: Int32}
+                  - {name: x, xml_path: /r/a/x, data_type: Int32}
               - name: inner
-                xml_path: /r/b
+                xml_path: /r/./b
                 levels: [outer, inner]
                 fields:
-                  - {name: v, xml_path: /r/b/item/v, data_type: Int32}
+                  - {name: v, xml_path: /r/./b/item/v, data_type: Int32}
             "#
         );
         let conversion = config.to_version_2().unwrap();
-        assert_eq!(
-            conversion.unconverted,
-            vec![Unconverted::LevelCountsNonEnclosingTable {
-                table: "inner".to_string(),
-                level: "outer".to_string(),
-                counted_table: "outer".to_string(),
-            }]
+        assert!(
+            conversion
+                .unconverted
+                .contains(&Unconverted::LevelCountsNonEnclosingTable {
+                    table: "inner".to_string(),
+                    level: "outer".to_string(),
+                    counted_table: "outer".to_string(),
+                }),
+            "{:?}",
+            conversion.unconverted
         );
         assert_eq!(conversion.config.tables[1].levels, ["outer", "inner"]);
     }
@@ -861,6 +812,37 @@ mod tests {
         ));
         assert_eq!(conversion.config.tables[0].levels, ["data"]);
         assert_eq!(conversion.config.tables[0].links, None);
+    }
+
+    /// The same holds for a table whose levels count that table's rows: the
+    /// `index_of:` link would name the row element the author has not chosen.
+    #[test]
+    fn levels_counting_a_table_whose_row_is_left_stay_as_they_are() {
+        let config = config_from_yaml!(
+            r#"
+            tables:
+              - name: groups
+                xml_path: /data
+                levels: []
+                fields:
+                  - {name: label, xml_path: /data/label, data_type: Int32, nullable: true}
+                  - {name: n, xml_path: /data/group/@n, data_type: Int32, nullable: true}
+              - name: items
+                xml_path: /data/group/items
+                levels: [group, item]
+                fields:
+                  - {name: v, xml_path: /data/group/items/item/v, data_type: Int32}
+            "#
+        );
+        let conversion = config.to_version_2().unwrap();
+        assert!(matches!(
+            conversion.unconverted.as_slice(),
+            [Unconverted::RowNotDeclarable { table, .. }] if table == "groups"
+        ));
+        let items = &conversion.config.tables[1];
+        assert_eq!(items.row.as_deref(), Some("item"));
+        assert_eq!(items.levels, ["group", "item"]);
+        assert_eq!(items.links, None);
     }
 
     /// Version 2 rejects a field that a nested table captures, so declaring it
@@ -894,7 +876,7 @@ mod tests {
             }]
         );
         let converted = &conversion.config;
-        assert_eq!(converted.version, None);
+        assert_eq!(converted.version, Some(2));
         assert_eq!(converted.tables[0].fields.len(), 2);
         assert_eq!(converted.tables[0].row.as_deref(), Some("a"));
         assert_eq!(converted.tables[1].links, Some(vec![]));
@@ -927,14 +909,13 @@ mod tests {
             }]
         );
         let items = &conversion.config.tables[0];
-        assert_eq!(conversion.config.version, None);
+        assert_eq!(conversion.config.version, Some(2));
         assert_eq!(items.row.as_deref(), Some("item"));
         assert_eq!(items.fields[0].path.as_deref(), Some("/data/@id"));
     }
 
     /// Removing an unknown key would change nothing, but correcting a
-    /// misspelling can, so the key is reported and the config keeps its
-    /// version. Everything else still converts.
+    /// misspelling can, so the key is reported. Everything else still converts.
     #[test]
     fn an_unknown_key_is_reported_and_the_rest_converts() {
         let config = config_from_yaml!(
@@ -956,15 +937,13 @@ mod tests {
             }]
         );
         let items = &conversion.config.tables[0];
-        assert_eq!(conversion.config.version, None);
+        assert_eq!(conversion.config.version, Some(2));
         assert_eq!(items.row.as_deref(), Some("item"));
         assert_eq!(items.fields[0].path.as_deref(), Some("/data/item/v"));
     }
 
-    /// A `path:` may not have a `.` or `..` segment in any version, so a field
-    /// whose `xml_path` has one keeps that spelling and is reported, while the
-    /// rest of the config converts. A level counting a table on such a path
-    /// stays a level, rather than become an `index_of:` that would not load.
+    /// A path with a `.` or `..` segment is reported and left as it is written,
+    /// under the version 2 key, while the rest of the config converts.
     #[test]
     fn a_path_with_a_dot_segment_is_left_and_reported() {
         let config = config_from_yaml!(
@@ -1006,9 +985,13 @@ mod tests {
         };
         assert_eq!(items.row.as_deref(), Some("item"));
         assert_eq!(items.fields[0].path.as_deref(), Some("/data/item/v"));
-        assert_eq!(items.fields[1].xml_path.as_deref(), Some("/data/./item/w"));
-        assert_eq!(dotted.levels, ["group"]);
-        assert_eq!(conversion.config.version, None);
+        assert_eq!(items.fields[1].path.as_deref(), Some("/data/./item/w"));
+        assert!(dotted.levels.is_empty());
+        assert_eq!(
+            dotted.links,
+            Some(vec![index_of("/other/./group/entry", "<group>")])
+        );
+        assert_eq!(conversion.config.version, Some(2));
     }
 
     #[test]
