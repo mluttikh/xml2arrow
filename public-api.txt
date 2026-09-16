@@ -183,6 +183,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::ConfigBuilde
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::ConfigBuilder
 #[non_exhaustive] pub struct xml2arrow::config::FieldConfig
 pub xml2arrow::config::FieldConfig::data_type: xml2arrow::config::DType
+pub xml2arrow::config::FieldConfig::metadata: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>
 pub xml2arrow::config::FieldConfig::name: alloc::string::String
 pub xml2arrow::config::FieldConfig::nullable: bool
 pub xml2arrow::config::FieldConfig::offset: core::option::Option<f64>
@@ -213,6 +214,7 @@ impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::FieldConfig
 pub struct xml2arrow::config::FieldConfigBuilder
 impl xml2arrow::config::FieldConfigBuilder
 pub fn xml2arrow::config::FieldConfigBuilder::build(self) -> xml2arrow::errors::Result<xml2arrow::config::FieldConfig>
+pub fn xml2arrow::config::FieldConfigBuilder::metadata(self, impl core::iter::traits::collect::IntoIterator<Item = (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>)>) -> Self
 pub fn xml2arrow::config::FieldConfigBuilder::new(&str, &str, xml2arrow::config::DType) -> Self
 pub fn xml2arrow::config::FieldConfigBuilder::nullable(self, bool) -> Self
 pub fn xml2arrow::config::FieldConfigBuilder::offset(self, f64) -> Self
@@ -287,6 +289,7 @@ impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::ParserOptions
 pub xml2arrow::config::TableConfig::fields: alloc::vec::Vec<xml2arrow::config::FieldConfig>
 pub xml2arrow::config::TableConfig::levels: alloc::vec::Vec<alloc::string::String>
 pub xml2arrow::config::TableConfig::links: core::option::Option<alloc::vec::Vec<xml2arrow::config::Link>>
+pub xml2arrow::config::TableConfig::metadata: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>
 pub xml2arrow::config::TableConfig::name: alloc::string::String
 pub xml2arrow::config::TableConfig::row: core::option::Option<alloc::string::String>
 pub xml2arrow::config::TableConfig::row_id: core::option::Option<xml2arrow::config::RowId>
@@ -320,6 +323,7 @@ pub fn xml2arrow::config::TableConfigBuilder::fields(self, impl core::iter::trai
 pub fn xml2arrow::config::TableConfigBuilder::level(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn xml2arrow::config::TableConfigBuilder::levels(self, impl core::iter::traits::collect::IntoIterator<Item = impl core::convert::Into<alloc::string::String>>) -> Self
 pub fn xml2arrow::config::TableConfigBuilder::links(self, impl core::iter::traits::collect::IntoIterator<Item = xml2arrow::config::Link>) -> Self
+pub fn xml2arrow::config::TableConfigBuilder::metadata(self, impl core::iter::traits::collect::IntoIterator<Item = (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>)>) -> Self
 pub fn xml2arrow::config::TableConfigBuilder::row(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn xml2arrow::config::TableConfigBuilder::row_id(self, xml2arrow::config::RowId) -> Self
 impl core::fmt::Debug for xml2arrow::config::TableConfigBuilder
@@ -434,6 +438,10 @@ pub xml2arrow::errors::ConfigIssue::RelativeFieldPathWithoutRow
 pub xml2arrow::errors::ConfigIssue::RelativeFieldPathWithoutRow::field: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::RelativeFieldPathWithoutRow::path: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::RelativeFieldPathWithoutRow::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::ReservedMetadataKey
+pub xml2arrow::errors::ConfigIssue::ReservedMetadataKey::field: core::option::Option<alloc::string::String>
+pub xml2arrow::errors::ConfigIssue::ReservedMetadataKey::key: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::ReservedMetadataKey::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::RowIsRootTable
 pub xml2arrow::errors::ConfigIssue::RowIsRootTable::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::RowPathCrossesTable
@@ -1134,6 +1142,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::migrate::Conversion
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::migrate::Conversion
 #[non_exhaustive] pub struct xml2arrow::FieldConfig
 pub xml2arrow::FieldConfig::data_type: xml2arrow::config::DType
+pub xml2arrow::FieldConfig::metadata: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>
 pub xml2arrow::FieldConfig::name: alloc::string::String
 pub xml2arrow::FieldConfig::nullable: bool
 pub xml2arrow::FieldConfig::offset: core::option::Option<f64>
@@ -1164,6 +1173,7 @@ impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::FieldConfig
 pub struct xml2arrow::FieldConfigBuilder
 impl xml2arrow::config::FieldConfigBuilder
 pub fn xml2arrow::config::FieldConfigBuilder::build(self) -> xml2arrow::errors::Result<xml2arrow::config::FieldConfig>
+pub fn xml2arrow::config::FieldConfigBuilder::metadata(self, impl core::iter::traits::collect::IntoIterator<Item = (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>)>) -> Self
 pub fn xml2arrow::config::FieldConfigBuilder::new(&str, &str, xml2arrow::config::DType) -> Self
 pub fn xml2arrow::config::FieldConfigBuilder::nullable(self, bool) -> Self
 pub fn xml2arrow::config::FieldConfigBuilder::offset(self, f64) -> Self
@@ -1310,6 +1320,7 @@ impl !core::panic::unwind_safe::UnwindSafe for xml2arrow::TableBatch
 pub xml2arrow::TableConfig::fields: alloc::vec::Vec<xml2arrow::config::FieldConfig>
 pub xml2arrow::TableConfig::levels: alloc::vec::Vec<alloc::string::String>
 pub xml2arrow::TableConfig::links: core::option::Option<alloc::vec::Vec<xml2arrow::config::Link>>
+pub xml2arrow::TableConfig::metadata: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>
 pub xml2arrow::TableConfig::name: alloc::string::String
 pub xml2arrow::TableConfig::row: core::option::Option<alloc::string::String>
 pub xml2arrow::TableConfig::row_id: core::option::Option<xml2arrow::config::RowId>
@@ -1343,6 +1354,7 @@ pub fn xml2arrow::config::TableConfigBuilder::fields(self, impl core::iter::trai
 pub fn xml2arrow::config::TableConfigBuilder::level(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn xml2arrow::config::TableConfigBuilder::levels(self, impl core::iter::traits::collect::IntoIterator<Item = impl core::convert::Into<alloc::string::String>>) -> Self
 pub fn xml2arrow::config::TableConfigBuilder::links(self, impl core::iter::traits::collect::IntoIterator<Item = xml2arrow::config::Link>) -> Self
+pub fn xml2arrow::config::TableConfigBuilder::metadata(self, impl core::iter::traits::collect::IntoIterator<Item = (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>)>) -> Self
 pub fn xml2arrow::config::TableConfigBuilder::row(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn xml2arrow::config::TableConfigBuilder::row_id(self, xml2arrow::config::RowId) -> Self
 impl core::fmt::Debug for xml2arrow::config::TableConfigBuilder

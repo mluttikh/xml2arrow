@@ -18,6 +18,7 @@ The same YAML configures the Rust crate and the
 - [Fields](#fields)
 - [Values: missing, invalid and repeated](#values-missing-invalid-and-repeated)
 - [Linking nested tables](#linking-nested-tables)
+- [Metadata](#metadata)
 - [Parser options](#parser-options)
 - [Checking a config](#checking-a-config)
 - [Complete schema](#complete-schema)
@@ -104,6 +105,7 @@ names the table or field. Any version other than `1` or `2` is rejected too.
 | `row` | yes | The element that makes one row. See [`row`](#row). |
 | `links` | when nested | How the table relates to the table it sits inside. See [Linking nested tables](#linking-nested-tables). |
 | `row_id` | no | This table's own key column. See [Column names](#column-names). |
+| `metadata` | no | Your own key-value pairs, copied into the table's Arrow schema. See [Metadata](#metadata). |
 | `fields` | yes | The columns. See [Fields](#fields). |
 
 A table with an empty `fields: []` list produces no output.
@@ -142,6 +144,7 @@ These are checked when the config is loaded:
 | `scale` | no | Multiply the value by this number. `Float32` and `Float64` only. |
 | `offset` | no | Add this number after scaling: `value * scale + offset`. `Float32` and `Float64` only. |
 | `trim`, `on_missing`, `on_invalid`, `on_repeat`, `null_values` | no | Value policies. See [Values](#values-missing-invalid-and-repeated). |
+| `metadata` | no | Your own key-value pairs, copied into the column's Arrow field. See [Metadata](#metadata). |
 
 ### `path`
 
@@ -363,6 +366,35 @@ either. Set both names when that matters downstream. Two columns with the same
 name, from two links or a link and a field, are rejected when the config is
 loaded.
 
+## Metadata
+
+A table and a field can each carry `metadata:`, a mapping of your own keys and
+values, such as a source, a unit or a description. The parser does nothing with
+it except copy it into the output: a table's goes into its Arrow schema, and a
+field's into its column's Arrow field. From there it travels with the data, into
+a Parquet file written from the batches or a pyarrow table.
+
+```yaml
+  - name: readings
+    xml_path: /report/stations/station/readings
+    row: reading
+    metadata: {source: station export, revision: 3}
+    fields:
+      - name: value
+        path: value
+        data_type: Float64
+        metadata: {unit: hPa, description: Sea-level pressure}
+```
+
+- Keys and values are strings, taken exactly as written: `revision: 1.50` is the
+  string `1.50`, not a number. A list or a mapping as a value is rejected when
+  the config is loaded.
+- Keys that begin with `ARROW:` are rejected. The Arrow format reserves them, and
+  some, such as `ARROW:extension:name`, change how readers interpret a column.
+- The key columns that `parent:` links and `row_id:` add carry no metadata.
+- Metadata is part of the schema. `parser.schema()` and every batch include it,
+  and two schemas that differ only in their metadata are not equal.
+
 ## Parser options
 
 | Option | Default | Effect |
@@ -422,6 +454,7 @@ tables:
       - index_of: <absolute path>   # UInt32 position; this or an enclosing table's row element
         name: <column>              # default <element>_idx
     row_id: <column|true|false>     # default: _id when a parent: link refers to this table
+    metadata: {<key>: <value>, ...} # copied into the table's Arrow schema
     fields:
       - name: <column>
         path: <path>                # relative to the row element, or absolute
@@ -434,4 +467,5 @@ tables:
         on_invalid: <error|null>
         on_repeat: <error|first|last>
         null_values: [<string>, ...]
+        metadata: {<key>: <value>, ...} # copied into the column's Arrow field
 ```

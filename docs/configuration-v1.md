@@ -211,7 +211,7 @@ value (`ImplicitEmptyString`).
 ## Version 2 keys in a version 1 config
 
 A version 1 config may use any key from version 2: `row`, `path`, `links`,
-`row_id`, `defaults` and the value policies. Each works as described in the
+`row_id`, `defaults`, `metadata` and the value policies. Each works as described in the
 [reference](configuration.md), with one difference: a value policy that neither
 the field nor `defaults` sets keeps the version 1 behavior from [Values](#values).
 

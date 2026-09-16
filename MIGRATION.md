@@ -262,6 +262,10 @@ Nothing below requires action.
 - **`Config::to_version_2`** converts a configuration to format version 2
   without changing what it produces, and returns what it could not convert as
   `Unconverted` entries.
+- **`metadata:` on tables and fields**, your own key-value pairs, copied into
+  the Arrow schema and field metadata of every batch, and so into Parquet files
+  and pyarrow tables. Available in both configuration versions; keys beginning
+  `ARROW:` are rejected, as Arrow reserves them.
 - **`From<ConfigIssue> for Error`**, so a tool that builds or checks configs
   can turn an issue into the error the library would have raised, with `?` or
   `.into()`, instead of writing `Error::InvalidConfig { reason }` by hand.
