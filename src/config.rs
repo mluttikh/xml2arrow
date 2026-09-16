@@ -325,11 +325,13 @@ pub struct Config {
     /// engine; it says "this config is fully migrated", and validation holds it
     /// to that: every table declares [`TableConfig::row`], no table uses
     /// `levels`, every field uses `path` rather than the deprecated
-    /// `xml_path`, and every table nested inside another declares
-    /// [`TableConfig::links`] — `links: []` when it deliberately has none. A
-    /// config that has not finished migrating is rejected at load
-    /// with a message naming what is left, rather than parsing under semantics
-    /// its author did not intend.
+    /// `xml_path`, every table nested inside another declares
+    /// [`TableConfig::links`] — `links: []` when it deliberately has none —
+    /// and no field lies inside a table nested within its own, where the
+    /// nested table would capture every value it could receive. A config that
+    /// has not finished migrating is rejected at load with a message naming
+    /// what is left, rather than parsing under semantics its author did not
+    /// intend.
     ///
     /// In exchange it opts into the value defaults 1.0 will make mandatory,
     /// a full release cycle early: `trim` on for every type, and a missing
@@ -378,9 +380,10 @@ impl Config {
     /// - Scale/offset may only be used with Float32 and Float64 fields.
     /// - When [`Config::version`] declares `2`, the config must be fully
     ///   migrated: every table declares `row:`, none uses `levels:`, every
-    ///   field uses `path:` rather than `xml_path:`, and a table nested inside
-    ///   another declares `links:`. These are checked last, so a config that is
-    ///   both broken and unmigrated reports the breakage first.
+    ///   field uses `path:` rather than `xml_path:`, a table nested inside
+    ///   another declares `links:`, and no field lies inside a table nested
+    ///   within its own. These are checked last, so a config that is both
+    ///   broken and unmigrated reports the breakage first.
     ///
     /// # Errors
     ///
@@ -804,6 +807,17 @@ impl Config {
                         field: field.name.clone(),
                     });
                 }
+                // Version 1 cannot reject this: the config loads today, and the
+                // column is merely never filled. Version 2 has no such config
+                // to protect, so an empty column is an error there.
+                if let Some((field_path, nested)) = self.nested_table_capturing(table, field) {
+                    steps.push(MigrationStep::MoveFieldToNestedTable {
+                        table: table.name.clone(),
+                        field: field.name.clone(),
+                        field_path,
+                        nested_table: nested.name.clone(),
+                    });
+                }
             }
             // A table with no ancestor has nothing to relate to, so `links` is
             // rightly absent. One nested inside another must say how it
@@ -831,6 +845,43 @@ impl Config {
             }
         }
         steps
+    }
+
+    /// The table that captures `field`'s values instead of `table`, with the
+    /// field's resolved path, or `None` when `table` receives them.
+    ///
+    /// A value is delivered to the fields of the innermost *open* table only,
+    /// and a table is open for as long as its `xml_path` element is. So when
+    /// another table's `xml_path` lies inside `table`'s and encloses the
+    /// field's location, that table is open whenever a value there arrives,
+    /// and the field never receives one: its column is all null, `""`, or a
+    /// `MissingRequiredField` error, however the document is written. The
+    /// innermost such table is the one that captures the value, so it is the
+    /// one named.
+    ///
+    /// Compared by `xml_path` rather than by row element, because `xml_path`
+    /// is what opens and closes a table's scope. An attribute of the nested
+    /// table's own element is inside it too: the table opens before its
+    /// element's attributes are read.
+    ///
+    /// Resolves the field's path only when `table` has a table nested inside
+    /// it, so a config with no nesting pays for nothing but the table scan.
+    pub(crate) fn nested_table_capturing(
+        &self,
+        table: &TableConfig,
+        field: &FieldConfig,
+    ) -> Option<(String, &TableConfig)> {
+        let mut nested = self
+            .tables
+            .iter()
+            .filter(|other| path_is_strictly_under(&other.xml_path, &table.xml_path))
+            .peekable();
+        nested.peek()?;
+        let field_path = resolve_field_path(table, field)?;
+        nested
+            .filter(|other| path_is_under(&field_path, &other.xml_path))
+            .max_by_key(|other| path_segments(&other.xml_path).count())
+            .map(|other| (field_path.into_owned(), other))
     }
 
     /// The innermost other table whose scope contains `table`, if any.
@@ -3516,6 +3567,165 @@ tables:
                 .table(sibling)
                 .build();
             assert!(config.is_ok(), "{config:?}");
+        }
+
+        /// `outer` has one row per `<a>`, with a field at `path`; `inner` is
+        /// nested inside it at `/r/a/bs`.
+        fn outer_and_inner(path: &str) -> Result<Config> {
+            let outer = TableConfig::builder("outer", "/r")
+                .row("a")
+                .field(
+                    FieldConfigBuilder::new("f", path, DType::Int32)
+                        .nullable(true)
+                        .build()
+                        .unwrap(),
+                )
+                .build();
+            Config::builder()
+                .version(2)
+                .table(outer)
+                .table(nested_table("inner", "/r/a/bs", "b"))
+                .build()
+        }
+
+        fn nested_table(name: &str, xml_path: &str, row: &str) -> TableConfig {
+            TableConfig::builder(name, xml_path)
+                .row(row)
+                .links(vec![])
+                .field(
+                    FieldConfigBuilder::new("v", "v", DType::Int32)
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+        }
+
+        /// A nested table captures every value inside its `xml_path`, so a
+        /// field of the enclosing table located there is never filled. That
+        /// includes an attribute of the nested table's own element, which is
+        /// read after that table opens, and the element's own text.
+        #[rstest]
+        #[case::attribute_of_the_nested_element("bs/@count")]
+        #[case::text_of_the_nested_element("bs")]
+        #[case::element_inside_the_nested_table("bs/b/v")]
+        fn a_field_inside_a_nested_table_is_rejected(#[case] path: &str) {
+            let config = outer_and_inner(path);
+            let Err(Error::InvalidConfig {
+                reason:
+                    ConfigIssue::FieldInsideNestedTableInVersion2 {
+                        table,
+                        field,
+                        field_path,
+                        nested_table,
+                    },
+            }) = &config
+            else {
+                panic!("expected FieldInsideNestedTableInVersion2, got {config:?}");
+            };
+            assert_eq!(
+                (table.as_str(), field.as_str(), nested_table.as_str()),
+                ("outer", "f", "inner")
+            );
+            assert_eq!(field_path, &format!("/r/a/{path}"));
+        }
+
+        /// The boundary is compared segment by segment: an element whose name
+        /// only starts with the nested table's element name is outside it.
+        #[rstest]
+        #[case::sibling_element("name")]
+        #[case::shared_name_prefix("bs_total")]
+        fn a_field_beside_a_nested_table_is_accepted(#[case] path: &str) {
+            let config = outer_and_inner(path);
+            assert!(config.is_ok(), "{config:?}");
+        }
+
+        /// The innermost open table is the one that captures a value, so it is
+        /// the table the error sends the field to.
+        #[test]
+        fn the_innermost_capturing_table_is_named() {
+            let outer = TableConfig::builder("outer", "/r")
+                .row("a")
+                .field(
+                    FieldConfigBuilder::new("f", "bs/b/cs/c/v", DType::Int32)
+                        .build()
+                        .unwrap(),
+                )
+                .build();
+            let err = Config::builder()
+                .version(2)
+                .table(outer)
+                .table(nested_table("middle", "/r/a/bs", "b"))
+                .table(nested_table("innermost", "/r/a/bs/b/cs", "c"))
+                .build()
+                .unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    Error::InvalidConfig {
+                        reason: ConfigIssue::FieldInsideNestedTableInVersion2 { nested_table, .. }
+                    } if nested_table == "innermost"
+                ),
+                "{err:?}"
+            );
+        }
+
+        /// A root table is open for the whole document, and every other table
+        /// is nested inside it.
+        #[test]
+        fn a_root_table_field_inside_a_nested_table_is_rejected() {
+            let doc = TableConfig::builder("doc", "/")
+                .row("r")
+                .field(
+                    FieldConfigBuilder::new("f", "/r/items/total", DType::Int32)
+                        .build()
+                        .unwrap(),
+                )
+                .build();
+            let config = Config::builder()
+                .version(2)
+                .table(doc)
+                .table(nested_table("items", "/r/items", "i"))
+                .build();
+            assert!(
+                matches!(
+                    config,
+                    Err(Error::InvalidConfig {
+                        reason: ConfigIssue::FieldInsideNestedTableInVersion2 { .. }
+                    })
+                ),
+                "{config:?}"
+            );
+        }
+
+        /// Two tables on one element: the one whose `xml_path` it is captures
+        /// everything inside it, so the one whose row it is can hold no field
+        /// there.
+        #[test]
+        fn a_table_rowed_at_another_tables_xml_path_cannot_read_inside_it() {
+            let details = TableConfig::builder("details", "/report/stations/station")
+                .row(".")
+                .links(vec![])
+                .field(
+                    FieldConfigBuilder::new("name", "name", DType::Utf8)
+                        .build()
+                        .unwrap(),
+                )
+                .build();
+            let err = Config::builder()
+                .version(2)
+                .table(migrated_root())
+                .table(details)
+                .build()
+                .unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    Error::InvalidConfig {
+                        reason: ConfigIssue::FieldInsideNestedTableInVersion2 { table, nested_table, .. }
+                    } if table == "stations" && nested_table == "details"
+                ),
+                "{err:?}"
+            );
         }
 
         /// The key survives a YAML round trip, and stays absent when unset —

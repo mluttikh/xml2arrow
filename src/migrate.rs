@@ -25,6 +25,11 @@
 //!    is not nullable, `on_missing: empty`, so declaring version 2 changes no
 //!    value.
 //!
+//! One part is never rewritten: a field inside the `xml_path` of a table nested
+//! within its own. That table captures every value there, so the field is never
+//! filled, and version 2 rejects it. Moving the field to the nested table or
+//! removing it both change the columns, so it is reported instead.
+//!
 //! When nothing is left over, the converted config declares `version: 2`.
 //! Otherwise it keeps the original's version, with every other step already
 //! taken, so what remains to do is exactly [`Conversion::unconverted`].
@@ -109,6 +114,20 @@ pub enum Unconverted {
         /// The other table with the same row element.
         other_table: String,
     },
+    /// A field lies inside the `xml_path` of a table nested within its own,
+    /// which captures every value there, so the field is never filled.
+    ///
+    /// Version 2 rejects the field, and both ways to satisfy it change the
+    /// columns: declaring it on the nested table moves the column, and removing
+    /// it drops the column.
+    FieldInsideNestedTable {
+        /// The table the field is declared on.
+        table: String,
+        /// The field that is never filled.
+        field: String,
+        /// The nested table that captures values there.
+        nested_table: String,
+    },
 }
 
 impl fmt::Display for Unconverted {
@@ -164,6 +183,16 @@ impl fmt::Display for Unconverted {
                 "table '{table}': level '{level}' counts the rows of '{counted_table}', which \
                  shares its row element with '{other_table}', so an `index_of:` link could not \
                  tell the two apart"
+            ),
+            Unconverted::FieldInsideNestedTable {
+                table,
+                field,
+                nested_table,
+            } => write!(
+                f,
+                "table '{table}': field '{field}' lies inside table '{nested_table}', which \
+                 captures every value there, so it is never filled; version 2 rejects it, and \
+                 moving it to '{nested_table}' or removing it changes the columns"
             ),
         }
     }
@@ -224,6 +253,7 @@ impl Config {
         replace_levels(self, &mut config, &mut unconverted);
         link_nested_tables(&mut config);
         state_utf8_policies(&mut config);
+        report_fields_inside_nested_tables(&config, &mut unconverted);
 
         if unconverted.is_empty() {
             // Every rewrite was taken, so nothing version 2 rejects is left. A
@@ -333,6 +363,25 @@ fn state_utf8_policies(config: &mut Config) {
         }
         if !field.nullable && stated.on_missing.is_none() {
             field.policies.on_missing = Some(OnMissing::Empty);
+        }
+    }
+}
+
+/// Reports each field that a nested table captures. Nothing is rewritten.
+///
+/// Read from the converted config rather than the original so that it asks
+/// exactly what version 2 validation will: the rewrites above leave every
+/// resolved path where it was, so the answer is the same either way.
+fn report_fields_inside_nested_tables(config: &Config, unconverted: &mut Vec<Unconverted>) {
+    for table in &config.tables {
+        for field in &table.fields {
+            if let Some((_, nested)) = config.nested_table_capturing(table, field) {
+                unconverted.push(Unconverted::FieldInsideNestedTable {
+                    table: table.name.clone(),
+                    field: field.name.clone(),
+                    nested_table: nested.name.clone(),
+                });
+            }
         }
     }
 }
@@ -700,6 +749,43 @@ mod tests {
         ));
         assert_eq!(conversion.config.tables[0].levels, ["data"]);
         assert_eq!(conversion.config.tables[0].links, None);
+    }
+
+    /// Version 2 rejects a field that a nested table captures, so declaring it
+    /// would make the converted config fail to load. The field is kept and
+    /// reported, and every other part is still converted.
+    #[test]
+    fn a_field_inside_a_nested_table_is_left_and_reported() {
+        let config = config_from_yaml!(
+            r#"
+            tables:
+              - name: outer
+                xml_path: /r
+                levels: []
+                fields:
+                  - {name: count, xml_path: /r/a/bs/@count, data_type: Int32, nullable: true}
+                  - {name: name, xml_path: /r/a/name, data_type: Int32, nullable: true}
+              - name: inner
+                xml_path: /r/a/bs
+                levels: []
+                fields:
+                  - {name: v, xml_path: /r/a/bs/b/v, data_type: Int32}
+            "#
+        );
+        let conversion = config.to_version_2().unwrap();
+        assert_eq!(
+            conversion.unconverted,
+            vec![Unconverted::FieldInsideNestedTable {
+                table: "outer".to_string(),
+                field: "count".to_string(),
+                nested_table: "inner".to_string(),
+            }]
+        );
+        let converted = &conversion.config;
+        assert_eq!(converted.version, None);
+        assert_eq!(converted.tables[0].fields.len(), 2);
+        assert_eq!(converted.tables[0].row.as_deref(), Some("a"));
+        assert_eq!(converted.tables[1].links, Some(vec![]));
     }
 
     #[test]

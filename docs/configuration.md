@@ -163,6 +163,30 @@ what you want: its value attaches to whichever row ends next, and
 [`Config::lint()`](#checking-a-config) reports it. Give values from elsewhere in
 the document, such as a header, a table of their own.
 
+A field cannot lie inside the `xml_path` of another table nested inside its own
+table. The nested table captures every value inside its `xml_path`, so the field
+would never receive one, and a config with such a field is rejected when it is
+loaded, with a message naming the nested table:
+
+```yaml
+  - name: stations
+    xml_path: /report/stations
+    row: station
+    fields:
+      - {name: value, path: readings/reading/value, data_type: Float64}  # rejected
+  - name: readings
+    xml_path: /report/stations/station/readings    # captures every value inside it
+    row: reading
+    links:
+      - parent: stations
+    fields:
+      - {name: time, path: "@time", data_type: Utf8}
+```
+
+Declare such a field on the nested table, here as `path: value` on `readings`.
+The attributes of the nested table's own element are inside it too, so an
+attribute of `<readings>` can be read only by `readings`.
+
 By default namespace prefixes are ignored when matching, so `<ns:station>`
 matches `station`. See `strip_namespaces` under [Parser options](#parser-options).
 
