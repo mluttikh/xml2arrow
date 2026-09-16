@@ -29,6 +29,12 @@
 //! it, and while deleting it changes nothing, correcting a misspelling can:
 //! which one was meant is the author's to say. It is reported instead.
 //!
+//! A path with a `.` or `..` segment in a table's `xml_path`, a field's
+//! `xml_path` or `stop_at_paths` is not rewritten either. No element can match
+//! it, and writing it correctly changes the output from nothing to something.
+//! The field keeps its `xml_path:` spelling, because a `path:` with such a
+//! segment is rejected in every version.
+//!
 //! Two kinds of field are never rewritten, because version 2 rejects both and
 //! every way to satisfy it changes the output:
 //!
@@ -50,7 +56,8 @@
 use std::fmt;
 
 use crate::config::{
-    Config, DType, Link, OnMissing, TableConfig, path_is_strictly_under, path_segments, paths_equal,
+    Config, DType, Link, OnMissing, TableConfig, has_dot_segment, path_is_strictly_under,
+    path_segments, paths_equal,
 };
 use crate::errors::Result;
 
@@ -86,6 +93,15 @@ pub enum Unconverted {
         location: String,
         /// The unknown key, as written.
         key: String,
+    },
+    /// A path has a `.` or `..` segment, which no element can match, so the
+    /// table has no rows, the field is never filled, or the stop path never
+    /// stops the parse. Writing it correctly changes that.
+    DotSegmentInPath {
+        /// Where the path is.
+        location: String,
+        /// The path, as written.
+        path: String,
     },
     /// The table's rows end at more than one configured child element, or at
     /// none, so no `row:` reproduces them.
@@ -168,6 +184,11 @@ pub enum Unconverted {
 impl fmt::Display for Unconverted {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Unconverted::DotSegmentInPath { location, path } => write!(
+                f,
+                "{location}: the path '{path}' has a '.' or '..' segment, so it matches nothing; \
+                 version 2 rejects it, and writing it correctly changes the output"
+            ),
             Unconverted::UnknownKey { location, key } => write!(
                 f,
                 "{location}: '{key}' is not a configuration key; version 2 rejects it, and \
@@ -304,6 +325,12 @@ impl Config {
                 key: key.to_string(),
             })
             .collect();
+        unconverted.extend(self.dot_segment_paths().map(|(location, path)| {
+            Unconverted::DotSegmentInPath {
+                location,
+                path: path.to_string(),
+            }
+        }));
         declare_rows(self, &mut config, &mut unconverted);
         rename_field_paths(&mut config);
         replace_levels(self, &mut config, &mut unconverted);
@@ -349,6 +376,11 @@ fn declare_rows(original: &Config, config: &mut Config, unconverted: &mut Vec<Un
 /// Renames every field's `xml_path:` to `path:`.
 fn rename_field_paths(config: &mut Config) {
     for field in config.tables.iter_mut().flat_map(|t| t.fields.iter_mut()) {
+        // Left spelled `xml_path:` when it has a `.` or `..` segment, which a
+        // `path:` may not have in any version; it is reported instead.
+        if field.xml_path.as_deref().is_some_and(has_dot_segment) {
+            continue;
+        }
         if let Some(xml_path) = field.xml_path.take() {
             // `xml_path` ignores a leading slash, but `path` reads it as the
             // difference between absolute and relative, so it is written in.
@@ -377,6 +409,15 @@ fn replace_levels(original: &Config, config: &mut Config, unconverted: &mut Vec<
             continue;
         }
         let counted = counted_tables(original, idx);
+        // An `index_of:` may not have a `.` or `..` segment in any version, so
+        // a level counting a table whose path has one stays a level; that path
+        // is reported on its own.
+        if counted
+            .iter()
+            .any(|&counted_idx| has_dot_segment(&scopes[counted_idx]))
+        {
+            continue;
+        }
         match level_links(config, &scopes, idx, &counted) {
             Ok(links) => {
                 let table = &mut config.tables[idx];
@@ -918,6 +959,56 @@ mod tests {
         assert_eq!(conversion.config.version, None);
         assert_eq!(items.row.as_deref(), Some("item"));
         assert_eq!(items.fields[0].path.as_deref(), Some("/data/item/v"));
+    }
+
+    /// A `path:` may not have a `.` or `..` segment in any version, so a field
+    /// whose `xml_path` has one keeps that spelling and is reported, while the
+    /// rest of the config converts. A level counting a table on such a path
+    /// stays a level, rather than become an `index_of:` that would not load.
+    #[test]
+    fn a_path_with_a_dot_segment_is_left_and_reported() {
+        let config = config_from_yaml!(
+            r#"
+            tables:
+              - name: items
+                xml_path: /data
+                levels: []
+                fields:
+                  - {name: v, xml_path: /data/item/v, data_type: Utf8, nullable: true}
+                  - {name: w, xml_path: /data/./item/w, data_type: Utf8, nullable: true}
+              - name: dotted
+                xml_path: /other/./group
+                levels: [group]
+                fields:
+                  - {name: x, xml_path: /other/./group/entry/x, data_type: Utf8, nullable: true}
+            "#
+        );
+        let conversion = config.to_version_2().unwrap();
+        assert_eq!(
+            conversion.unconverted,
+            vec![
+                Unconverted::DotSegmentInPath {
+                    location: "field 'w' of table 'items'".to_string(),
+                    path: "/data/./item/w".to_string(),
+                },
+                Unconverted::DotSegmentInPath {
+                    location: "the xml_path of table 'dotted'".to_string(),
+                    path: "/other/./group".to_string(),
+                },
+                Unconverted::DotSegmentInPath {
+                    location: "field 'x' of table 'dotted'".to_string(),
+                    path: "/other/./group/entry/x".to_string(),
+                },
+            ]
+        );
+        let [items, dotted] = conversion.config.tables.as_slice() else {
+            panic!("expected two tables");
+        };
+        assert_eq!(items.row.as_deref(), Some("item"));
+        assert_eq!(items.fields[0].path.as_deref(), Some("/data/item/v"));
+        assert_eq!(items.fields[1].xml_path.as_deref(), Some("/data/./item/w"));
+        assert_eq!(dotted.levels, ["group"]);
+        assert_eq!(conversion.config.version, None);
     }
 
     #[test]

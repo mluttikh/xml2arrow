@@ -55,6 +55,15 @@ pub enum MigrationStep {
         /// The unknown key, as written.
         key: String,
     },
+    /// A table's `xml_path`, a field's `xml_path`, or a `stop_at_paths` entry
+    /// has a `.` or `..` segment, which no element can match. It must be
+    /// written without one. See [`Lint::DotSegmentInPath`].
+    RemoveDotSegment {
+        /// Where the path is.
+        location: String,
+        /// The path, as written.
+        path: String,
+    },
     /// The table leaves its row boundaries inferred; it must declare `row:`.
     DeclareRow {
         /// The table without a `row:`.
@@ -129,6 +138,9 @@ impl MigrationStep {
             MigrationStep::RemoveUnknownKey { location, key } => {
                 ConfigIssue::UnknownKey { location, key }
             }
+            MigrationStep::RemoveDotSegment { location, path } => {
+                ConfigIssue::DotSegmentInPath { location, path }
+            }
             MigrationStep::DeclareRow { table } => ConfigIssue::MissingRow { table },
             MigrationStep::ReplaceLevels { table } => ConfigIssue::ReplacedKey {
                 location: format!("table '{table}'"),
@@ -179,6 +191,11 @@ impl fmt::Display for MigrationStep {
             MigrationStep::RemoveUnknownKey { location, key } => write!(
                 f,
                 "{location}: '{key}' is not a configuration key; correct its spelling, or remove it"
+            ),
+            MigrationStep::RemoveDotSegment { location, path } => write!(
+                f,
+                "{location}: the path '{path}' has a '.' or '..' segment, which no element can \
+                 match; write it without one"
             ),
             MigrationStep::DeclareRow { table } => {
                 write!(f, "table '{table}': declare `row:`; its rows are inferred")
@@ -246,6 +263,21 @@ pub enum Lint {
         location: String,
         /// The unknown key, as written.
         key: String,
+    },
+    /// A path has a `.` or `..` segment, which no element can match, since an
+    /// XML name cannot be `.` or `..`. The table has no rows, the field is never
+    /// filled, or the stop path never stops the parse.
+    ///
+    /// Reported for a table's `xml_path`, a field's `xml_path` and
+    /// `stop_at_paths` in a version 1 config, which loads today; `version: 2`
+    /// rejects them. The newer `row:`, `path:` and `index_of:` are rejected in
+    /// every version.
+    DotSegmentInPath {
+        /// Where the path is: `the xml_path of table 'stations'`, `field 'id'
+        /// of table 'stations'`, `` `parser_options.stop_at_paths` ``.
+        location: String,
+        /// The path, as written.
+        path: String,
     },
     /// A table's row boundaries are inferred from **more than one** distinct
     /// child element, so it yields one partially-filled row per configured
@@ -383,6 +415,11 @@ impl fmt::Display for Lint {
                 f,
                 "Unknown key '{key}' in {location} is ignored; check its spelling, or remove it"
             ),
+            Lint::DotSegmentInPath { location, path } => write!(
+                f,
+                "The path '{path}' in {location} has a '.' or '..' segment, so it never matches \
+                 an element; write it without one"
+            ),
             Lint::InferredRowBoundary {
                 table,
                 xml_path,
@@ -470,7 +507,7 @@ impl fmt::Display for Lint {
 /// would bury the other kinds of step under a wall of identical ones. The full
 /// list is in `steps` for anything that wants to act on it.
 fn write_config_version_1(f: &mut fmt::Formatter<'_>, steps: &[MigrationStep]) -> fmt::Result {
-    let (mut unknown, mut rows, mut levels, mut fields, mut links, mut captured, mut outside) = (
+    let (mut unknown, mut dotted, mut rows, mut levels, mut fields, mut links, mut captured) = (
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -479,10 +516,14 @@ fn write_config_version_1(f: &mut fmt::Formatter<'_>, steps: &[MigrationStep]) -
         Vec::new(),
         Vec::new(),
     );
+    let mut outside = Vec::new();
     for step in steps {
         match step {
             MigrationStep::RemoveUnknownKey { location, key } => {
                 unknown.push(format!("'{key}' in {location}"))
+            }
+            MigrationStep::RemoveDotSegment { location, path } => {
+                dotted.push(format!("'{path}' in {location}"))
             }
             MigrationStep::DeclareRow { table } => rows.push(table.clone()),
             MigrationStep::ReplaceLevels { table } => levels.push(table.clone()),
@@ -511,6 +552,13 @@ fn write_config_version_1(f: &mut fmt::Formatter<'_>, steps: &[MigrationStep]) -
             "{} must be corrected or removed ({})",
             counted(unknown.len(), "unknown key", "unknown keys"),
             first_few(&unknown),
+        ));
+    }
+    if !dotted.is_empty() {
+        left.push(format!(
+            "{} with a '.' or '..' segment must be written without one ({})",
+            counted(dotted.len(), "path", "paths"),
+            first_few(&dotted),
         ));
     }
     if !rows.is_empty() {
@@ -642,6 +690,14 @@ impl Config {
                 key: key.to_string(),
             })
             .collect();
+        // Then paths no element can match, for the same reason.
+        lints.extend(
+            self.dot_segment_paths()
+                .map(|(location, path)| Lint::DotSegmentInPath {
+                    location,
+                    path: path.to_string(),
+                }),
+        );
         for table in &self.tables {
             if table.fields.is_empty() {
                 // A structural table's row counter is all that matters, so the
@@ -826,7 +882,10 @@ impl Config {
             let Some(child) = path_segments(path).nth(depth) else {
                 continue;
             };
-            if child.starts_with('@') {
+            // An attribute never ends a row. Nor does a `.` or `..` segment: no
+            // element has that name, so counting one would report rows that
+            // cannot occur.
+            if child.starts_with('@') || child == "." || child == ".." {
                 continue;
             }
             if !children.iter().any(|existing| existing == child) {
@@ -1125,6 +1184,28 @@ tables:
             );
         }
 
+        /// Uses only version 2 keys, but its stop path has a `.` segment.
+        fn dot_segment() -> Config {
+            config_from_yaml!(
+                r#"
+parser_options: {stop_at_paths: [/r/./end]}
+tables:
+  - {name: t, xml_path: /r, row: i, fields: [{name: v, path: v, data_type: Utf8}]}
+"#
+            )
+        }
+
+        #[test]
+        fn a_path_with_a_dot_segment_is_a_step() {
+            assert_eq!(
+                steps(&dot_segment()).unwrap(),
+                vec![MigrationStep::RemoveDotSegment {
+                    location: "`parser_options.stop_at_paths`".into(),
+                    path: "/r/./end".into(),
+                }]
+            );
+        }
+
         /// The property `version_2_steps` exists to guarantee: the lint lists
         /// nothing exactly when declaring `version: 2` would validate, and
         /// otherwise the validation error is the lint's first step. A second
@@ -1156,6 +1237,7 @@ tables:
                 field_inside_nested_table(),
                 field_outside_row(),
                 unknown_key(),
+                dot_segment(),
             ];
             for config in configs {
                 let steps = steps(&config).expect("every case is version 1");
@@ -1713,6 +1795,37 @@ tables:
         assert_eq!(field, "stray");
         assert_eq!(row_path, "/report/data/item");
         assert!(outside[0].to_string().contains("'stray'"));
+    }
+
+    /// No element is named `.` or `..`, so a version 1 path with such a
+    /// segment matches nothing. It is reported, and not counted as a child
+    /// element that ends rows: `.` here would otherwise make the table look as
+    /// if its rows were split.
+    #[test]
+    fn a_path_with_a_dot_segment_is_reported_and_ends_no_rows() {
+        let config = config_from_yaml!(
+            r#"
+            tables:
+              - name: t
+                xml_path: /r
+                levels: []
+                fields:
+                  - {name: v, xml_path: /r/item/v, data_type: Utf8, nullable: true}
+                  - {name: w, xml_path: /r/./item/w, data_type: Utf8, nullable: true}
+            "#
+        );
+        let lints = config.lint_excluding_deprecation();
+        assert_eq!(
+            lints,
+            vec![Lint::DotSegmentInPath {
+                location: "field 'w' of table 't'".into(),
+                path: "/r/./item/w".into(),
+            }]
+        );
+        assert_eq!(
+            config.row_delimiting_children("/r"),
+            vec!["item".to_string()]
+        );
     }
 
     /// A misspelled key is ignored by version 1, which leaves the setting it
