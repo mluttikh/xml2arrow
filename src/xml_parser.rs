@@ -32,7 +32,7 @@ use quick_xml::events::{BytesRef, Event};
 use crate::Config;
 use crate::config::{
     DType, FieldConfig, OnInvalid, OnMissing, OnRepeat, RowId, TableConfig, ValuePolicies,
-    paths_equal, resolve_field_path, resolve_row_path,
+    paths_equal, resolve_field_path, resolve_row_path, table_counted_by_index_of,
 };
 use crate::errors::ConfigIssue;
 use crate::errors::Error;
@@ -203,24 +203,17 @@ fn build_link_plans(config: &Config) -> Vec<TableLinkPlan> {
         return Vec::new();
     }
 
-    // An `index_of` path names the table whose rows it counts: the table's own
-    // row element counts its own rows, and an enclosing table's row element
-    // counts that table's. Another table sharing this table's scope encloses
-    // nothing, so it is never the answer.
-    let index_of_table = |table_idx: usize, path: &str, scope: &str| {
-        if paths_equal(path, scope) {
-            return Some(table_idx);
-        }
-        config.tables.iter().position(|t| {
-            let other = t.link_scope_path();
-            paths_equal(&other, path) && !paths_equal(&other, scope)
-        })
-    };
+    // Computed once here, rather than per candidate per link: resolving an
+    // `index_of:` path compares it against every table's scope.
+    let scopes: Vec<String> = config
+        .tables
+        .iter()
+        .map(TableConfig::link_scope_path)
+        .collect();
 
     let mut plans: Vec<TableLinkPlan> = vec![TableLinkPlan::default(); config.tables.len()];
 
     for (table_idx, table) in config.tables.iter().enumerate() {
-        let scope = table.link_scope_path();
         for link in table.links.iter().flatten() {
             let Some(column_name) = link.column_name() else {
                 continue;
@@ -243,7 +236,7 @@ fn build_link_plans(config: &Config) -> Vec<TableLinkPlan> {
                         Some(default_row_id_name(&config.tables[parent_idx]));
                 }
             } else if let Some(index_of) = link.index_of.as_deref()
-                && let Some(ancestor_idx) = index_of_table(table_idx, index_of, &scope)
+                && let Some(ancestor_idx) = table_counted_by_index_of(&scopes, table_idx, index_of)
             {
                 plans[table_idx].links.push(LinkSpec {
                     kind: LinkKind::IndexOf,

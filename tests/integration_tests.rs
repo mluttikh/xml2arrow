@@ -1082,6 +1082,36 @@ fn test_a_path_with_a_dot_segment_is_rejected() {
     );
 }
 
+#[test]
+fn test_converting_keeps_index_of_links_counting_the_same_rows() {
+    // Regression: `to_version_2` returned an error for a valid config whose
+    // rows were inferred and which had an `index_of:` link naming a table's
+    // `xml_path`. Declaring `row:` moved that table's rows to the row element,
+    // so the link named no table and the converted config did not load. The
+    // link now follows the rows it counted.
+    let yaml = r#"
+        tables:
+          - name: t
+            xml_path: /doc/g
+            links: [{index_of: /doc/g, name: pos}]
+            fields:
+              - {name: v, xml_path: /doc/g/item/v, data_type: Int32}
+    "#;
+    let xml =
+        b"<doc><g><item><v>1</v></item><item><v>2</v></item></g><g><item><v>3</v></item></g></doc>";
+    let original = Config::from_yaml_str(yaml).unwrap();
+    let conversion = original.to_version_2().unwrap();
+    assert_eq!(conversion.config.version, Some(2));
+
+    let before = Parser::new(&original).unwrap().parse_slice(xml).unwrap();
+    let after = Parser::new(&conversion.config)
+        .unwrap()
+        .parse_slice(xml)
+        .unwrap();
+    assert_eq!(before, after);
+    assert_array_values!(after.get("t").unwrap(), "pos", &[0, 1, 0], UInt32Array);
+}
+
 // ---------------------------------------------------------------------------
 // Realistic end-to-end scenario
 // ---------------------------------------------------------------------------

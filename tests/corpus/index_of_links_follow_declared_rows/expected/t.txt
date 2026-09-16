@@ -1,0 +1,10 @@
+# frozen snapshot — see tests/frozen_corpus.rs
+table: t
+rows: 3
+columns:
+  1. pos: UInt32 (not null)
+  2. v: Int32 (not null)
+data:
+  "0" | "1"
+  "1" | "2"
+  "0" | "3"

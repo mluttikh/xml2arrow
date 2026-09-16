@@ -1,0 +1,20 @@
+# `v` counts `u`'s rows, whose row element is <s>. `t` infers its rows from its
+# one child element, also <s>. Declaring `row: s` on `t` would give both tables
+# the row element `/r/s`, and `v`'s link would then count whichever comes first,
+# `t`. The converter leaves `t`'s row inferred instead (tests/convert_corpus.rs
+# checks the values stay the same).
+tables:
+  - {name: t, xml_path: /r, fields: []}
+  - name: u
+    xml_path: /r/s
+    row: "."
+    links: []
+    fields:
+      - {name: a, path: a, data_type: Utf8}
+  - name: v
+    xml_path: /r/s/list
+    row: e
+    links:
+      - {index_of: /r/s, name: u_pos}
+    fields:
+      - {name: x, path: x, data_type: Utf8}

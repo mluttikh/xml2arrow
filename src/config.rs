@@ -298,6 +298,30 @@ pub(crate) fn resolve_field_path<'a>(
     )))
 }
 
+/// The table an `index_of:` path counts, given every table's scope in config
+/// order: its row element, or its `xml_path` while its rows are inferred.
+///
+/// A path equal to the declaring table's own scope counts that table's rows.
+/// Otherwise it counts the first table whose scope equals the path, skipping
+/// any whose scope equals the declaring table's own, which encloses nothing.
+///
+/// The parser resolves links with this, and the converter predicts that
+/// resolution with it, so the two cannot disagree about which table a link
+/// counts.
+pub(crate) fn table_counted_by_index_of(
+    scopes: &[String],
+    table_idx: usize,
+    path: &str,
+) -> Option<usize> {
+    let own = &scopes[table_idx];
+    if paths_equal(path, own) {
+        return Some(table_idx);
+    }
+    scopes
+        .iter()
+        .position(|scope| paths_equal(scope, path) && !paths_equal(scope, own))
+}
+
 /// Returns true when two paths resolve to the same registry node, i.e. their
 /// normalized segment sequences are identical regardless of spelling
 /// ("/data", "data" and "/data/" are all the same path).

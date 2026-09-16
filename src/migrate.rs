@@ -14,6 +14,9 @@
 //!    declares `row:` naming that element: it is the element that already ended
 //!    every row. A table whose rows end at several child elements, or at none,
 //!    has no such spelling.
+//!    An `index_of:` link already in the config names a table's rows by where
+//!    they were, so it is pointed at the table's declared row element, which
+//!    counts the same rows.
 //! 2. **Field paths.** `xml_path:` becomes `path:` with the same absolute value.
 //! 3. **Levels.** Each `levels` entry becomes an `index_of:` link naming the row
 //!    element of the table whose rows it counts, with `name:` keeping the
@@ -57,7 +60,7 @@ use std::fmt;
 
 use crate::config::{
     Config, DType, Link, OnMissing, TableConfig, has_dot_segment, path_is_strictly_under,
-    path_segments, paths_equal,
+    path_segments, paths_equal, table_counted_by_index_of,
 };
 use crate::errors::Result;
 
@@ -151,6 +154,19 @@ pub enum Unconverted {
         /// The other table with the same row element.
         other_table: String,
     },
+    /// The only `row:` that keeps this table's rows would give it the same row
+    /// element as another table, and an `index_of:` link in the config would
+    /// then count the other table's rows instead of the ones it counts now.
+    ///
+    /// The row is left inferred, which keeps the link counting what it did.
+    RowSharedWithTable {
+        /// The table whose row is left inferred.
+        table: String,
+        /// The row element it would have declared.
+        row_path: String,
+        /// The table that has that row element too.
+        other_table: String,
+    },
     /// A field lies inside the `xml_path` of a table nested within its own,
     /// which captures every value there, so the field is never filled.
     ///
@@ -184,6 +200,16 @@ pub enum Unconverted {
 impl fmt::Display for Unconverted {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Unconverted::RowSharedWithTable {
+                table,
+                row_path,
+                other_table,
+            } => write!(
+                f,
+                "table '{table}': declaring `row:` at {row_path} would give it the same row \
+                 element as table '{other_table}', and an `index_of:` link could then count the \
+                 wrong one of the two"
+            ),
             Unconverted::DotSegmentInPath { location, path } => write!(
                 f,
                 "{location}: the path '{path}' has a '.' or '..' segment, so it matches nothing; \
@@ -332,6 +358,7 @@ impl Config {
             }
         }));
         declare_rows(self, &mut config, &mut unconverted);
+        retarget_index_of_links(self, &mut config, &mut unconverted);
         rename_field_paths(&mut config);
         replace_levels(self, &mut config, &mut unconverted);
         link_nested_tables(&mut config);
@@ -370,6 +397,93 @@ fn declare_rows(original: &Config, config: &mut Config, unconverted: &mut Vec<Un
                 child_elements: children,
             });
         }
+    }
+}
+
+/// Keeps every `index_of:` link already in the config counting the rows it
+/// counts now.
+///
+/// A link names a table's rows by the table's scope: its row element, or its
+/// `xml_path` while its rows are inferred. Declaring a row moves the scope down
+/// to the row element, so a link written against the old one names no table,
+/// and the converted config would not load. The counter the link reads does
+/// not move, so pointing the link at the table's new scope keeps every value.
+///
+/// Where a declared row makes two tables' scopes equal, a path can no longer
+/// tell them apart, and the link would count whichever comes first. The
+/// newly declared row is then taken back, which restores the scope the link
+/// resolved against, and reported. Each pass takes back at most one row, so
+/// the loop ends.
+fn retarget_index_of_links(
+    original: &Config,
+    config: &mut Config,
+    unconverted: &mut Vec<Unconverted>,
+) {
+    let original_scopes: Vec<String> = original
+        .tables
+        .iter()
+        .map(TableConfig::link_scope_path)
+        .collect();
+    // Rows the converter declared, as opposed to ones the author did.
+    let declared_here = |config: &Config, idx: usize| {
+        original.tables[idx].row.is_none() && config.tables[idx].row.is_some()
+    };
+
+    'passes: loop {
+        let scopes: Vec<String> = config
+            .tables
+            .iter()
+            .map(TableConfig::link_scope_path)
+            .collect();
+        let mut rewrites = Vec::new();
+        for (idx, table) in original.tables.iter().enumerate() {
+            for (link_idx, link) in table.links.iter().flatten().enumerate() {
+                let Some(path) = link.index_of.as_deref() else {
+                    continue;
+                };
+                let Some(counted) = table_counted_by_index_of(&original_scopes, idx, path) else {
+                    continue;
+                };
+                let new_path = &scopes[counted];
+                let resolved = table_counted_by_index_of(&scopes, idx, new_path);
+                if resolved == Some(counted) {
+                    if !paths_equal(path, new_path) {
+                        rewrites.push((idx, link_idx, absolute(new_path)));
+                    }
+                    continue;
+                }
+                // Two tables now share the scope the link needs. Take back the
+                // declared row that created the clash: the other table's if it
+                // has one, otherwise the counted table's own.
+                let other = resolved.unwrap_or(idx);
+                let Some(undeclare) = [other, counted]
+                    .into_iter()
+                    .find(|&candidate| declared_here(config, candidate))
+                else {
+                    // Neither row was declared here, so the clash was in the
+                    // original too and resolves as it did there.
+                    continue;
+                };
+                let kept = if undeclare == other { counted } else { other };
+                unconverted.push(Unconverted::RowSharedWithTable {
+                    table: config.tables[undeclare].name.clone(),
+                    row_path: scopes[undeclare].clone(),
+                    other_table: config.tables[kept].name.clone(),
+                });
+                config.tables[undeclare].row = None;
+                continue 'passes;
+            }
+        }
+        for (idx, link_idx, new_path) in rewrites {
+            if let Some(link) = config.tables[idx]
+                .links
+                .as_mut()
+                .and_then(|links| links.get_mut(link_idx))
+            {
+                link.index_of = Some(new_path);
+            }
+        }
+        return;
     }
 }
 
@@ -1008,6 +1122,69 @@ mod tests {
         assert_eq!(items.fields[0].path.as_deref(), Some("/data/item/v"));
         assert_eq!(items.fields[1].xml_path.as_deref(), Some("/data/./item/w"));
         assert_eq!(dotted.levels, ["group"]);
+        assert_eq!(conversion.config.version, None);
+    }
+
+    /// An `index_of:` link names a table's rows by where they are, and
+    /// declaring a row moves them: `t`'s rows go from `/doc/g` to `<item>`.
+    /// Both links that counted them follow, so the converted config loads and
+    /// counts the same rows.
+    #[test]
+    fn index_of_links_follow_a_declared_row() {
+        let config = config_from_yaml!(
+            r#"
+            tables:
+              - name: t
+                xml_path: /doc/g
+                links: [{index_of: /doc/g, name: pos}]
+                fields:
+                  - {name: v, xml_path: /doc/g/item/v, data_type: Int32}
+              - name: subs
+                xml_path: /doc/g/item/subs
+                row: s
+                links: [{index_of: /doc/g, name: t_pos}]
+                fields:
+                  - {name: w, path: w, data_type: Int32}
+            "#
+        );
+        let conversion = config.to_version_2().unwrap();
+        assert_eq!(conversion.unconverted, vec![]);
+        assert_eq!(conversion.config.version, Some(2));
+        let [t, subs] = conversion.config.tables.as_slice() else {
+            panic!("expected two tables");
+        };
+        assert_eq!(t.row.as_deref(), Some("item"));
+        assert_eq!(t.links, Some(vec![index_of("/doc/g/item", "pos")]));
+        assert_eq!(subs.links, Some(vec![index_of("/doc/g/item", "t_pos")]));
+    }
+
+    /// Declaring `row: s` on `t` would give it `u`'s row element, and `v`'s
+    /// link would then count `t`, which comes first, instead of `u`. The row is
+    /// left inferred, which keeps the link counting `u`, and reported.
+    #[test]
+    fn a_row_that_would_share_another_tables_row_element_is_left_inferred() {
+        let config = config_from_yaml!(
+            r#"
+            tables:
+              - {name: t, xml_path: /r, fields: []}
+              - {name: u, xml_path: /r/s, row: ".", links: [], fields: [{name: a, path: a, data_type: Int32}]}
+              - {name: v, xml_path: /r/s/list, row: e, links: [{index_of: /r/s, name: u_pos}], fields: [{name: x, path: x, data_type: Int32}]}
+            "#
+        );
+        let conversion = config.to_version_2().unwrap();
+        assert_eq!(
+            conversion.unconverted,
+            vec![Unconverted::RowSharedWithTable {
+                table: "t".to_string(),
+                row_path: "/r/s".to_string(),
+                other_table: "u".to_string(),
+            }]
+        );
+        let [t, _, v] = conversion.config.tables.as_slice() else {
+            panic!("expected three tables");
+        };
+        assert_eq!(t.row, None);
+        assert_eq!(v.links, Some(vec![index_of("/r/s", "u_pos")]));
         assert_eq!(conversion.config.version, None);
     }
 

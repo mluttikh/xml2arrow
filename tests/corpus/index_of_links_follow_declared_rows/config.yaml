@@ -1,0 +1,19 @@
+# `index_of:` links in a config that infers its rows. `t` counts its own rows by
+# naming its `xml_path`, and `subs` counts `t`'s rows the same way. Converting
+# to version 2 declares `row: item` on `t`, which moves `t`'s rows to <item>, so
+# both links must follow them there for the converted config to load and count
+# the same rows (tests/convert_corpus.rs checks the values).
+tables:
+  - name: t
+    xml_path: /doc/g
+    links:
+      - {index_of: /doc/g, name: pos}
+    fields:
+      - {name: v, xml_path: /doc/g/item/v, data_type: Int32}
+  - name: subs
+    xml_path: /doc/g/item/subs
+    row: s
+    links:
+      - {index_of: /doc/g, name: t_pos}
+    fields:
+      - {name: w, path: w, data_type: Utf8}

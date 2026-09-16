@@ -1,0 +1,11 @@
+# frozen snapshot — see tests/frozen_corpus.rs
+table: subs
+rows: 4
+columns:
+  1. t_pos: UInt32 (not null)
+  2. w: Utf8 (not null)
+data:
+  "0" | "a"
+  "0" | "b"
+  "1" | "c"
+  "0" | "d"

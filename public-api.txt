@@ -739,6 +739,10 @@ pub xml2arrow::migrate::Unconverted::RowNotDeclarable
 pub xml2arrow::migrate::Unconverted::RowNotDeclarable::child_elements: alloc::vec::Vec<alloc::string::String>
 pub xml2arrow::migrate::Unconverted::RowNotDeclarable::table: alloc::string::String
 pub xml2arrow::migrate::Unconverted::RowNotDeclarable::xml_path: alloc::string::String
+pub xml2arrow::migrate::Unconverted::RowSharedWithTable
+pub xml2arrow::migrate::Unconverted::RowSharedWithTable::other_table: alloc::string::String
+pub xml2arrow::migrate::Unconverted::RowSharedWithTable::row_path: alloc::string::String
+pub xml2arrow::migrate::Unconverted::RowSharedWithTable::table: alloc::string::String
 pub xml2arrow::migrate::Unconverted::UnknownKey
 pub xml2arrow::migrate::Unconverted::UnknownKey::key: alloc::string::String
 pub xml2arrow::migrate::Unconverted::UnknownKey::location: alloc::string::String
@@ -1051,6 +1055,10 @@ pub xml2arrow::Unconverted::RowNotDeclarable
 pub xml2arrow::Unconverted::RowNotDeclarable::child_elements: alloc::vec::Vec<alloc::string::String>
 pub xml2arrow::Unconverted::RowNotDeclarable::table: alloc::string::String
 pub xml2arrow::Unconverted::RowNotDeclarable::xml_path: alloc::string::String
+pub xml2arrow::Unconverted::RowSharedWithTable
+pub xml2arrow::Unconverted::RowSharedWithTable::other_table: alloc::string::String
+pub xml2arrow::Unconverted::RowSharedWithTable::row_path: alloc::string::String
+pub xml2arrow::Unconverted::RowSharedWithTable::table: alloc::string::String
 pub xml2arrow::Unconverted::UnknownKey
 pub xml2arrow::Unconverted::UnknownKey::key: alloc::string::String
 pub xml2arrow::Unconverted::UnknownKey::location: alloc::string::String

@@ -127,7 +127,10 @@ What the converter writes:
 - `path:` in place of each field's `xml_path:`, with the same absolute value
   ([step 1](#step-1-rename-xml_path-to-path)).
 - `row:` on each table whose rows end at one child element
-  ([step 2](#step-2-declare-each-tables-row)).
+  ([step 2](#step-2-declare-each-tables-row)). An `index_of:` link already in
+  the config that counted such a table's rows is pointed at the new row element,
+  which counts the same rows. Where that element would also be another table's,
+  the row is left for you, since the link could then count the wrong table.
 - An `index_of:` link with `name:` for each `levels` entry, keeping every
   column, and `links: []` on nested tables without `levels`
   ([step 3](#step-3-replace-levels-with-links)).
