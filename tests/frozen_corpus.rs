@@ -229,8 +229,17 @@ fn snapshot_batch(name: &str, batch: &RecordBatch) -> String {
     out.push_str("# frozen snapshot — see tests/frozen_corpus.rs\n");
     out.push_str(&format!("table: {name}\n"));
     out.push_str(&format!("rows: {}\n", batch.num_rows()));
+    // Metadata lines appear only when there is metadata, so every snapshot
+    // recorded before tables and fields could carry it reads exactly as it did.
+    let schema = batch.schema();
+    if !schema.metadata().is_empty() {
+        out.push_str(&format!(
+            "metadata: {}\n",
+            render_metadata(schema.metadata())
+        ));
+    }
     out.push_str("columns:\n");
-    for (index, field) in batch.schema().fields().iter().enumerate() {
+    for (index, field) in schema.fields().iter().enumerate() {
         out.push_str(&format!(
             "  {}. {}: {:?} ({})\n",
             index + 1,
@@ -242,6 +251,12 @@ fn snapshot_batch(name: &str, batch: &RecordBatch) -> String {
                 "not null"
             },
         ));
+        if !field.metadata().is_empty() {
+            out.push_str(&format!(
+                "     metadata: {}\n",
+                render_metadata(field.metadata())
+            ));
+        }
     }
     out.push_str("data:\n");
     for row in 0..batch.num_rows() {
@@ -260,6 +275,19 @@ fn snapshot_batch(name: &str, batch: &RecordBatch) -> String {
         out.push_str(&format!("  {}\n", cells.join(" | ")));
     }
     out
+}
+
+/// Arrow keeps metadata in a `HashMap`, so its order is arbitrary. Sorted and
+/// quoted, the rendering is stable, and a value with a separator or trailing
+/// space in it stays readable.
+fn render_metadata(metadata: &std::collections::HashMap<String, String>) -> String {
+    let mut entries: Vec<(&String, &String)> = metadata.iter().collect();
+    entries.sort();
+    entries
+        .iter()
+        .map(|(key, value)| format!("{key:?}={value:?}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn expect_same_error<T>(

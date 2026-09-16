@@ -25,7 +25,7 @@
 
 use std::{
     borrow::Cow,
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     fs::File,
     io::{BufReader, BufWriter},
     path::Path,
@@ -455,6 +455,22 @@ impl Config {
         Ok(())
     }
 
+    /// The first metadata key in the namespace the Arrow format reserves for
+    /// itself, keys beginning `ARROW:`, if `metadata` uses one.
+    ///
+    /// Some of those keys have meaning. `ARROW:extension:name` on a column
+    /// declares an extension type, which readers such as pyarrow act on, so a
+    /// config that set one would change how every consumer reads the output
+    /// rather than annotate it. Rejected for both configuration versions: the
+    /// key is new, so no existing config can depend on it.
+    ///
+    /// Called from the table and field checks that already run, rather than
+    /// as a pass of its own: `Parser::new` validates, and its fixed cost is the
+    /// whole parse for a small document.
+    fn reserved_metadata_key(metadata: &BTreeMap<String, String>) -> Option<&String> {
+        metadata.keys().find(|key| key.starts_with("ARROW:"))
+    }
+
     /// Checks a declared `row:` — that it names something, resolves inside its
     /// own table, and that no other table would intercept the rows it
     /// delimits. A table that leaves row boundaries inferred has nothing to
@@ -630,9 +646,19 @@ impl Config {
     }
 
     /// Checks one table's fields: nameable, addressable by exactly one of
-    /// `path`/`xml_path`, resolving inside the table, and carrying no policy
-    /// that cannot apply to the column it is set on.
+    /// `path`/`xml_path`, resolving inside the table, carrying no metadata key
+    /// Arrow reserves, and carrying no policy that cannot apply to the column
+    /// it is set on. The table's own metadata is checked here too, before its
+    /// fields.
     fn validate_table_fields(&self, table: &TableConfig) -> Result<()> {
+        if let Some(key) = Self::reserved_metadata_key(&table.metadata) {
+            return Err(ConfigIssue::ReservedMetadataKey {
+                table: table.name.clone(),
+                field: None,
+                key: key.clone(),
+            }
+            .into());
+        }
         let mut field_names = HashSet::with_capacity(table.fields.len());
         for field in &table.fields {
             if field.name.is_empty() {
@@ -701,6 +727,14 @@ impl Config {
                 .into());
             }
 
+            if let Some(key) = Self::reserved_metadata_key(&field.metadata) {
+                return Err(ConfigIssue::ReservedMetadataKey {
+                    table: table.name.clone(),
+                    field: Some(field.name.clone()),
+                    key: key.clone(),
+                }
+                .into());
+            }
             self.validate_field_policies(table, field)?;
             field.validate()?;
         }
@@ -1354,6 +1388,16 @@ pub struct TableConfig {
     /// writing `levels: []`. Existing configs are unaffected.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub levels: Vec<String>,
+    /// Key-value pairs copied into this table's Arrow schema metadata, and so
+    /// into every batch it produces and, for example, the Parquet file written
+    /// from them. The parser does nothing else with them.
+    ///
+    /// Keys and values are strings, taken exactly as the YAML spells them:
+    /// `version: 1.50` is `"1.50"`, not a number. Keys beginning `ARROW:` are
+    /// rejected, because the Arrow format reserves them. See
+    /// [`FieldConfig::metadata`] for a column's own.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
     /// A vector of `FieldConfig` structs, each defining a field (column) in the table.
     ///
     /// Last, so that a written config states where a table's rows are before
@@ -1377,6 +1421,7 @@ impl TableConfig {
             row: None,
             links: None,
             row_id: None,
+            metadata: BTreeMap::new(),
         }
     }
 
@@ -1417,6 +1462,7 @@ impl TableConfig {
             row: None,
             links: None,
             row_id: None,
+            metadata: BTreeMap::new(),
         }
     }
 }
@@ -1499,6 +1545,7 @@ pub struct TableConfigBuilder {
     row: Option<String>,
     links: Option<Vec<Link>>,
     row_id: Option<RowId>,
+    metadata: BTreeMap<String, String>,
 }
 
 impl TableConfigBuilder {
@@ -1538,6 +1585,18 @@ impl TableConfigBuilder {
         self
     }
 
+    /// Adds entries to the table's schema metadata. See
+    /// [`TableConfig::metadata`].
+    #[must_use]
+    pub fn metadata(
+        mut self,
+        entries: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+    ) -> Self {
+        self.metadata
+            .extend(entries.into_iter().map(|(k, v)| (k.into(), v.into())));
+        self
+    }
+
     /// Appends one field (column).
     #[must_use]
     pub fn field(mut self, field: FieldConfig) -> Self {
@@ -1567,6 +1626,7 @@ impl TableConfigBuilder {
             row: self.row,
             links: self.links,
             row_id: self.row_id,
+            metadata: self.metadata,
         }
     }
 }
@@ -1632,6 +1692,15 @@ pub struct FieldConfig {
     /// as ordinary field keys (`trim:`, `on_missing:`, …).
     #[serde(flatten)]
     pub policies: ValuePolicies,
+    /// Key-value pairs copied into this column's Arrow field metadata, such as
+    /// a unit or a description. The parser does nothing else with them.
+    ///
+    /// Strings, taken exactly as the YAML spells them, and keys beginning
+    /// `ARROW:` are rejected, as for [`TableConfig::metadata`]. Arrow reserves
+    /// that prefix, and `ARROW:extension:name` on a column would change how
+    /// readers such as pyarrow interpret it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
 }
 
 impl FieldConfig {
@@ -1698,6 +1767,7 @@ pub struct FieldConfigBuilder {
     scale: Option<f64>,
     offset: Option<f64>,
     policies: ValuePolicies,
+    metadata: BTreeMap<String, String>,
 }
 
 impl FieldConfigBuilder {
@@ -1728,6 +1798,18 @@ impl FieldConfigBuilder {
             data_type,
             ..Default::default()
         }
+    }
+
+    /// Adds entries to the column's field metadata. See
+    /// [`FieldConfig::metadata`].
+    #[must_use]
+    pub fn metadata(
+        mut self,
+        entries: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+    ) -> Self {
+        self.metadata
+            .extend(entries.into_iter().map(|(k, v)| (k.into(), v.into())));
+        self
     }
 
     /// Sets this field's value-handling policies. See [`ValuePolicies`].
@@ -1809,6 +1891,7 @@ impl FieldConfigBuilder {
             scale: self.scale,
             offset: self.offset,
             policies: self.policies,
+            metadata: self.metadata,
         };
         cfg.validate()?;
         Ok(cfg)
@@ -3890,6 +3973,163 @@ tables:
                     .unwrap()
                     .contains("version")
             );
+        }
+    }
+
+    /// `metadata:` on tables and fields.
+    mod metadata {
+        use super::*;
+
+        const YAML: &str = r#"
+tables:
+  - name: readings
+    xml_path: /report/readings
+    row: reading
+    metadata: {source: station export, revision: 1.50}
+    fields:
+      - name: value
+        path: value
+        data_type: Float64
+        nullable: true
+        trim: false
+        metadata: {unit: hPa, code: 0x1F, calibrated: True, note: ""}
+"#;
+
+        fn entries(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        }
+
+        /// The parser never reads these values, so reading `1.50` as a number
+        /// would only change what the author wrote. A field's metadata sits
+        /// beside its flattened policies, where a value could have gone through
+        /// a typed intermediate on the way in, so it is pinned as well.
+        #[test]
+        fn values_are_kept_exactly_as_written() {
+            let config = Config::from_yaml_str(YAML).unwrap();
+            let table = &config.tables[0];
+            assert_eq!(
+                table.metadata,
+                entries(&[("source", "station export"), ("revision", "1.50")])
+            );
+            let field = &table.fields[0];
+            assert_eq!(
+                field.metadata,
+                entries(&[
+                    ("unit", "hPa"),
+                    ("code", "0x1F"),
+                    ("calibrated", "True"),
+                    ("note", "")
+                ])
+            );
+            assert_eq!(field.policies.trim, Some(false));
+        }
+
+        #[test]
+        fn metadata_round_trips_and_is_left_out_when_empty() {
+            let config = Config::from_yaml_str(YAML).unwrap();
+            let yaml = yaml_serde::to_string(&config).unwrap();
+            assert_eq!(Config::from_yaml_str(&yaml).unwrap(), config);
+
+            let mut without = config.clone();
+            without.tables[0].metadata.clear();
+            without.tables[0].fields[0].metadata.clear();
+            let yaml = yaml_serde::to_string(&without).unwrap();
+            assert!(!yaml.contains("metadata"), "{yaml}");
+        }
+
+        #[rstest]
+        #[case::a_list("tags: [a, b]")]
+        #[case::a_mapping("owner: {team: data}")]
+        fn a_value_that_is_not_a_scalar_is_rejected(#[case] entry: &str) {
+            let yaml = format!(
+                "tables:\n  - name: t\n    xml_path: /r\n    row: i\n    metadata:\n      {entry}\n    fields: [{{name: v, path: v, data_type: Int32}}]\n"
+            );
+            let err = Config::from_yaml_str(&yaml).unwrap_err();
+            assert!(matches!(err, Error::Yaml(_)), "{err:?}");
+            assert!(err.to_string().contains("expected a string"), "{err}");
+        }
+
+        fn field_with(metadata: &[(&str, &str)]) -> FieldConfig {
+            FieldConfigBuilder::new("v", "v", DType::Int32)
+                .metadata(metadata.iter().copied())
+                .build()
+                .unwrap()
+        }
+
+        /// Arrow reserves the `ARROW:` prefix, and gives some of its keys
+        /// meaning, so a config setting one would change how readers interpret
+        /// the output rather than annotate it.
+        #[test]
+        fn a_key_arrow_reserves_is_rejected_on_a_table_and_on_a_field() {
+            let on_table = TableConfig::builder("t", "/r")
+                .row("i")
+                .metadata([("ARROW:extension:name", "x")])
+                .field(field_with(&[]))
+                .build();
+            let err = Config::builder().table(on_table).build().unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    Error::InvalidConfig {
+                        reason: ConfigIssue::ReservedMetadataKey { field: None, key, .. }
+                    } if key == "ARROW:extension:name"
+                ),
+                "{err:?}"
+            );
+
+            let on_field = TableConfig::builder("t", "/r")
+                .row("i")
+                .field(field_with(&[
+                    ("unit", "hPa"),
+                    ("ARROW:extension:metadata", "{}"),
+                ]))
+                .build();
+            let err = Config::builder().table(on_field).build().unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "Field 'v' in table 't' sets metadata key 'ARROW:extension:metadata', but keys \
+                 beginning 'ARROW:' are reserved by the Arrow format, and some change how readers \
+                 interpret the data; choose another key"
+            );
+        }
+
+        /// Only the prefix exactly as Arrow reserves it: metadata keys are
+        /// case-sensitive, and a key that merely mentions Arrow is the author's.
+        #[rstest]
+        #[case::other_case("arrow:extension:name")]
+        #[case::not_a_prefix("source:ARROW:x")]
+        #[case::no_colon("ARROW")]
+        fn keys_outside_the_reserved_prefix_are_accepted(#[case] key: &str) {
+            let table = TableConfig::builder("t", "/r")
+                .row("i")
+                .metadata([(key, "x")])
+                .field(field_with(&[(key, "x")]))
+                .build();
+            let config = Config::builder().table(table).build();
+            assert!(config.is_ok(), "{config:?}");
+        }
+
+        /// The builders add entries rather than replace them, like `field`
+        /// and `level` do.
+        #[test]
+        fn builders_add_entries() {
+            let field = FieldConfigBuilder::new("v", "v", DType::Int32)
+                .metadata([("unit", "hPa")])
+                .metadata([("description", "Pressure")])
+                .build()
+                .unwrap();
+            assert_eq!(
+                field.metadata,
+                entries(&[("unit", "hPa"), ("description", "Pressure")])
+            );
+            let table = TableConfig::builder("t", "/r")
+                .metadata([("a", "1")])
+                .metadata([("b", "2")])
+                .build();
+            assert_eq!(table.metadata, entries(&[("a", "1"), ("b", "2")]));
         }
     }
 }

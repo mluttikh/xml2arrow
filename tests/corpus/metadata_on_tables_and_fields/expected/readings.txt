@@ -1,0 +1,11 @@
+# frozen snapshot — see tests/frozen_corpus.rs
+table: readings
+rows: 3
+columns:
+  1. _stations_id: UInt64 (not null)
+  2. value: Float64 (not null)
+     metadata: "unit"="hPa"
+data:
+  "0" | "1013.2"
+  "0" | "1012.8"
+  "1" | "1009.5"

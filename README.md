@@ -90,6 +90,8 @@ tables:
 - **Values** are trimmed, and a missing value is null in a `nullable` column
   and an error otherwise. `on_missing`, `on_invalid`, `on_repeat`, `null_values`
   and `trim` change that per field.
+- **`metadata`** on a table or a field is copied into the Arrow schema, so a
+  unit or a description travels with the data.
 
 The [configuration reference](docs/configuration.md) documents every key, the
 supported data types and the parser options.

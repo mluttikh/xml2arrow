@@ -278,6 +278,8 @@ fn default_row_id_name(_table: &TableConfig) -> String {
 /// table's own key column when it has one, then one index column per `levels`
 /// entry (named `<level>`, `UInt32`) or per declared link (`UInt64` for a
 /// parent key, `UInt32` for an ordinal), then the configured fields in order.
+/// The table's and each field's `metadata` become the schema's and the
+/// field's Arrow metadata.
 fn build_table_schema(table_config: &TableConfig, plan: &TableLinkPlan) -> Schema {
     // Exact, not `+ 1` for a key column most tables do not have: an
     // over-allocated `Vec` leaves `len != capacity`, and this runs once per
@@ -303,13 +305,22 @@ fn build_table_schema(table_config: &TableConfig, plan: &TableLinkPlan) -> Schem
         fields.push(Field::new(&link.column_name, dtype, false));
     }
     for fc in &table_config.fields {
-        fields.push(Field::new(
-            &fc.name,
-            fc.data_type.as_arrow_type(),
-            fc.nullable,
-        ));
+        let field = Field::new(&fc.name, fc.data_type.as_arrow_type(), fc.nullable);
+        // Behind a check so a field without metadata, which is nearly every
+        // field, allocates no map: this runs per field per `Parser::new`.
+        fields.push(if fc.metadata.is_empty() {
+            field
+        } else {
+            field.with_metadata(fc.metadata.clone().into_iter().collect())
+        });
     }
-    Schema::new(fields)
+    // Key and link columns carry none: they are the crate's, not the author's.
+    let schema = Schema::new(fields);
+    if table_config.metadata.is_empty() {
+        schema
+    } else {
+        schema.with_metadata(table_config.metadata.clone().into_iter().collect())
+    }
 }
 
 impl Parser {
@@ -402,9 +413,10 @@ impl Parser {
 
     /// Returns the output schema of `table` without parsing any document.
     ///
-    /// The schema is fully determined by the [`Config`]: one non-nullable
-    /// `UInt32` index column per `levels` entry (named `<level>`), followed by
-    /// the configured fields. Every batch the table produces — via
+    /// The schema is fully determined by the [`Config`]: the table's key and
+    /// link columns, or one non-nullable `UInt32` index column per `levels`
+    /// entry (named `<level>`), followed by the configured fields, with the
+    /// table's and fields' `metadata` attached. Every batch the table produces — via
     /// [`Parser::parse`] or the streaming entry points — shares this exact
     /// `Arc<Schema>`.
     ///
@@ -8102,6 +8114,77 @@ mod tests {
             let err = parser.single_table_schema().unwrap_err();
             assert!(matches!(err, Error::InvalidConfig { .. }));
             assert!(err.to_string().contains("exactly one table"));
+        }
+
+        /// A table's and a field's `metadata:` land on the Arrow schema, which
+        /// is the one `Arc<Schema>` every batch carries, collected or streamed.
+        /// The key columns links add are the crate's, so they carry none.
+        #[test]
+        fn metadata_reaches_the_schema_of_every_batch() {
+            let config = config_from_yaml!(
+                r#"
+                version: 2
+                tables:
+                  - name: stations
+                    xml_path: /r/stations
+                    row: station
+                    metadata: {source: station export}
+                    fields:
+                      - {name: id, path: "@id", data_type: Utf8, metadata: {description: Station code}}
+                  - name: readings
+                    xml_path: /r/stations/station/readings
+                    row: reading
+                    links: [{parent: stations}]
+                    fields:
+                      - {name: value, path: value, data_type: Float64, metadata: {unit: hPa}}
+                "#
+            );
+            let parser = Parser::new(&config).unwrap();
+            let meta = |metadata: &std::collections::HashMap<String, String>, key: &str| {
+                metadata.get(key).cloned()
+            };
+
+            let stations = parser.schema("stations").unwrap();
+            assert_eq!(
+                meta(stations.metadata(), "source").as_deref(),
+                Some("station export")
+            );
+            let id = stations.field_with_name("id").unwrap();
+            assert_eq!(
+                meta(id.metadata(), "description").as_deref(),
+                Some("Station code")
+            );
+            assert!(
+                stations
+                    .field_with_name("_id")
+                    .unwrap()
+                    .metadata()
+                    .is_empty()
+            );
+
+            let readings = parser.schema("readings").unwrap();
+            assert!(readings.metadata().is_empty());
+            let value = readings.field_with_name("value").unwrap();
+            assert_eq!(meta(value.metadata(), "unit").as_deref(), Some("hPa"));
+            let key = readings.field_with_name("_stations_id").unwrap();
+            assert!(key.metadata().is_empty());
+
+            let xml = br#"<r><stations><station id="A"><readings><reading><value>1</value></reading><reading><value>2</value></reading></readings></station></stations></r>"#;
+            let collected = parser.parse_slice(xml).unwrap();
+            assert!(Arc::ptr_eq(&collected["stations"].schema(), &stations));
+            assert!(Arc::ptr_eq(&collected["readings"].schema(), &readings));
+
+            let options = BatchOptions::default().with_max_rows_per_batch(1);
+            let mut batches = 0;
+            for item in parser.parse_batches_slice(xml, options) {
+                let TableBatch { table, batch } = item.unwrap();
+                assert!(Arc::ptr_eq(
+                    &batch.schema(),
+                    &parser.schema(&table).unwrap()
+                ));
+                batches += 1;
+            }
+            assert_eq!(batches, 3);
         }
 
         #[test]

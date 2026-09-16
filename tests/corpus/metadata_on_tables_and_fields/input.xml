@@ -1,0 +1,15 @@
+<report>
+  <stations>
+    <station id="S1">
+      <readings>
+        <reading><value>1013.2</value></reading>
+        <reading><value>1012.8</value></reading>
+      </readings>
+    </station>
+    <station id="S2">
+      <readings>
+        <reading><value>1009.5</value></reading>
+      </readings>
+    </station>
+  </stations>
+</report>

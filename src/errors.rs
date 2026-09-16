@@ -553,6 +553,17 @@ pub enum ConfigIssue {
         /// The table's resolved row element, which does not contain the field.
         row_path: String,
     },
+    /// A table's or field's `metadata` uses a key beginning `ARROW:`, which the
+    /// Arrow format reserves for its own use. Some of those keys change how
+    /// readers interpret a column, so the config would do more than annotate.
+    ReservedMetadataKey {
+        /// The table the metadata is on, or the field's table.
+        table: String,
+        /// The field the metadata is on; `None` for the table's own metadata.
+        field: Option<String>,
+        /// The reserved key.
+        key: String,
+    },
 }
 
 // --- Display -----------------------------------------------------------------
@@ -846,6 +857,16 @@ impl fmt::Display for ConfigIssue {
                 f,
                 "version: 2 requires every field to lie inside its table's row element, but field '{field}' of table '{table}' has path '{field_path}', outside the row element '{row_path}'; its value would attach to whichever row ends next. Point the field inside the row, or give it a table of its own"
             ),
+            ConfigIssue::ReservedMetadataKey { table, field, key } => {
+                match field {
+                    Some(field) => write!(f, "Field '{field}' in table '{table}'")?,
+                    None => write!(f, "Table '{table}'")?,
+                }
+                write!(
+                    f,
+                    " sets metadata key '{key}', but keys beginning 'ARROW:' are reserved by the Arrow format, and some change how readers interpret the data; choose another key"
+                )
+            }
         }
     }
 }

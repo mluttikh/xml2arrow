@@ -1,0 +1,11 @@
+# frozen snapshot — see tests/frozen_corpus.rs
+table: stations
+rows: 2
+metadata: "revision"="1.50", "source"="station export"
+columns:
+  1. _id: UInt64 (not null)
+  2. id: Utf8 (not null)
+     metadata: "description"="Station code"
+data:
+  "0" | "S1"
+  "1" | "S2"
