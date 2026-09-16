@@ -903,14 +903,14 @@ tables:
         matches!(
             &err,
             xml2arrow::Error::InvalidConfig {
-                reason: xml2arrow::errors::ConfigIssue::FieldInsideNestedTableInVersion2 { .. }
+                reason: xml2arrow::errors::ConfigIssue::FieldInsideNestedTable { .. }
             }
         ),
         "{err:?}"
     );
     let message = err.to_string();
     assert!(
-        message.contains("field 'count' of table 'outer'")
+        message.contains("Field 'count' of table 'outer'")
             && message.contains("'/r/a/bs/@count'")
             && message.contains("declare the field on 'inner'"),
         "{message}"
@@ -957,14 +957,14 @@ tables:
         matches!(
             &err,
             xml2arrow::Error::InvalidConfig {
-                reason: xml2arrow::errors::ConfigIssue::FieldOutsideRowInVersion2 { .. }
+                reason: xml2arrow::errors::ConfigIssue::FieldOutsideRow { .. }
             }
         ),
         "{err:?}"
     );
     let message = err.to_string();
     assert!(
-        message.contains("field 'label' of table 'items'")
+        message.contains("Field 'label' of table 'items'")
             && message.contains("outside the row element '/report/data/item'"),
         "{message}"
     );
@@ -1014,14 +1014,14 @@ tables:
         matches!(
             &err,
             xml2arrow::Error::InvalidConfig {
-                reason: xml2arrow::errors::ConfigIssue::UnknownKeyInVersion2 { .. }
+                reason: xml2arrow::errors::ConfigIssue::UnknownKey { .. }
             }
         ),
         "{err:?}"
     );
     assert!(
         err.to_string()
-            .contains("field 'pressure' of table 'readings' sets 'scal'"),
+            .contains("Unknown key 'scal' in field 'pressure' of table 'readings'"),
         "{err}"
     );
 

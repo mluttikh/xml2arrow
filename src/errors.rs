@@ -489,45 +489,51 @@ pub enum ConfigIssue {
         /// The version the config asked for.
         version: u32,
     },
-    /// `version: 2` asserts every table declares its row boundaries, and this
-    /// one leaves them inferred.
-    InferredRowInVersion2 {
-        /// The table still leaving its rows inferred.
+    // The variants below are the rules of configuration format version 2. While
+    // version 1 is supported, only a config declaring `version: 2` is held to
+    // them, and a version 1 config hears about the same shapes as lints and as
+    // steps in its deprecation notice. They are named after the rule rather than
+    // the version, and their messages state the rule and the fix, so that
+    // neither goes stale once version 2 is the only format.
+    /// A table does not declare `row:`, the element that makes one row.
+    MissingRow {
+        /// The table without a `row:`.
         table: String,
     },
-    /// `version: 2` asserts no table uses `levels`. It names labels and takes
-    /// its values positionally; `links` names the relationship.
-    LevelsInVersion2 {
-        /// The table still using `levels:`.
-        table: String,
+    /// The config uses a key another key replaces: `levels` on a table, which
+    /// `links` replaces, or `xml_path` on a field, which `path` replaces.
+    ///
+    /// Version 1 still accepts both keys. The variant is named for what stays
+    /// true once they are gone: the parser can then still recognize the old
+    /// spelling and say what replaced it, rather than calling it unknown.
+    ReplacedKey {
+        /// Where the key is: `table 'stations'`, `field 'id' of table
+        /// 'stations'`.
+        location: String,
+        /// The replaced key: `levels` or `xml_path`.
+        key: &'static str,
+        /// The key that replaces it: `links` or `path`.
+        replacement: &'static str,
     },
-    /// `version: 2` asserts every field uses `path`. `xml_path` is the
-    /// deprecated spelling of the same key.
-    FieldXmlPathInVersion2 {
-        /// The field's table.
-        table: String,
-        /// The field still spelled `xml_path:`.
-        field: String,
-    },
-    /// A table nested inside another omitted `links:` entirely, under
-    /// `version: 2`. Omitting it is how a migration silently drops the
-    /// relationship `levels` used to express positionally, so the key must be
-    /// present — `links: []` when the table deliberately has no link.
-    NestedTableWithoutLinksInVersion2 {
+    /// A table nested inside another omits `links:` entirely.
+    ///
+    /// Omitting the key is how a migration silently drops the relationship
+    /// `levels` used to express, so it must be present, as `links: []` when the
+    /// table deliberately has no link.
+    NestedTableWithoutLinks {
         /// The nested table with no links.
         table: String,
         /// The nearest table enclosing it.
         enclosing_table: String,
     },
-    /// Under `version: 2`, a field lies inside the `xml_path` of a table nested
-    /// within its own table. That table captures every value inside its
-    /// `xml_path`, so the field could never receive one.
+    /// A field lies inside the `xml_path` of a table nested within its own
+    /// table. That table captures every value inside its `xml_path`, so the
+    /// field could never receive one.
     ///
-    /// Version 1 accepts the same config, because rejecting it would break
-    /// configs that load today; there it is reported as
-    /// [`Lint::FieldInsideNestedTable`](crate::Lint::FieldInsideNestedTable), and the column is still
-    /// never filled.
-    FieldInsideNestedTableInVersion2 {
+    /// A version 1 config with this shape loads, and reports it as
+    /// [`Lint::FieldInsideNestedTable`](crate::Lint::FieldInsideNestedTable);
+    /// the column is never filled there either.
+    FieldInsideNestedTable {
         /// The table the field is declared on.
         table: String,
         /// The field that can never receive a value.
@@ -537,13 +543,13 @@ pub enum ConfigIssue {
         /// The nested table that captures values there.
         nested_table: String,
     },
-    /// Under `version: 2`, a field lies outside its table's row element.
+    /// A field lies outside its table's row element.
     ///
     /// Its value would attach to whichever row ends next rather than to a row
     /// of its own, so a value that appears once in the document lands on one
-    /// row and leaves the rest empty. Version 1 accepts the same config, and
-    /// reports it as [`Lint::FieldOutsideRow`](crate::Lint::FieldOutsideRow).
-    FieldOutsideRowInVersion2 {
+    /// row and leaves the rest empty. A version 1 config with this shape loads,
+    /// and reports it as [`Lint::FieldOutsideRow`](crate::Lint::FieldOutsideRow).
+    FieldOutsideRow {
         /// The table the field is declared on.
         table: String,
         /// The field outside the row element.
@@ -553,10 +559,12 @@ pub enum ConfigIssue {
         /// The table's resolved row element, which does not contain the field.
         row_path: String,
     },
-    /// Under `version: 2`, the document sets a key the configuration does not
-    /// define, most often a misspelled one. Version 1 ignores it, which leaves
-    /// the setting it was meant to be at its default without a word.
-    UnknownKeyInVersion2 {
+    /// The config sets a key it does not define, most often a misspelled one.
+    ///
+    /// A version 1 config ignores it, which leaves the setting it was meant to
+    /// be at its default without a word, and reports it as
+    /// [`Lint::UnknownKey`](crate::Lint::UnknownKey).
+    UnknownKey {
         /// Where the key is, as a reader would look for it: `field 'value' of
         /// table 'readings'`, `parser_options`, `the top level`.
         location: String,
@@ -830,46 +838,57 @@ impl fmt::Display for ConfigIssue {
                 f,
                 "Unsupported config version {version}; this build understands 1 (the default, and every release so far) and 2"
             ),
-            ConfigIssue::InferredRowInVersion2 { table } => write!(
+            ConfigIssue::MissingRow { table } => write!(
                 f,
-                "version: 2 requires every table to declare its row boundaries, but table '{table}' has no 'row:'; add one (row: \".\" gives one row per table element) or remove 'version: 2'"
+                "Table '{table}' does not declare 'row:', the element that makes one row; name the repeating element, or use row: \".\" for one row per table element"
             ),
-            ConfigIssue::LevelsInVersion2 { table } => write!(
-                f,
-                "version: 2 does not allow 'levels:', but table '{table}' uses it; replace it with 'links:' or remove 'version: 2'"
-            ),
-            ConfigIssue::FieldXmlPathInVersion2 { table, field } => write!(
-                f,
-                "version: 2 does not allow 'xml_path:' on a field, but field '{field}' of table '{table}' uses it; rename the key to 'path:' — the value is unchanged — or remove 'version: 2'"
-            ),
-            ConfigIssue::NestedTableWithoutLinksInVersion2 {
+            ConfigIssue::ReplacedKey {
+                location,
+                key,
+                replacement,
+            } => {
+                write!(
+                    f,
+                    "The key '{key}:' in {location} is replaced by '{replacement}:'"
+                )?;
+                // What replacing involves differs by key, and is the part a
+                // reader needs next.
+                match *key {
+                    "levels" => f.write_str(
+                        "; declare 'links:' instead, with an 'index_of:' link for each position column or a 'parent:' link for a join key",
+                    ),
+                    "xml_path" => f.write_str("; rename the key, as the value means the same"),
+                    _ => Ok(()),
+                }
+            }
+            ConfigIssue::NestedTableWithoutLinks {
                 table,
                 enclosing_table,
             } => write!(
                 f,
-                "version: 2 requires a nested table to declare how it relates to the table enclosing it, but table '{table}' (inside '{enclosing_table}') declares no 'links:'; add a 'parent:' link for a join key, 'index_of:' for the positional column 'levels' produced, or 'links: []' if it deliberately has no link"
+                "Table '{table}' sits inside table '{enclosing_table}' but declares no 'links:'; add a 'parent:' link for a join key, an 'index_of:' link for a position, or 'links: []' if it deliberately has no link"
             ),
-            ConfigIssue::FieldInsideNestedTableInVersion2 {
+            ConfigIssue::FieldInsideNestedTable {
                 table,
                 field,
                 field_path,
                 nested_table,
             } => write!(
                 f,
-                "version: 2 rejects a field that can never receive a value: field '{field}' of table '{table}' has path '{field_path}', inside the xml_path of table '{nested_table}', which captures every value there; declare the field on '{nested_table}', or remove it"
+                "Field '{field}' of table '{table}' can never receive a value: its path '{field_path}' is inside the xml_path of table '{nested_table}', which captures every value there; declare the field on '{nested_table}', or remove it"
             ),
-            ConfigIssue::FieldOutsideRowInVersion2 {
+            ConfigIssue::FieldOutsideRow {
                 table,
                 field,
                 field_path,
                 row_path,
             } => write!(
                 f,
-                "version: 2 requires every field to lie inside its table's row element, but field '{field}' of table '{table}' has path '{field_path}', outside the row element '{row_path}'; its value would attach to whichever row ends next. Point the field inside the row, or give it a table of its own"
+                "Field '{field}' of table '{table}' has path '{field_path}', outside the row element '{row_path}', so its value would attach to whichever row ends next; point the field inside the row, or give it a table of its own"
             ),
-            ConfigIssue::UnknownKeyInVersion2 { location, key } => write!(
+            ConfigIssue::UnknownKey { location, key } => write!(
                 f,
-                "version: 2 rejects keys the configuration does not define, but {location} sets '{key}'; check its spelling, or remove it (a note belongs in a YAML comment, and a value that should reach the output in metadata:)"
+                "Unknown key '{key}' in {location}; check its spelling, or remove it (a note belongs in a YAML comment, and a value that should reach the output in metadata:)"
             ),
             ConfigIssue::ReservedMetadataKey { table, field, key } => {
                 match field {
@@ -1223,6 +1242,78 @@ mod tests {
                 "source() mismatch for {err:?}: expected Some={expected}, got Some={actual}"
             );
         }
+    }
+
+    /// The rules of configuration format version 2 outlive version 1, so
+    /// their messages state the rule and the fix and never the version: a
+    /// message that says "version: 2 requires" or "remove 'version: 2'" goes
+    /// stale the day version 2 is the only format.
+    #[test]
+    fn rule_messages_do_not_name_a_configuration_version() {
+        let rules = [
+            ConfigIssue::MissingRow { table: "t".into() },
+            ConfigIssue::ReplacedKey {
+                location: "table 't'".into(),
+                key: "levels",
+                replacement: "links",
+            },
+            ConfigIssue::ReplacedKey {
+                location: "field 'v' of table 't'".into(),
+                key: "xml_path",
+                replacement: "path",
+            },
+            ConfigIssue::NestedTableWithoutLinks {
+                table: "t".into(),
+                enclosing_table: "o".into(),
+            },
+            ConfigIssue::FieldInsideNestedTable {
+                table: "t".into(),
+                field: "v".into(),
+                field_path: "/r/n/v".into(),
+                nested_table: "n".into(),
+            },
+            ConfigIssue::FieldOutsideRow {
+                table: "t".into(),
+                field: "v".into(),
+                field_path: "/r/v".into(),
+                row_path: "/r/i".into(),
+            },
+            ConfigIssue::UnknownKey {
+                location: "table 't'".into(),
+                key: "rowz".into(),
+            },
+        ];
+        for rule in rules {
+            let message = rule.to_string();
+            assert!(!message.to_lowercase().contains("version"), "{message}");
+        }
+    }
+
+    /// Replacing `levels` and renaming `xml_path` are different jobs, and the
+    /// message says which.
+    #[test]
+    fn a_replaced_key_says_what_replacing_it_involves() {
+        let rename = ConfigIssue::ReplacedKey {
+            location: "field 'id' of table 'stations'".into(),
+            key: "xml_path",
+            replacement: "path",
+        };
+        assert_eq!(
+            rename.to_string(),
+            "The key 'xml_path:' in field 'id' of table 'stations' is replaced by 'path:'; \
+             rename the key, as the value means the same"
+        );
+        let levels = ConfigIssue::ReplacedKey {
+            location: "table 'stations'".into(),
+            key: "levels",
+            replacement: "links",
+        };
+        assert_eq!(
+            levels.to_string(),
+            "The key 'levels:' in table 'stations' is replaced by 'links:'; declare 'links:' \
+             instead, with an 'index_of:' link for each position column or a 'parent:' link \
+             for a join key"
+        );
     }
 
     #[test]

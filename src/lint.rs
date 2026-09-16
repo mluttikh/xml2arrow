@@ -127,17 +127,23 @@ impl MigrationStep {
     pub(crate) fn into_config_issue(self) -> ConfigIssue {
         match self {
             MigrationStep::RemoveUnknownKey { location, key } => {
-                ConfigIssue::UnknownKeyInVersion2 { location, key }
+                ConfigIssue::UnknownKey { location, key }
             }
-            MigrationStep::DeclareRow { table } => ConfigIssue::InferredRowInVersion2 { table },
-            MigrationStep::ReplaceLevels { table } => ConfigIssue::LevelsInVersion2 { table },
-            MigrationStep::RenameFieldXmlPath { table, field } => {
-                ConfigIssue::FieldXmlPathInVersion2 { table, field }
-            }
+            MigrationStep::DeclareRow { table } => ConfigIssue::MissingRow { table },
+            MigrationStep::ReplaceLevels { table } => ConfigIssue::ReplacedKey {
+                location: format!("table '{table}'"),
+                key: "levels",
+                replacement: "links",
+            },
+            MigrationStep::RenameFieldXmlPath { table, field } => ConfigIssue::ReplacedKey {
+                location: format!("field '{field}' of table '{table}'"),
+                key: "xml_path",
+                replacement: "path",
+            },
             MigrationStep::LinkNestedTable {
                 table,
                 enclosing_table,
-            } => ConfigIssue::NestedTableWithoutLinksInVersion2 {
+            } => ConfigIssue::NestedTableWithoutLinks {
                 table,
                 enclosing_table,
             },
@@ -146,7 +152,7 @@ impl MigrationStep {
                 field,
                 field_path,
                 nested_table,
-            } => ConfigIssue::FieldInsideNestedTableInVersion2 {
+            } => ConfigIssue::FieldInsideNestedTable {
                 table,
                 field,
                 field_path,
@@ -157,7 +163,7 @@ impl MigrationStep {
                 field,
                 field_path,
                 row_path,
-            } => ConfigIssue::FieldOutsideRowInVersion2 {
+            } => ConfigIssue::FieldOutsideRow {
                 table,
                 field,
                 field_path,

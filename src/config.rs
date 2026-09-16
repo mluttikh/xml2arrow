@@ -3782,7 +3782,7 @@ tables:
             assert!(matches!(
                 config,
                 Err(Error::InvalidConfig {
-                    reason: ConfigIssue::InferredRowInVersion2 { .. }
+                    reason: ConfigIssue::MissingRow { .. }
                 })
             ));
         }
@@ -3795,7 +3795,11 @@ tables:
             assert!(matches!(
                 config,
                 Err(Error::InvalidConfig {
-                    reason: ConfigIssue::LevelsInVersion2 { .. }
+                    reason: ConfigIssue::ReplacedKey {
+                        key: "levels",
+                        replacement: "links",
+                        ..
+                    }
                 })
             ));
         }
@@ -3809,7 +3813,11 @@ tables:
             assert!(matches!(
                 config,
                 Err(Error::InvalidConfig {
-                    reason: ConfigIssue::FieldXmlPathInVersion2 { .. }
+                    reason: ConfigIssue::ReplacedKey {
+                        key: "xml_path",
+                        replacement: "path",
+                        ..
+                    }
                 })
             ));
         }
@@ -3835,7 +3843,7 @@ tables:
             assert!(matches!(
                 config,
                 Err(Error::InvalidConfig {
-                    reason: ConfigIssue::NestedTableWithoutLinksInVersion2 { .. }
+                    reason: ConfigIssue::NestedTableWithoutLinks { .. }
                 })
             ));
         }
@@ -3892,7 +3900,7 @@ tables:
                 matches!(
                     &omitted,
                     Err(Error::InvalidConfig {
-                        reason: ConfigIssue::NestedTableWithoutLinksInVersion2 { table, .. }
+                        reason: ConfigIssue::NestedTableWithoutLinks { table, .. }
                     }) if table == "stations"
                 ),
                 "{omitted:?}"
@@ -3992,7 +4000,7 @@ tables:
             let config = outer_and_inner(path);
             let Err(Error::InvalidConfig {
                 reason:
-                    ConfigIssue::FieldInsideNestedTableInVersion2 {
+                    ConfigIssue::FieldInsideNestedTable {
                         table,
                         field,
                         field_path,
@@ -4000,7 +4008,7 @@ tables:
                     },
             }) = &config
             else {
-                panic!("expected FieldInsideNestedTableInVersion2, got {config:?}");
+                panic!("expected FieldInsideNestedTable, got {config:?}");
             };
             assert_eq!(
                 (table.as_str(), field.as_str(), nested_table.as_str()),
@@ -4042,7 +4050,7 @@ tables:
                 matches!(
                     &err,
                     Error::InvalidConfig {
-                        reason: ConfigIssue::FieldInsideNestedTableInVersion2 { nested_table, .. }
+                        reason: ConfigIssue::FieldInsideNestedTable { nested_table, .. }
                     } if nested_table == "innermost"
                 ),
                 "{err:?}"
@@ -4070,7 +4078,7 @@ tables:
                 matches!(
                     config,
                     Err(Error::InvalidConfig {
-                        reason: ConfigIssue::FieldInsideNestedTableInVersion2 { .. }
+                        reason: ConfigIssue::FieldInsideNestedTable { .. }
                     })
                 ),
                 "{config:?}"
@@ -4101,7 +4109,7 @@ tables:
                 matches!(
                     &err,
                     Error::InvalidConfig {
-                        reason: ConfigIssue::FieldInsideNestedTableInVersion2 { table, nested_table, .. }
+                        reason: ConfigIssue::FieldInsideNestedTable { table, nested_table, .. }
                     } if table == "stations" && nested_table == "details"
                 ),
                 "{err:?}"
@@ -4134,7 +4142,7 @@ tables:
             let config = stations_with_field(path);
             let Err(Error::InvalidConfig {
                 reason:
-                    ConfigIssue::FieldOutsideRowInVersion2 {
+                    ConfigIssue::FieldOutsideRow {
                         table,
                         field,
                         field_path,
@@ -4142,7 +4150,7 @@ tables:
                     },
             }) = &config
             else {
-                panic!("expected FieldOutsideRowInVersion2, got {config:?}");
+                panic!("expected FieldOutsideRow, got {config:?}");
             };
             assert_eq!(
                 (table.as_str(), field.as_str(), field_path.as_str()),
@@ -4196,7 +4204,7 @@ tables:
                 matches!(
                     config.validate(),
                     Err(Error::InvalidConfig {
-                        reason: ConfigIssue::FieldInsideNestedTableInVersion2 { .. }
+                        reason: ConfigIssue::FieldInsideNestedTable { .. }
                     })
                 ),
                 "{config:?}"
@@ -4438,10 +4446,10 @@ tables:
         ) {
             let err = Config::from_yaml_str(&yaml).unwrap_err();
             let Error::InvalidConfig {
-                reason: ConfigIssue::UnknownKeyInVersion2 { location, key },
+                reason: ConfigIssue::UnknownKey { location, key },
             } = &err
             else {
-                panic!("expected UnknownKeyInVersion2, got {err:?}");
+                panic!("expected UnknownKey, got {err:?}");
             };
             assert_eq!(
                 (location.as_str(), key.as_str()),
