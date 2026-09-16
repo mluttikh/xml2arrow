@@ -44,6 +44,17 @@ use crate::errors::ConfigIssue;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MigrationStep {
+    /// The document sets a key the configuration does not define, which
+    /// version 1 ignores. It must be corrected or removed.
+    ///
+    /// Listed first: a misspelled key is the likeliest reason for the steps
+    /// after it. See [`Lint::UnknownKey`].
+    RemoveUnknownKey {
+        /// Where the key is, as a reader would look for it.
+        location: String,
+        /// The unknown key, as written.
+        key: String,
+    },
     /// The table leaves its row boundaries inferred; it must declare `row:`.
     DeclareRow {
         /// The table without a `row:`.
@@ -115,6 +126,9 @@ impl MigrationStep {
     /// step is still outstanding.
     pub(crate) fn into_config_issue(self) -> ConfigIssue {
         match self {
+            MigrationStep::RemoveUnknownKey { location, key } => {
+                ConfigIssue::UnknownKeyInVersion2 { location, key }
+            }
             MigrationStep::DeclareRow { table } => ConfigIssue::InferredRowInVersion2 { table },
             MigrationStep::ReplaceLevels { table } => ConfigIssue::LevelsInVersion2 { table },
             MigrationStep::RenameFieldXmlPath { table, field } => {
@@ -156,6 +170,10 @@ impl MigrationStep {
 impl fmt::Display for MigrationStep {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            MigrationStep::RemoveUnknownKey { location, key } => write!(
+                f,
+                "{location}: '{key}' is not a configuration key; correct its spelling, or remove it"
+            ),
             MigrationStep::DeclareRow { table } => {
                 write!(f, "table '{table}': declare `row:`; its rows are inferred")
             }
@@ -209,6 +227,20 @@ impl fmt::Display for MigrationStep {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Lint {
+    /// The document sets a key the configuration does not define, so the key
+    /// is ignored. Usually a misspelling, which leaves the setting it was meant
+    /// to be at its default: `trimm: false` trims anyway.
+    ///
+    /// Reported rather than rejected in a version 1 config, which loads today;
+    /// `version: 2` rejects it. Only a config read from a document can have
+    /// one, and `Config::to_yaml_file` does not write it back.
+    UnknownKey {
+        /// Where the key is, as a reader would look for it: `field 'value' of
+        /// table 'readings'`, `parser_options`, `the top level`.
+        location: String,
+        /// The unknown key, as written.
+        key: String,
+    },
     /// A table's row boundaries are inferred from **more than one** distinct
     /// child element, so it yields one partially-filled row per configured
     /// child element rather than one row per container element.
@@ -341,6 +373,10 @@ pub enum Lint {
 impl fmt::Display for Lint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Lint::UnknownKey { location, key } => write!(
+                f,
+                "Unknown key '{key}' in {location} is ignored; check its spelling, or remove it"
+            ),
             Lint::InferredRowBoundary {
                 table,
                 xml_path,
@@ -428,7 +464,8 @@ impl fmt::Display for Lint {
 /// would bury the other kinds of step under a wall of identical ones. The full
 /// list is in `steps` for anything that wants to act on it.
 fn write_config_version_1(f: &mut fmt::Formatter<'_>, steps: &[MigrationStep]) -> fmt::Result {
-    let (mut rows, mut levels, mut fields, mut links, mut captured, mut outside) = (
+    let (mut unknown, mut rows, mut levels, mut fields, mut links, mut captured, mut outside) = (
+        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -438,6 +475,9 @@ fn write_config_version_1(f: &mut fmt::Formatter<'_>, steps: &[MigrationStep]) -
     );
     for step in steps {
         match step {
+            MigrationStep::RemoveUnknownKey { location, key } => {
+                unknown.push(format!("'{key}' in {location}"))
+            }
             MigrationStep::DeclareRow { table } => rows.push(table.clone()),
             MigrationStep::ReplaceLevels { table } => levels.push(table.clone()),
             MigrationStep::RenameFieldXmlPath { table, field } => {
@@ -460,6 +500,13 @@ fn write_config_version_1(f: &mut fmt::Formatter<'_>, steps: &[MigrationStep]) -
     }
 
     let mut left = Vec::new();
+    if !unknown.is_empty() {
+        left.push(format!(
+            "{} must be corrected or removed ({})",
+            counted(unknown.len(), "unknown key", "unknown keys"),
+            first_few(&unknown),
+        ));
+    }
     if !rows.is_empty() {
         left.push(format!(
             "{} must declare `row:` rather than infer {} rows ({})",
@@ -580,7 +627,15 @@ impl Config {
     /// ```
     #[must_use]
     pub fn lint(&self) -> Vec<Lint> {
-        let mut lints = Vec::new();
+        // Unknown keys first: a misspelled key is the likeliest explanation for
+        // the findings after it.
+        let mut lints: Vec<Lint> = self
+            .unknown_keys()
+            .map(|(location, key)| Lint::UnknownKey {
+                location,
+                key: key.to_string(),
+            })
+            .collect();
         for table in &self.tables {
             if table.fields.is_empty() {
                 // A structural table's row counter is all that matters, so the
@@ -920,6 +975,52 @@ tables:
             assert!(message.contains("trimmed"), "{message}");
         }
 
+        /// Uses only version 2 keys, and otherwise declares everything, but
+        /// misspells `trim` on a field.
+        fn unknown_key() -> Config {
+            config_from_yaml!(
+                r#"
+tables:
+  - {name: t, xml_path: /r, row: i, fields: [{name: v, path: v, data_type: Utf8, trimm: false}]}
+"#
+            )
+        }
+
+        /// Declaring `version: 2` rejects the key, so the notice lists it, and
+        /// first: a misspelling is the likeliest reason for what comes after.
+        #[test]
+        fn an_unknown_key_is_the_first_step() {
+            let config = config_from_yaml!(
+                r#"
+tables:
+  - {name: t, xml_path: /r, rows: i, fields: [{name: v, path: /r/i/v, data_type: Utf8}]}
+"#
+            );
+            assert_eq!(
+                steps(&config).unwrap(),
+                vec![
+                    MigrationStep::RemoveUnknownKey {
+                        location: "table 't'".into(),
+                        key: "rows".into(),
+                    },
+                    MigrationStep::DeclareRow { table: "t".into() },
+                ]
+            );
+            let message = config
+                .lint()
+                .into_iter()
+                .find(|l| matches!(l, Lint::ConfigVersion1 { .. }))
+                .unwrap()
+                .to_string();
+            assert!(
+                message.contains(
+                    "1 unknown key must be corrected or removed ('rows' in table 't'); 1 table \
+                     must declare `row:`"
+                ),
+                "{message}"
+            );
+        }
+
         /// Uses only version 2 keys, but `outer.count` lies inside `inner`,
         /// which captures its value.
         fn field_inside_nested_table() -> Config {
@@ -1048,6 +1149,7 @@ tables:
                 ),
                 field_inside_nested_table(),
                 field_outside_row(),
+                unknown_key(),
             ];
             for config in configs {
                 let steps = steps(&config).expect("every case is version 1");
@@ -1605,6 +1707,43 @@ tables:
         assert_eq!(field, "stray");
         assert_eq!(row_path, "/report/data/item");
         assert!(outside[0].to_string().contains("'stray'"));
+    }
+
+    /// A misspelled key is ignored by version 1, which leaves the setting it
+    /// was meant to be at its default. Reported first, where it was written.
+    #[test]
+    fn an_unknown_key_is_reported_where_it_was_written() {
+        let config = config_from_yaml!(
+            r#"
+            parser_options: {trim_txt: true}
+            tables:
+              - name: t
+                xml_path: /r
+                row: i
+                fields:
+                  - {name: v, path: v, data_type: Utf8, trimm: false}
+            "#
+        );
+        let lints = config.lint_excluding_deprecation();
+        assert_eq!(
+            lints[..2],
+            [
+                Lint::UnknownKey {
+                    location: "`parser_options`".into(),
+                    key: "trim_txt".into(),
+                },
+                Lint::UnknownKey {
+                    location: "field 'v' of table 't'".into(),
+                    key: "trimm".into(),
+                },
+            ],
+            "{lints:?}"
+        );
+        assert_eq!(
+            lints[1].to_string(),
+            "Unknown key 'trimm' in field 'v' of table 't' is ignored; check its spelling, or \
+             remove it"
+        );
     }
 
     /// The shape the frozen corpus pins as `self_closing_table_element`: `n`

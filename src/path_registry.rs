@@ -768,9 +768,8 @@ tables:
     use crate::config_from_yaml;
 
     fn create_test_config() -> Config {
-        Config {
-            version: None,
-            tables: vec![
+        Config::builder()
+            .tables(vec![
                 TableConfig::new(
                     "items",
                     "/root/items",
@@ -794,10 +793,9 @@ tables:
                             .unwrap(),
                     ],
                 ),
-            ],
-            parser_options: Default::default(),
-            defaults: None,
-        }
+            ])
+            .build()
+            .unwrap()
     }
 
     #[test]

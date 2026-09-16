@@ -315,7 +315,7 @@ pub(crate) fn paths_equal(a: &str, b: &str) -> bool {
 ///     .build()?;
 /// # Ok::<(), xml2arrow::Error>(())
 /// ```
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[non_exhaustive]
 pub struct Config {
     /// Which generation of configuration semantics this file is written
@@ -325,7 +325,8 @@ pub struct Config {
     /// engine; it says "this config is fully migrated", and validation holds it
     /// to that: every table declares [`TableConfig::row`], no table uses
     /// `levels`, every field uses `path` rather than the deprecated
-    /// `xml_path`, every table nested inside another declares
+    /// `xml_path`, every key is one the configuration defines, every table
+    /// nested inside another declares
     /// [`TableConfig::links`] — `links: []` when it deliberately has none —
     /// every field lies inside its table's row element, and no field lies
     /// inside a table nested within its own, where the nested table would
@@ -354,6 +355,17 @@ pub struct Config {
     /// own. Absent leaves every field on current behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defaults: Option<ValuePolicies>,
+    /// Keys the document set that the configuration does not define, in the
+    /// order they appear, recorded while it was deserialized. Always empty for
+    /// a config built in code.
+    ///
+    /// Kept here, on the one struct cloned once per `Parser::new`, rather than
+    /// beside each table and field: `Parser::new` clones every `TableConfig`
+    /// and `FieldConfig`, and its fixed cost is the whole parse for a small
+    /// document. Not written back by `to_yaml_file`, because only where a key
+    /// was is recorded, not its value.
+    #[serde(skip)]
+    unknown_keys: Vec<UnknownKey>,
 }
 
 impl Config {
@@ -380,8 +392,9 @@ impl Config {
     ///   `xml_path`, compared per path segment. The root table `/` allows any field path.
     /// - Scale/offset may only be used with Float32 and Float64 fields.
     /// - When [`Config::version`] declares `2`, the config must be fully
-    ///   migrated: every table declares `row:`, none uses `levels:`, every
-    ///   field uses `path:` rather than `xml_path:`, a table nested inside
+    ///   migrated: every key is one the configuration defines, every table
+    ///   declares `row:`, none uses `levels:`, every field uses `path:` rather
+    ///   than `xml_path:`, a table nested inside
     ///   another declares `links:`, every field lies inside its table's row
     ///   element, and no field lies inside a table nested within its own.
     ///   These are checked last, so a config that is both
@@ -832,7 +845,16 @@ impl Config {
     /// so. Shared by `validate` (which rejects on the first entry) and
     /// `Config::lint` (which reports all of them as the deprecation notice).
     pub(crate) fn version_2_steps(&self) -> Vec<MigrationStep> {
-        let mut steps = Vec::new();
+        // Unknown keys first. A misspelled key is the likeliest explanation for
+        // the steps after it: `rows:` for `row:` is why a table is told to
+        // declare a row. Collecting an empty iterator allocates nothing.
+        let mut steps: Vec<MigrationStep> = self
+            .unknown_keys()
+            .map(|(location, key)| MigrationStep::RemoveUnknownKey {
+                location,
+                key: key.to_string(),
+            })
+            .collect();
         for table in &self.tables {
             if table.row.is_none() {
                 steps.push(MigrationStep::DeclareRow {
@@ -1092,6 +1114,206 @@ impl Config {
             }
         }
         false
+    }
+}
+
+// --- Deserialization ---------------------------------------------------------
+//
+// `Config` and `FieldConfig` are deserialized through explicit twins rather than
+// straight from their own derives, so that every key the document sets but the
+// configuration does not define is recorded instead of silently dropped.
+//
+// `serde_ignored` reports each key serde skips, with its path, without changing
+// how anything else deserializes: values still reach their fields straight from
+// the YAML deserializer, so metadata keeps its spelling and errors keep their line
+// and column. It cannot see into a `#[serde(flatten)]` struct, whose leftover keys
+// serde discards internally, which is why a field's policy keys are spelled out
+// in `FieldConfigRepr` instead of flattened in as `FieldConfig` serializes them.
+//
+// Both twins convert with a struct literal naming every field, so a key added to
+// `Config`, `FieldConfig` or `ValuePolicies` without its twin fails to compile.
+
+/// A key the document set that the configuration does not define.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UnknownKey {
+    /// Mapping keys and sequence indices from the top of the document down to
+    /// the unknown key, which is last.
+    path: Vec<KeySegment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum KeySegment {
+    Key(String),
+    Index(usize),
+}
+
+impl UnknownKey {
+    fn from_path(path: &serde_ignored::Path<'_>) -> Self {
+        fn collect(path: &serde_ignored::Path<'_>, segments: &mut Vec<KeySegment>) {
+            use serde_ignored::Path;
+            match path {
+                Path::Root => {}
+                Path::Seq { parent, index } => {
+                    collect(parent, segments);
+                    segments.push(KeySegment::Index(*index));
+                }
+                Path::Map { parent, key } => {
+                    collect(parent, segments);
+                    segments.push(KeySegment::Key(key.clone()));
+                }
+                // An `Option` or a newtype is a level in serde's path but not in
+                // the document's.
+                Path::Some { parent }
+                | Path::NewtypeStruct { parent }
+                | Path::NewtypeVariant { parent } => collect(parent, segments),
+            }
+        }
+        let mut segments = Vec::new();
+        collect(path, &mut segments);
+        Self { path: segments }
+    }
+}
+
+impl Config {
+    /// Every key the document set that this configuration does not define, as
+    /// `(where, key)`, in document order.
+    ///
+    /// `where` names what a reader would look for in the YAML: `table
+    /// 'readings'`, `field 'value' of table 'readings'`, `link 1 of table
+    /// 'readings'`, `parser_options`, `defaults`, or `the top level`.
+    pub(crate) fn unknown_keys(&self) -> impl Iterator<Item = (String, &str)> + '_ {
+        self.unknown_keys.iter().filter_map(|unknown| {
+            let (KeySegment::Key(key), parents) = unknown.path.split_last()? else {
+                return None;
+            };
+            Some((self.describe_key_location(parents), key.as_str()))
+        })
+    }
+
+    fn describe_key_location(&self, parents: &[KeySegment]) -> String {
+        use KeySegment::{Index, Key};
+        let table = |index: usize| match self.tables.get(index) {
+            Some(table) => format!("table '{}'", table.name),
+            None => format!("table {}", index + 1),
+        };
+        match parents {
+            [] => "the top level".to_string(),
+            [Key(section)] if section == "parser_options" || section == "defaults" => {
+                format!("`{section}`")
+            }
+            [Key(tables), Index(t)] if tables == "tables" => table(*t),
+            [Key(tables), Index(t), Key(links), Index(l)]
+                if tables == "tables" && links == "links" =>
+            {
+                format!("link {} of {}", l + 1, table(*t))
+            }
+            [Key(tables), Index(t), Key(fields), Index(f)]
+                if tables == "tables" && fields == "fields" =>
+            {
+                match self.tables.get(*t).and_then(|table| table.fields.get(*f)) {
+                    Some(field) => format!("field '{}' of {}", field.name, table(*t)),
+                    None => format!("field {} of {}", f + 1, table(*t)),
+                }
+            }
+            // Nowhere else accepts a mapping with fixed keys today; a path from
+            // somewhere new is shown as written rather than guessed at.
+            other => other
+                .iter()
+                .map(|segment| match segment {
+                    Key(key) => key.clone(),
+                    Index(index) => index.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join("."),
+        }
+    }
+}
+
+/// `Config` as the document spells it.
+#[derive(Deserialize)]
+#[serde(rename = "Config")]
+struct ConfigRepr {
+    #[serde(default)]
+    version: Option<u32>,
+    tables: Vec<TableConfig>,
+    #[serde(default)]
+    parser_options: ParserOptions,
+    #[serde(default)]
+    defaults: Option<ValuePolicies>,
+}
+
+impl<'de> Deserialize<'de> for Config {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut unknown_keys = Vec::new();
+        let repr: ConfigRepr = serde_ignored::deserialize(deserializer, |path| {
+            unknown_keys.push(UnknownKey::from_path(&path));
+        })?;
+        Ok(Config {
+            version: repr.version,
+            tables: repr.tables,
+            parser_options: repr.parser_options,
+            defaults: repr.defaults,
+            unknown_keys,
+        })
+    }
+}
+
+/// `FieldConfig` as the document spells it: the policy keys side by side with
+/// the others, where `serde_ignored` can see a misspelled one.
+///
+/// The attributes match `FieldConfig`'s and `ValuePolicies`', including the
+/// bare-`null` handling of `on_missing` and `on_invalid`.
+#[derive(Deserialize)]
+#[serde(rename = "FieldConfig")]
+struct FieldConfigRepr {
+    name: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    xml_path: Option<String>,
+    data_type: DType,
+    #[serde(default)]
+    nullable: bool,
+    #[serde(default)]
+    scale: Option<f64>,
+    #[serde(default)]
+    offset: Option<f64>,
+    #[serde(default)]
+    trim: Option<bool>,
+    #[serde(default, deserialize_with = "de_policy_allowing_null")]
+    on_missing: Option<OnMissing>,
+    #[serde(default, deserialize_with = "de_policy_allowing_null")]
+    on_invalid: Option<OnInvalid>,
+    #[serde(default)]
+    on_repeat: Option<OnRepeat>,
+    #[serde(default)]
+    null_values: Option<Vec<String>>,
+    #[serde(default)]
+    metadata: BTreeMap<String, String>,
+}
+
+impl From<FieldConfigRepr> for FieldConfig {
+    fn from(repr: FieldConfigRepr) -> Self {
+        FieldConfig {
+            name: repr.name,
+            path: repr.path,
+            xml_path: repr.xml_path,
+            data_type: repr.data_type,
+            nullable: repr.nullable,
+            scale: repr.scale,
+            offset: repr.offset,
+            policies: ValuePolicies {
+                trim: repr.trim,
+                on_missing: repr.on_missing,
+                on_invalid: repr.on_invalid,
+                on_repeat: repr.on_repeat,
+                null_values: repr.null_values,
+            },
+            metadata: repr.metadata,
+        }
     }
 }
 
@@ -1537,6 +1759,7 @@ impl ConfigBuilder {
             tables: self.tables,
             parser_options: self.parser_options,
             defaults: self.defaults,
+            unknown_keys: Vec::new(),
         };
         config.validate()?;
         Ok(config)
@@ -1647,6 +1870,7 @@ impl TableConfigBuilder {
 /// Marked `#[non_exhaustive]`: build one with [`FieldConfigBuilder`], so that
 /// adding a per-field key in a future release stays a non-breaking change.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(from = "FieldConfigRepr")]
 #[non_exhaustive]
 pub struct FieldConfig {
     /// The name of the field (and the name of the resulting Arrow column).
@@ -2005,6 +2229,7 @@ mod tests {
                 version: None,
                 parser_options: Default::default(),
                 defaults: None,
+                unknown_keys: Vec::new(),
                 tables: vec![
                     TableConfig::new("table1", "/path/to", vec![], vec![
                         FieldConfigBuilder::new("string_field", "/path/to/string_field", DType::Utf8)
@@ -2028,6 +2253,7 @@ mod tests {
                 version: None,
                 parser_options: Default::default(),
                 defaults: None,
+                unknown_keys: Vec::new(),
                 tables: vec![]
             }
         )]
@@ -2123,6 +2349,7 @@ tables:
             tables: vec![],
             parser_options: Default::default(),
             defaults: None,
+            unknown_keys: Vec::new(),
         };
         let result = config.to_yaml_file(PathBuf::from("/not/existing/path/config.yaml"));
         assert!(result.is_err());
@@ -2390,6 +2617,7 @@ tables:
             version: None,
             parser_options: Default::default(),
             defaults: None,
+            unknown_keys: Vec::new(),
             tables: vec![
                 TableConfig::new("items", "/root/a", vec![], vec![]),
                 TableConfig::new("items", "/root/b", vec![], vec![]),
@@ -2406,6 +2634,7 @@ tables:
             version: None,
             parser_options: Default::default(),
             defaults: None,
+            unknown_keys: Vec::new(),
             tables: vec![TableConfig::new("", "/root", vec![], vec![])],
         };
         let err = config.validate().unwrap_err();
@@ -2419,6 +2648,7 @@ tables:
             version: None,
             parser_options: Default::default(),
             defaults: None,
+            unknown_keys: Vec::new(),
             tables: vec![TableConfig::new("items", "", vec![], vec![])],
         };
         let err = config.validate().unwrap_err();
@@ -2432,6 +2662,7 @@ tables:
             version: None,
             parser_options: Default::default(),
             defaults: None,
+            unknown_keys: Vec::new(),
             tables: vec![TableConfig::new(
                 "items",
                 "/root",
@@ -2457,6 +2688,7 @@ tables:
             version: None,
             parser_options: Default::default(),
             defaults: None,
+            unknown_keys: Vec::new(),
             tables: vec![
                 TableConfig::new(
                     "table_a",
@@ -2489,6 +2721,7 @@ tables:
             version: None,
             parser_options: Default::default(),
             defaults: None,
+            unknown_keys: Vec::new(),
             tables: vec![TableConfig::new(
                 "items",
                 "/root",
@@ -2511,6 +2744,7 @@ tables:
             version: None,
             parser_options: Default::default(),
             defaults: None,
+            unknown_keys: Vec::new(),
             tables: vec![TableConfig::new(
                 "items",
                 "/root",
@@ -2533,6 +2767,7 @@ tables:
             version: None,
             parser_options: Default::default(),
             defaults: None,
+            unknown_keys: Vec::new(),
             tables: vec![TableConfig::new(
                 "items",
                 "/root/items",
@@ -2586,6 +2821,7 @@ tables:
             version: None,
             parser_options: Default::default(),
             defaults: None,
+            unknown_keys: Vec::new(),
             tables: vec![TableConfig::new(
                 "items",
                 "/root/item",
@@ -2609,6 +2845,7 @@ tables:
             version: None,
             parser_options: Default::default(),
             defaults: None,
+            unknown_keys: Vec::new(),
             tables: vec![TableConfig::new(
                 "items",
                 "/root/items",
@@ -2631,6 +2868,7 @@ tables:
             version: None,
             parser_options: Default::default(),
             defaults: None,
+            unknown_keys: Vec::new(),
             tables: vec![
                 TableConfig::new("a", "/data", vec![], vec![]),
                 TableConfig::new("b", "/data", vec![], vec![]),
@@ -2651,6 +2889,7 @@ tables:
             version: None,
             parser_options: Default::default(),
             defaults: None,
+            unknown_keys: Vec::new(),
             tables: vec![
                 TableConfig::new("a", "/data", vec![], vec![]),
                 TableConfig::new("b", "data/", vec![], vec![]),
@@ -2666,6 +2905,7 @@ tables:
             version: None,
             parser_options: Default::default(),
             defaults: None,
+            unknown_keys: Vec::new(),
             tables: vec![TableConfig::new(
                 "items",
                 "/root/items",
@@ -2686,6 +2926,7 @@ tables:
             version: None,
             parser_options: Default::default(),
             defaults: None,
+            unknown_keys: Vec::new(),
             tables: vec![TableConfig::new(
                 "root",
                 "/",
@@ -2706,6 +2947,7 @@ tables:
             version: None,
             parser_options: Default::default(),
             defaults: None,
+            unknown_keys: Vec::new(),
             tables: vec![
                 TableConfig::new(
                     "header",
@@ -4138,6 +4380,204 @@ tables:
                 .metadata([("b", "2")])
                 .build();
             assert_eq!(table.metadata, entries(&[("a", "1"), ("b", "2")]));
+        }
+    }
+
+    /// Keys the document sets that the configuration does not define.
+    mod unknown_keys {
+        use super::*;
+
+        /// Wraps `table` in a version 2 config with one field, `v`, whose extra
+        /// keys are `field_extra`.
+        fn version_2(top: &str, table: &str, link: &str, field_extra: &str) -> String {
+            format!(
+                "version: 2\n{top}tables:\n  - name: stations\n    xml_path: /r/stations\n    row: station\n{table}    fields: [{{name: id, path: \"@id\", data_type: Utf8}}]\n  - name: readings\n    xml_path: /r/stations/station/readings\n    row: reading\n    links: [{{parent: stations{link}}}]\n    fields:\n      - {{name: v, path: v, data_type: Float64, nullable: true{field_extra}}}\n"
+            )
+        }
+
+        #[rstest]
+        #[case::top_level(
+            version_2("defualts: {trim: true}\n", "", "", ""),
+            "the top level",
+            "defualts"
+        )]
+        #[case::parser_options(
+            version_2("parser_options: {trim_txt: true}\n", "", "", ""),
+            "`parser_options`",
+            "trim_txt"
+        )]
+        #[case::defaults(
+            version_2("defaults: {trimm: true}\n", "", "", ""),
+            "`defaults`",
+            "trimm"
+        )]
+        #[case::table(
+            version_2("", "    rowz: station\n", "", ""),
+            "table 'stations'",
+            "rowz"
+        )]
+        #[case::link(
+            version_2("", "", ", nme: key", ""),
+            "link 1 of table 'readings'",
+            "nme"
+        )]
+        #[case::field(
+            version_2("", "", "", ", scal: 100.0"),
+            "field 'v' of table 'readings'",
+            "scal"
+        )]
+        #[case::field_policy(
+            version_2("", "", "", ", on_missin: error"),
+            "field 'v' of table 'readings'",
+            "on_missin"
+        )]
+        fn version_2_rejects_an_unknown_key_and_says_where(
+            #[case] yaml: String,
+            #[case] expected_location: &str,
+            #[case] expected_key: &str,
+        ) {
+            let err = Config::from_yaml_str(&yaml).unwrap_err();
+            let Error::InvalidConfig {
+                reason: ConfigIssue::UnknownKeyInVersion2 { location, key },
+            } = &err
+            else {
+                panic!("expected UnknownKeyInVersion2, got {err:?}");
+            };
+            assert_eq!(
+                (location.as_str(), key.as_str()),
+                (expected_location, expected_key)
+            );
+        }
+
+        /// The same config without `version: 2` loads, as it always has.
+        #[test]
+        fn version_1_still_loads_a_config_with_an_unknown_key() {
+            let yaml = version_2("", "", "", ", scal: 100.0").replacen("version: 2\n", "", 1);
+            let config = Config::from_yaml_str(&yaml).unwrap();
+            assert_eq!(
+                config.unknown_keys().collect::<Vec<_>>(),
+                vec![("field 'v' of table 'readings'".to_string(), "scal")]
+            );
+        }
+
+        /// The guard against the deserialization twins falling behind the
+        /// types: every key the configuration writes, set to something other
+        /// than its default so none is left out, must read back as known.
+        #[test]
+        fn every_key_a_config_writes_reads_back_as_known() {
+            // Every field named, with no `..Default::default()`, so an option
+            // added later fails to compile here until this test sets it.
+            let options = ParserOptions {
+                trim_text: true,
+                stop_at_paths: vec!["/r/end".into()],
+                validate_closing_tags: false,
+                validate_attributes: false,
+                strip_namespaces: false,
+                allow_truncated_input: true,
+                error_on_unmatched_fields: true,
+                max_value_bytes: Some(1024),
+            };
+            let policies = ValuePolicies {
+                trim: Some(false),
+                on_missing: Some(OnMissing::Null),
+                on_invalid: Some(OnInvalid::Null),
+                on_repeat: Some(OnRepeat::Last),
+                null_values: Some(vec!["N/A".into()]),
+            };
+            let field = FieldConfigBuilder::new("v", "v", DType::Float64)
+                .nullable(true)
+                .scale(2.0)
+                .offset(1.0)
+                .policies(policies.clone())
+                .metadata([("unit", "hPa")])
+                .build()
+                .unwrap();
+            let stations = TableConfig::builder("stations", "/r/stations")
+                .row("station")
+                .row_id(RowId::Named("station_key".into()))
+                .metadata([("source", "export")])
+                .field(
+                    // Nullable, because `defaults` asks for null on missing and
+                    // invalid values, which only a nullable column can hold.
+                    FieldConfigBuilder::new("id", "@id", DType::Utf8)
+                        .nullable(true)
+                        .build()
+                        .unwrap(),
+                )
+                .build();
+            let parent = Link {
+                parent: Some("stations".into()),
+                index_of: None,
+                name: Some("station".into()),
+            };
+            let position = Link {
+                parent: None,
+                index_of: Some("/r/stations/station/readings/reading".into()),
+                name: Some("position".into()),
+            };
+            let readings = TableConfig::builder("readings", "/r/stations/station/readings")
+                .row("reading")
+                .links([parent, position])
+                .field(field)
+                .build();
+            let config = Config::builder()
+                .version(2)
+                .parser_options(options)
+                .defaults(policies)
+                .table(stations)
+                .table(readings)
+                .build()
+                .unwrap();
+
+            let yaml = yaml_serde::to_string(&config).unwrap();
+            let read = Config::from_yaml_str(&yaml).unwrap();
+            assert_eq!(read.unknown_keys().count(), 0, "{yaml}");
+            assert_eq!(read, config, "{yaml}");
+
+            // And the two keys only version 1 has.
+            let legacy = Config::builder()
+                .table(TableConfig::new(
+                    "items",
+                    "/r",
+                    vec!["item".into()],
+                    vec![FieldConfig {
+                        path: None,
+                        xml_path: Some("/r/item/v".into()),
+                        ..FieldConfigBuilder::new("v", "/r/item/v", DType::Int32)
+                            .build()
+                            .unwrap()
+                    }],
+                ))
+                .build()
+                .unwrap();
+            let yaml = yaml_serde::to_string(&legacy).unwrap();
+            let read = Config::from_yaml_str(&yaml).unwrap();
+            assert_eq!(read.unknown_keys().count(), 0, "{yaml}");
+            assert_eq!(read, legacy, "{yaml}");
+        }
+
+        /// Reading a field through its explicit twin must not cost a type
+        /// error its position, which the flattened struct used to lose for a
+        /// policy key.
+        #[test]
+        fn a_type_error_in_a_field_still_names_its_line() {
+            let err = Config::from_yaml_str(
+                "tables:\n  - name: t\n    xml_path: /r\n    row: i\n    fields:\n      - {name: v, path: v, data_type: Int32, trim: maybe}\n",
+            )
+            .unwrap_err();
+            assert!(matches!(err, Error::Yaml(_)), "{err:?}");
+            assert!(err.to_string().contains("line 6"), "{err}");
+        }
+
+        /// Only where a key was is recorded, not its value, so nothing is
+        /// written back; a config built in code has none to begin with.
+        #[test]
+        fn unknown_keys_are_not_written_back() {
+            let yaml = version_2("", "", "", ", scal: 100.0").replacen("version: 2\n", "", 1);
+            let config = Config::from_yaml_str(&yaml).unwrap();
+            let written = yaml_serde::to_string(&config).unwrap();
+            assert!(!written.contains("scal"), "{written}");
+            assert!(!written.contains("unknown"), "{written}");
         }
     }
 }

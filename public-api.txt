@@ -154,7 +154,7 @@ impl core::marker::StructuralPartialEq for xml2arrow::config::Config
 impl serde_core::ser::Serialize for xml2arrow::config::Config
 pub fn xml2arrow::config::Config::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<'de> serde_core::de::Deserialize<'de> for xml2arrow::config::Config
-pub fn xml2arrow::config::Config::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+pub fn xml2arrow::config::Config::deserialize<D>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error> where D: serde_core::de::Deserializer<'de>
 impl core::marker::Freeze for xml2arrow::config::Config
 impl core::marker::Send for xml2arrow::config::Config
 impl core::marker::Sync for xml2arrow::config::Config
@@ -456,6 +456,9 @@ pub xml2arrow::errors::ConfigIssue::RowPathNotUnderTable::table: alloc::string::
 pub xml2arrow::errors::ConfigIssue::RowPathNotUnderTable::table_path: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::SingleTableRequired
 pub xml2arrow::errors::ConfigIssue::SingleTableRequired::output_tables: usize
+pub xml2arrow::errors::ConfigIssue::UnknownKeyInVersion2
+pub xml2arrow::errors::ConfigIssue::UnknownKeyInVersion2::key: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::UnknownKeyInVersion2::location: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::UnknownParentTable
 pub xml2arrow::errors::ConfigIssue::UnknownParentTable::parent: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::UnknownParentTable::table: alloc::string::String
@@ -637,6 +640,9 @@ pub xml2arrow::lint::Lint::NeverFinalizesRows::table: alloc::string::String
 pub xml2arrow::lint::Lint::NeverFinalizesRows::xml_path: alloc::string::String
 pub xml2arrow::lint::Lint::StructuralTable
 pub xml2arrow::lint::Lint::StructuralTable::table: alloc::string::String
+pub xml2arrow::lint::Lint::UnknownKey
+pub xml2arrow::lint::Lint::UnknownKey::key: alloc::string::String
+pub xml2arrow::lint::Lint::UnknownKey::location: alloc::string::String
 impl core::clone::Clone for xml2arrow::lint::Lint
 pub fn xml2arrow::lint::Lint::clone(&self) -> xml2arrow::lint::Lint
 impl core::cmp::Eq for xml2arrow::lint::Lint
@@ -670,6 +676,9 @@ pub xml2arrow::lint::MigrationStep::MoveFieldToNestedTable::field: alloc::string
 pub xml2arrow::lint::MigrationStep::MoveFieldToNestedTable::field_path: alloc::string::String
 pub xml2arrow::lint::MigrationStep::MoveFieldToNestedTable::nested_table: alloc::string::String
 pub xml2arrow::lint::MigrationStep::MoveFieldToNestedTable::table: alloc::string::String
+pub xml2arrow::lint::MigrationStep::RemoveUnknownKey
+pub xml2arrow::lint::MigrationStep::RemoveUnknownKey::key: alloc::string::String
+pub xml2arrow::lint::MigrationStep::RemoveUnknownKey::location: alloc::string::String
 pub xml2arrow::lint::MigrationStep::RenameFieldXmlPath
 pub xml2arrow::lint::MigrationStep::RenameFieldXmlPath::field: alloc::string::String
 pub xml2arrow::lint::MigrationStep::RenameFieldXmlPath::table: alloc::string::String
@@ -719,6 +728,9 @@ pub xml2arrow::migrate::Unconverted::RowNotDeclarable
 pub xml2arrow::migrate::Unconverted::RowNotDeclarable::child_elements: alloc::vec::Vec<alloc::string::String>
 pub xml2arrow::migrate::Unconverted::RowNotDeclarable::table: alloc::string::String
 pub xml2arrow::migrate::Unconverted::RowNotDeclarable::xml_path: alloc::string::String
+pub xml2arrow::migrate::Unconverted::UnknownKey
+pub xml2arrow::migrate::Unconverted::UnknownKey::key: alloc::string::String
+pub xml2arrow::migrate::Unconverted::UnknownKey::location: alloc::string::String
 impl core::clone::Clone for xml2arrow::migrate::Unconverted
 pub fn xml2arrow::migrate::Unconverted::clone(&self) -> xml2arrow::migrate::Unconverted
 impl core::cmp::Eq for xml2arrow::migrate::Unconverted
@@ -883,6 +895,9 @@ pub xml2arrow::Lint::NeverFinalizesRows::table: alloc::string::String
 pub xml2arrow::Lint::NeverFinalizesRows::xml_path: alloc::string::String
 pub xml2arrow::Lint::StructuralTable
 pub xml2arrow::Lint::StructuralTable::table: alloc::string::String
+pub xml2arrow::Lint::UnknownKey
+pub xml2arrow::Lint::UnknownKey::key: alloc::string::String
+pub xml2arrow::Lint::UnknownKey::location: alloc::string::String
 impl core::clone::Clone for xml2arrow::lint::Lint
 pub fn xml2arrow::lint::Lint::clone(&self) -> xml2arrow::lint::Lint
 impl core::cmp::Eq for xml2arrow::lint::Lint
@@ -1019,6 +1034,9 @@ pub xml2arrow::Unconverted::RowNotDeclarable
 pub xml2arrow::Unconverted::RowNotDeclarable::child_elements: alloc::vec::Vec<alloc::string::String>
 pub xml2arrow::Unconverted::RowNotDeclarable::table: alloc::string::String
 pub xml2arrow::Unconverted::RowNotDeclarable::xml_path: alloc::string::String
+pub xml2arrow::Unconverted::UnknownKey
+pub xml2arrow::Unconverted::UnknownKey::key: alloc::string::String
+pub xml2arrow::Unconverted::UnknownKey::location: alloc::string::String
 impl core::clone::Clone for xml2arrow::migrate::Unconverted
 pub fn xml2arrow::migrate::Unconverted::clone(&self) -> xml2arrow::migrate::Unconverted
 impl core::cmp::Eq for xml2arrow::migrate::Unconverted
@@ -1096,7 +1114,7 @@ impl core::marker::StructuralPartialEq for xml2arrow::config::Config
 impl serde_core::ser::Serialize for xml2arrow::config::Config
 pub fn xml2arrow::config::Config::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<'de> serde_core::de::Deserialize<'de> for xml2arrow::config::Config
-pub fn xml2arrow::config::Config::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+pub fn xml2arrow::config::Config::deserialize<D>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error> where D: serde_core::de::Deserializer<'de>
 impl core::marker::Freeze for xml2arrow::config::Config
 impl core::marker::Send for xml2arrow::config::Config
 impl core::marker::Sync for xml2arrow::config::Config

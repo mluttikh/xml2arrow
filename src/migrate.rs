@@ -25,6 +25,10 @@
 //!    is not nullable, `on_missing: empty`, so declaring version 2 changes no
 //!    value.
 //!
+//! An unknown key is never removed. Version 1 ignores it and version 2 rejects
+//! it, and while deleting it changes nothing, correcting a misspelling can:
+//! which one was meant is the author's to say. It is reported instead.
+//!
 //! Two kinds of field are never rewritten, because version 2 rejects both and
 //! every way to satisfy it changes the output:
 //!
@@ -71,6 +75,18 @@ pub struct Conversion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Unconverted {
+    /// The document sets a key the configuration does not define. Version 1
+    /// ignores it and version 2 rejects it; removing it changes nothing, but if
+    /// it is a misspelling, correcting it can.
+    ///
+    /// The converted config does not carry the key when written out, since
+    /// only where it was is known, not its value.
+    UnknownKey {
+        /// Where the key is, as a reader would look for it.
+        location: String,
+        /// The unknown key, as written.
+        key: String,
+    },
     /// The table's rows end at more than one configured child element, or at
     /// none, so no `row:` reproduces them.
     ///
@@ -152,6 +168,11 @@ pub enum Unconverted {
 impl fmt::Display for Unconverted {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Unconverted::UnknownKey { location, key } => write!(
+                f,
+                "{location}: '{key}' is not a configuration key; version 2 rejects it, and \
+                 correcting a misspelling changes the output where removing it does not"
+            ),
             Unconverted::RowNotDeclarable {
                 table,
                 xml_path,
@@ -276,7 +297,13 @@ impl Config {
         }
 
         let mut config = self.clone();
-        let mut unconverted = Vec::new();
+        let mut unconverted: Vec<Unconverted> = self
+            .unknown_keys()
+            .map(|(location, key)| Unconverted::UnknownKey {
+                location,
+                key: key.to_string(),
+            })
+            .collect();
         declare_rows(self, &mut config, &mut unconverted);
         rename_field_paths(&mut config);
         replace_levels(self, &mut config, &mut unconverted);
@@ -862,6 +889,35 @@ mod tests {
         assert_eq!(conversion.config.version, None);
         assert_eq!(items.row.as_deref(), Some("item"));
         assert_eq!(items.fields[0].path.as_deref(), Some("/data/@id"));
+    }
+
+    /// Removing an unknown key would change nothing, but correcting a
+    /// misspelling can, so the key is reported and the config keeps its
+    /// version. Everything else still converts.
+    #[test]
+    fn an_unknown_key_is_reported_and_the_rest_converts() {
+        let config = config_from_yaml!(
+            r#"
+            tables:
+              - name: items
+                xml_path: /data
+                levels: []
+                fields:
+                  - {name: v, xml_path: /data/item/v, data_type: Float64, scal: 100.0}
+            "#
+        );
+        let conversion = config.to_version_2().unwrap();
+        assert_eq!(
+            conversion.unconverted,
+            vec![Unconverted::UnknownKey {
+                location: "field 'v' of table 'items'".to_string(),
+                key: "scal".to_string(),
+            }]
+        );
+        let items = &conversion.config.tables[0];
+        assert_eq!(conversion.config.version, None);
+        assert_eq!(items.row.as_deref(), Some("item"));
+        assert_eq!(items.fields[0].path.as_deref(), Some("/data/item/v"));
     }
 
     #[test]

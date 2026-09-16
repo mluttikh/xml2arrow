@@ -994,6 +994,60 @@ tables:
     assert_eq!(label.iter().collect::<Vec<_>>(), vec![Some("L"), None]);
 }
 
+#[test]
+fn test_version_2_rejects_an_unknown_key() {
+    // Regression: a key the configuration does not define was ignored without
+    // a word, so a misspelled optional key left its setting at the default.
+    // Here `scal: 100.0` was meant to be `scale`, and values came out unscaled.
+    // `version: 2` now rejects the key at load; the same config without the
+    // version line still loads and parses as before, and is warned.
+    let version_2 = r#"version: 2
+tables:
+  - name: readings
+    xml_path: /report
+    row: reading
+    fields:
+      - {name: pressure, path: value, data_type: Float64, scal: 100.0}
+"#;
+    let err = Config::from_yaml_str(version_2).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            xml2arrow::Error::InvalidConfig {
+                reason: xml2arrow::errors::ConfigIssue::UnknownKeyInVersion2 { .. }
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(
+        err.to_string()
+            .contains("field 'pressure' of table 'readings' sets 'scal'"),
+        "{err}"
+    );
+
+    let version_1 = Config::from_yaml_str(version_2.trim_start_matches("version: 2\n")).unwrap();
+    let parser = Parser::new(&version_1).unwrap();
+    assert!(
+        parser
+            .warnings()
+            .iter()
+            .any(|lint| matches!(lint, xml2arrow::Lint::UnknownKey { key, .. } if key == "scal")),
+        "{:?}",
+        parser.warnings()
+    );
+    // Why it is an error under version 2: the scale the author wrote was never
+    // applied.
+    let batches = parser
+        .parse_slice(b"<report><reading><value>1.5</value></reading></report>")
+        .unwrap();
+    assert_array_values!(
+        batches.get("readings").unwrap(),
+        "pressure",
+        &[1.5],
+        Float64Array
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Realistic end-to-end scenario
 // ---------------------------------------------------------------------------
