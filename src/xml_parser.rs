@@ -305,22 +305,27 @@ fn build_table_schema(table_config: &TableConfig, plan: &TableLinkPlan) -> Schem
         fields.push(Field::new(&link.column_name, dtype, false));
     }
     for fc in &table_config.fields {
-        let field = Field::new(&fc.name, fc.data_type.as_arrow_type(), fc.nullable);
-        // Behind a check so a field without metadata, which is nearly every
-        // field, allocates no map: this runs per field per `Parser::new`.
-        fields.push(if fc.metadata.is_empty() {
-            field
-        } else {
-            field.with_metadata(fc.metadata.clone().into_iter().collect())
-        });
+        fields.push(Field::new(
+            &fc.name,
+            fc.data_type.as_arrow_type(),
+            fc.nullable,
+        ));
+        // Set in place, and only when there is any. Nearly every field has
+        // none, and this runs per field per `Parser::new`, so that path stays
+        // exactly what it was before metadata existed: no map, and no second
+        // move of a `Field` through a branch.
+        if !fc.metadata.is_empty()
+            && let Some(field) = fields.last_mut()
+        {
+            field.set_metadata(fc.metadata.clone().into_iter().collect());
+        }
     }
     // Key and link columns carry none: they are the crate's, not the author's.
-    let schema = Schema::new(fields);
-    if table_config.metadata.is_empty() {
-        schema
-    } else {
-        schema.with_metadata(table_config.metadata.clone().into_iter().collect())
+    let mut schema = Schema::new(fields);
+    if !table_config.metadata.is_empty() {
+        schema.metadata = table_config.metadata.clone().into_iter().collect();
     }
+    schema
 }
 
 impl Parser {

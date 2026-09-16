@@ -467,7 +467,15 @@ impl Config {
     /// Called from the table and field checks that already run, rather than
     /// as a pass of its own: `Parser::new` validates, and its fixed cost is the
     /// whole parse for a small document.
+    ///
+    /// The emptiness test comes first because nearly every table and field has
+    /// no metadata, and it is a length read, where walking even an empty map
+    /// builds an iterator first.
+    #[inline]
     fn reserved_metadata_key(metadata: &BTreeMap<String, String>) -> Option<&String> {
+        if metadata.is_empty() {
+            return None;
+        }
         metadata.keys().find(|key| key.starts_with("ARROW:"))
     }
 
