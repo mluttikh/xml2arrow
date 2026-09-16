@@ -96,6 +96,12 @@ says how the two relate (`links`). Here `readings._stations_id` joins to
 uses a version 1 construct is rejected when it is loaded, with a message that
 names the table or field. Any version other than `1` or `2` is rejected too.
 
+Every key must be one this reference documents. A key it does not, usually a
+misspelling, is rejected when the config is loaded, with a message saying where
+it is: otherwise `trimm: false` would leave `trim` at its default without a
+word. Write notes as YAML comments, and values that should reach the output as
+[`metadata:`](#metadata).
+
 ## Tables
 
 | Key | Required | Meaning |

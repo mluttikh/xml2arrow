@@ -553,6 +553,16 @@ pub enum ConfigIssue {
         /// The table's resolved row element, which does not contain the field.
         row_path: String,
     },
+    /// Under `version: 2`, the document sets a key the configuration does not
+    /// define, most often a misspelled one. Version 1 ignores it, which leaves
+    /// the setting it was meant to be at its default without a word.
+    UnknownKeyInVersion2 {
+        /// Where the key is, as a reader would look for it: `field 'value' of
+        /// table 'readings'`, `parser_options`, `the top level`.
+        location: String,
+        /// The unknown key, as written.
+        key: String,
+    },
     /// A table's or field's `metadata` uses a key beginning `ARROW:`, which the
     /// Arrow format reserves for its own use. Some of those keys change how
     /// readers interpret a column, so the config would do more than annotate.
@@ -856,6 +866,10 @@ impl fmt::Display for ConfigIssue {
             } => write!(
                 f,
                 "version: 2 requires every field to lie inside its table's row element, but field '{field}' of table '{table}' has path '{field_path}', outside the row element '{row_path}'; its value would attach to whichever row ends next. Point the field inside the row, or give it a table of its own"
+            ),
+            ConfigIssue::UnknownKeyInVersion2 { location, key } => write!(
+                f,
+                "version: 2 rejects keys the configuration does not define, but {location} sets '{key}'; check its spelling, or remove it (a note belongs in a YAML comment, and a value that should reach the output in metadata:)"
             ),
             ConfigIssue::ReservedMetadataKey { table, field, key } => {
                 match field {
