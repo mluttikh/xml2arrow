@@ -519,6 +519,24 @@ pub enum ConfigIssue {
         /// The nearest table enclosing it.
         enclosing_table: String,
     },
+    /// Under `version: 2`, a field lies inside the `xml_path` of a table nested
+    /// within its own table. That table captures every value inside its
+    /// `xml_path`, so the field could never receive one.
+    ///
+    /// Version 1 accepts the same config, because rejecting it would break
+    /// configs that load today; there it is reported as
+    /// [`Lint::FieldInsideNestedTable`](crate::Lint::FieldInsideNestedTable), and the column is still
+    /// never filled.
+    FieldInsideNestedTableInVersion2 {
+        /// The table the field is declared on.
+        table: String,
+        /// The field that can never receive a value.
+        field: String,
+        /// The field's resolved path, inside the nested table.
+        field_path: String,
+        /// The nested table that captures values there.
+        nested_table: String,
+    },
 }
 
 // --- Display -----------------------------------------------------------------
@@ -793,6 +811,15 @@ impl fmt::Display for ConfigIssue {
             } => write!(
                 f,
                 "version: 2 requires a nested table to declare how it relates to the table enclosing it, but table '{table}' (inside '{enclosing_table}') declares no 'links:'; add a 'parent:' link for a join key, 'index_of:' for the positional column 'levels' produced, or 'links: []' if it deliberately has no link"
+            ),
+            ConfigIssue::FieldInsideNestedTableInVersion2 {
+                table,
+                field,
+                field_path,
+                nested_table,
+            } => write!(
+                f,
+                "version: 2 rejects a field that can never receive a value: field '{field}' of table '{table}' has path '{field_path}', inside the xml_path of table '{nested_table}', which captures every value there; declare the field on '{nested_table}', or remove it"
             ),
         }
     }

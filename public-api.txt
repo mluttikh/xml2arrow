@@ -379,6 +379,11 @@ pub xml2arrow::errors::ConfigIssue::EmptyRowPath::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::EmptyTableName
 pub xml2arrow::errors::ConfigIssue::EmptyTableXmlPath
 pub xml2arrow::errors::ConfigIssue::EmptyTableXmlPath::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::FieldInsideNestedTableInVersion2
+pub xml2arrow::errors::ConfigIssue::FieldInsideNestedTableInVersion2::field: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::FieldInsideNestedTableInVersion2::field_path: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::FieldInsideNestedTableInVersion2::nested_table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::FieldInsideNestedTableInVersion2::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::FieldPathConflict
 pub xml2arrow::errors::ConfigIssue::FieldPathConflict::field: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::FieldPathConflict::table: alloc::string::String
@@ -596,6 +601,12 @@ pub xml2arrow::lint::Lint::ExcessLevels
 pub xml2arrow::lint::Lint::ExcessLevels::available: usize
 pub xml2arrow::lint::Lint::ExcessLevels::declared: usize
 pub xml2arrow::lint::Lint::ExcessLevels::table: alloc::string::String
+pub xml2arrow::lint::Lint::FieldInsideNestedTable
+pub xml2arrow::lint::Lint::FieldInsideNestedTable::field: alloc::string::String
+pub xml2arrow::lint::Lint::FieldInsideNestedTable::field_path: alloc::string::String
+pub xml2arrow::lint::Lint::FieldInsideNestedTable::nested_table: alloc::string::String
+pub xml2arrow::lint::Lint::FieldInsideNestedTable::nested_table_path: alloc::string::String
+pub xml2arrow::lint::Lint::FieldInsideNestedTable::table: alloc::string::String
 pub xml2arrow::lint::Lint::FieldOutsideRow
 pub xml2arrow::lint::Lint::FieldOutsideRow::field: alloc::string::String
 pub xml2arrow::lint::Lint::FieldOutsideRow::field_path: alloc::string::String
@@ -636,6 +647,11 @@ pub xml2arrow::lint::MigrationStep::DeclareRow::table: alloc::string::String
 pub xml2arrow::lint::MigrationStep::LinkNestedTable
 pub xml2arrow::lint::MigrationStep::LinkNestedTable::enclosing_table: alloc::string::String
 pub xml2arrow::lint::MigrationStep::LinkNestedTable::table: alloc::string::String
+pub xml2arrow::lint::MigrationStep::MoveFieldToNestedTable
+pub xml2arrow::lint::MigrationStep::MoveFieldToNestedTable::field: alloc::string::String
+pub xml2arrow::lint::MigrationStep::MoveFieldToNestedTable::field_path: alloc::string::String
+pub xml2arrow::lint::MigrationStep::MoveFieldToNestedTable::nested_table: alloc::string::String
+pub xml2arrow::lint::MigrationStep::MoveFieldToNestedTable::table: alloc::string::String
 pub xml2arrow::lint::MigrationStep::RenameFieldXmlPath
 pub xml2arrow::lint::MigrationStep::RenameFieldXmlPath::field: alloc::string::String
 pub xml2arrow::lint::MigrationStep::RenameFieldXmlPath::table: alloc::string::String
@@ -664,6 +680,10 @@ pub xml2arrow::migrate::Unconverted::ExcessLevels
 pub xml2arrow::migrate::Unconverted::ExcessLevels::available: usize
 pub xml2arrow::migrate::Unconverted::ExcessLevels::declared: usize
 pub xml2arrow::migrate::Unconverted::ExcessLevels::table: alloc::string::String
+pub xml2arrow::migrate::Unconverted::FieldInsideNestedTable
+pub xml2arrow::migrate::Unconverted::FieldInsideNestedTable::field: alloc::string::String
+pub xml2arrow::migrate::Unconverted::FieldInsideNestedTable::nested_table: alloc::string::String
+pub xml2arrow::migrate::Unconverted::FieldInsideNestedTable::table: alloc::string::String
 pub xml2arrow::migrate::Unconverted::LevelCountsNonEnclosingTable
 pub xml2arrow::migrate::Unconverted::LevelCountsNonEnclosingTable::counted_table: alloc::string::String
 pub xml2arrow::migrate::Unconverted::LevelCountsNonEnclosingTable::level: alloc::string::String
@@ -818,6 +838,12 @@ pub xml2arrow::Lint::ExcessLevels
 pub xml2arrow::Lint::ExcessLevels::available: usize
 pub xml2arrow::Lint::ExcessLevels::declared: usize
 pub xml2arrow::Lint::ExcessLevels::table: alloc::string::String
+pub xml2arrow::Lint::FieldInsideNestedTable
+pub xml2arrow::Lint::FieldInsideNestedTable::field: alloc::string::String
+pub xml2arrow::Lint::FieldInsideNestedTable::field_path: alloc::string::String
+pub xml2arrow::Lint::FieldInsideNestedTable::nested_table: alloc::string::String
+pub xml2arrow::Lint::FieldInsideNestedTable::nested_table_path: alloc::string::String
+pub xml2arrow::Lint::FieldInsideNestedTable::table: alloc::string::String
 pub xml2arrow::Lint::FieldOutsideRow
 pub xml2arrow::Lint::FieldOutsideRow::field: alloc::string::String
 pub xml2arrow::Lint::FieldOutsideRow::field_path: alloc::string::String
@@ -950,6 +976,10 @@ pub xml2arrow::Unconverted::ExcessLevels
 pub xml2arrow::Unconverted::ExcessLevels::available: usize
 pub xml2arrow::Unconverted::ExcessLevels::declared: usize
 pub xml2arrow::Unconverted::ExcessLevels::table: alloc::string::String
+pub xml2arrow::Unconverted::FieldInsideNestedTable
+pub xml2arrow::Unconverted::FieldInsideNestedTable::field: alloc::string::String
+pub xml2arrow::Unconverted::FieldInsideNestedTable::nested_table: alloc::string::String
+pub xml2arrow::Unconverted::FieldInsideNestedTable::table: alloc::string::String
 pub xml2arrow::Unconverted::LevelCountsNonEnclosingTable
 pub xml2arrow::Unconverted::LevelCountsNonEnclosingTable::counted_table: alloc::string::String
 pub xml2arrow::Unconverted::LevelCountsNonEnclosingTable::level: alloc::string::String

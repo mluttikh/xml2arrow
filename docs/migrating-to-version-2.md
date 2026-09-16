@@ -138,7 +138,11 @@ What the converter writes:
 
 It never makes a change to the output for you: it does not choose a `row:` for
 a table whose rows are split, and it does not replace position columns with
-`parent:` join keys. Check the result on your own documents with `config_diff`.
+`parent:` join keys. It also leaves a field that lies inside the `xml_path` of a
+table nested inside its own. That table captures every value there, so the
+column has always been empty, and version 2 rejects the field; moving it to the
+nested table or removing it changes the columns, so the choice is yours. Check
+the result on your own documents with `config_diff`.
 
 The written file is fresh. The original's comments and layout are not kept,
 and keys left at their defaults are left out.

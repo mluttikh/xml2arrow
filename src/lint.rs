@@ -75,6 +75,22 @@ pub enum MigrationStep {
         /// The nearest table enclosing it.
         enclosing_table: String,
     },
+    /// The field lies inside the `xml_path` of a table nested within its own,
+    /// which captures every value there, so the field never receives one. It
+    /// must move to that table, or go.
+    ///
+    /// Unlike the other steps, this one describes a column that is already
+    /// empty under version 1; see [`Lint::FieldInsideNestedTable`].
+    MoveFieldToNestedTable {
+        /// The table the field is declared on.
+        table: String,
+        /// The field that never receives a value.
+        field: String,
+        /// The field's resolved path.
+        field_path: String,
+        /// The nested table that captures values there.
+        nested_table: String,
+    },
 }
 
 impl MigrationStep {
@@ -93,6 +109,17 @@ impl MigrationStep {
             } => ConfigIssue::NestedTableWithoutLinksInVersion2 {
                 table,
                 enclosing_table,
+            },
+            MigrationStep::MoveFieldToNestedTable {
+                table,
+                field,
+                field_path,
+                nested_table,
+            } => ConfigIssue::FieldInsideNestedTableInVersion2 {
+                table,
+                field,
+                field_path,
+                nested_table,
             },
         }
     }
@@ -119,6 +146,17 @@ impl fmt::Display for MigrationStep {
                 f,
                 "table '{table}': declare `links:` relating it to '{enclosing_table}', which \
                  encloses it — or `links: []` if it deliberately has no link"
+            ),
+            MigrationStep::MoveFieldToNestedTable {
+                table,
+                field,
+                field_path,
+                nested_table,
+            } => write!(
+                f,
+                "field '{field}' of table '{table}': its path {field_path} is inside table \
+                 '{nested_table}', which captures every value there, so it never receives one; \
+                 declare it on '{nested_table}', or remove it"
             ),
         }
     }
@@ -166,6 +204,26 @@ pub enum Lint {
         field_path: String,
         /// The row element's resolved path, which does not contain it.
         row_path: String,
+    },
+    /// A field lies inside the `xml_path` of another table nested within its
+    /// own, so it never receives a value: whenever a value there arrives, the
+    /// nested table is the innermost open table, and values go to its fields
+    /// only.
+    ///
+    /// The column is all null, all `""`, or a `MissingRequiredField` error,
+    /// however the document is written. Reported rather than rejected in a
+    /// version 1 config, which loads today; `version: 2` rejects it.
+    FieldInsideNestedTable {
+        /// The table the field is declared on.
+        table: String,
+        /// The field that never receives a value.
+        field: String,
+        /// The field's resolved path.
+        field_path: String,
+        /// The nested table that captures values there.
+        nested_table: String,
+        /// That table's `xml_path`, which contains `field_path`.
+        nested_table_path: String,
     },
     /// A table has fields but **no** configured child element, so no element
     /// close can ever finalize one of its rows: the table silently produces
@@ -272,6 +330,19 @@ impl fmt::Display for Lint {
                  (xml_path '{field_path}') is outside that subtree, so its value attaches to \
                  whichever row finalizes next rather than to a row of its own element"
             ),
+            Lint::FieldInsideNestedTable {
+                table,
+                field,
+                field_path,
+                nested_table,
+                nested_table_path,
+            } => write!(
+                f,
+                "Field '{field}' of table '{table}' (path '{field_path}') lies inside table \
+                 '{nested_table}' (xml_path {nested_table_path}), which captures every value \
+                 there, so '{field}' never receives one. Declare the field on '{nested_table}', \
+                 or remove it"
+            ),
             Lint::NeverFinalizesRows { table, xml_path } => write!(
                 f,
                 "Table '{table}' (xml_path {xml_path}) has no configured child element, so no \
@@ -318,8 +389,8 @@ impl fmt::Display for Lint {
 /// would bury the other kinds of step under a wall of identical ones. The full
 /// list is in `steps` for anything that wants to act on it.
 fn write_config_version_1(f: &mut fmt::Formatter<'_>, steps: &[MigrationStep]) -> fmt::Result {
-    let (mut rows, mut levels, mut fields, mut links) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut rows, mut levels, mut fields, mut links, mut captured) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for step in steps {
         match step {
             MigrationStep::DeclareRow { table } => rows.push(table.clone()),
@@ -331,6 +402,12 @@ fn write_config_version_1(f: &mut fmt::Formatter<'_>, steps: &[MigrationStep]) -
                 table,
                 enclosing_table,
             } => links.push(format!("{table} inside {enclosing_table}")),
+            MigrationStep::MoveFieldToNestedTable {
+                table,
+                field,
+                nested_table,
+                ..
+            } => captured.push(format!("{table}.{field} inside {nested_table}")),
         }
     }
 
@@ -362,6 +439,18 @@ fn write_config_version_1(f: &mut fmt::Formatter<'_>, steps: &[MigrationStep]) -
             "{} must declare `links:`, or `links: []` for none ({})",
             counted(links.len(), "nested table", "nested tables"),
             first_few(&links),
+        ));
+    }
+    if !captured.is_empty() {
+        left.push(format!(
+            "{} inside a nested table never {} a value, and must move to that table or go ({})",
+            counted(captured.len(), "field", "fields"),
+            if captured.len() == 1 {
+                "receives"
+            } else {
+                "receive"
+            },
+            first_few(&captured),
         ));
     }
 
@@ -482,6 +571,21 @@ impl Config {
                             child_elements: children,
                         }),
                     }
+                }
+            }
+
+            // Independent of how rows are found: the field is empty whether
+            // they are inferred or declared, because values are routed by
+            // which table's `xml_path` is open, not by which row is.
+            for field in &table.fields {
+                if let Some((field_path, nested)) = self.nested_table_capturing(table, field) {
+                    lints.push(Lint::FieldInsideNestedTable {
+                        table: table.name.clone(),
+                        field: field.name.clone(),
+                        field_path,
+                        nested_table: nested.name.clone(),
+                        nested_table_path: nested.xml_path.clone(),
+                    });
                 }
             }
 
@@ -764,6 +868,47 @@ tables:
             assert!(message.contains("trimmed"), "{message}");
         }
 
+        /// Uses only version 2 keys, but `outer.count` lies inside `inner`,
+        /// which captures its value.
+        fn field_inside_nested_table() -> Config {
+            config_from_yaml!(
+                r#"
+tables:
+  - {name: outer, xml_path: /r, row: a, fields: [{name: count, path: bs/@count, data_type: Int32, nullable: true}]}
+  - {name: inner, xml_path: /r/a/bs, row: b, links: [], fields: [{name: v, path: v, data_type: Int32}]}
+"#
+            )
+        }
+
+        /// Declaring `version: 2` rejects this config, so the notice must not
+        /// say the line is all that is left.
+        #[test]
+        fn a_field_inside_a_nested_table_is_a_step() {
+            let config = field_inside_nested_table();
+            assert_eq!(
+                steps(&config).unwrap(),
+                vec![MigrationStep::MoveFieldToNestedTable {
+                    table: "outer".into(),
+                    field: "count".into(),
+                    field_path: "/r/a/bs/@count".into(),
+                    nested_table: "inner".into(),
+                }]
+            );
+            let message = config
+                .lint()
+                .into_iter()
+                .find(|l| matches!(l, Lint::ConfigVersion1 { .. }))
+                .unwrap()
+                .to_string();
+            assert!(
+                message.contains(
+                    "1 field inside a nested table never receives a value, and must move to \
+                     that table or go (outer.count inside inner)"
+                ),
+                "{message}"
+            );
+        }
+
         /// The property `version_2_steps` exists to guarantee: the lint lists
         /// nothing exactly when declaring `version: 2` would validate, and
         /// otherwise the validation error is the lint's first step. A second
@@ -792,6 +937,7 @@ tables:
   - {name: s, xml_path: /report/ss, row: s, fields: [{name: v, path: v, data_type: Int32}]}
 "#
                 ),
+                field_inside_nested_table(),
             ];
             for config in configs {
                 let steps = steps(&config).expect("every case is version 1");
@@ -1349,6 +1495,50 @@ tables:
         assert_eq!(field, "stray");
         assert_eq!(row_path, "/report/data/item");
         assert!(outside[0].to_string().contains("'stray'"));
+    }
+
+    /// The shape the frozen corpus pins as `self_closing_table_element`: `n`
+    /// lies inside `inner`, so `outer.n` is null in every row even though the
+    /// document holds a value. `name` sits beside `inner` and is not reported.
+    #[test]
+    fn a_field_inside_a_nested_table_is_reported() {
+        let config = config_from_yaml!(
+            r#"
+            tables:
+              - name: outer
+                xml_path: /data
+                levels: []
+                fields:
+                  - {name: n, xml_path: /data/group/n, data_type: Int32, nullable: true}
+                  - {name: name, xml_path: /data/name, data_type: Utf8, nullable: true}
+              - name: inner
+                xml_path: /data/group
+                levels: [group]
+                fields:
+                  - {name: v, xml_path: /data/group/item/v, data_type: Int32, nullable: true}
+            "#
+        );
+        let lints = config.lint_excluding_deprecation();
+        let captured: Vec<&Lint> = lints
+            .iter()
+            .filter(|l| matches!(l, Lint::FieldInsideNestedTable { .. }))
+            .collect();
+        assert_eq!(
+            captured,
+            vec![&Lint::FieldInsideNestedTable {
+                table: "outer".into(),
+                field: "n".into(),
+                field_path: "/data/group/n".into(),
+                nested_table: "inner".into(),
+                nested_table_path: "/data/group".into(),
+            }],
+            "got {lints:?}"
+        );
+        let message = captured[0].to_string();
+        assert!(
+            message.contains("'n'") && message.contains("'inner'"),
+            "{message}"
+        );
     }
 
     /// An attribute of the row element is inside the row subtree, so declaring

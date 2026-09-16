@@ -876,6 +876,66 @@ fn test_a_stop_path_under_a_table_is_reported_as_ending_its_rows() {
     );
 }
 
+#[test]
+fn test_version_2_rejects_a_field_that_a_nested_table_captures() {
+    // Regression: a value is delivered only to the fields of the innermost open
+    // table, so a field located inside a nested table's `xml_path` is never
+    // filled. `version: 2` accepted such a config, and the column came out null
+    // in every row with no error and no warning. Version 2 now rejects it at
+    // load; the same config without the version line still loads, as it did
+    // before, and is warned instead.
+    let version_2 = r#"version: 2
+tables:
+  - name: outer
+    xml_path: /r
+    row: a
+    fields:
+      - {name: count, path: bs/@count, data_type: Int32, nullable: true}
+  - name: inner
+    xml_path: /r/a/bs
+    row: b
+    links: [{parent: outer}]
+    fields:
+      - {name: v, path: v, data_type: Int32}
+"#;
+    let err = Config::from_yaml_str(version_2).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            xml2arrow::Error::InvalidConfig {
+                reason: xml2arrow::errors::ConfigIssue::FieldInsideNestedTableInVersion2 { .. }
+            }
+        ),
+        "{err:?}"
+    );
+    let message = err.to_string();
+    assert!(
+        message.contains("field 'count' of table 'outer'")
+            && message.contains("'/r/a/bs/@count'")
+            && message.contains("declare the field on 'inner'"),
+        "{message}"
+    );
+
+    let version_1 = Config::from_yaml_str(version_2.trim_start_matches("version: 2\n")).unwrap();
+    let parser = Parser::new(&version_1).unwrap();
+    assert!(
+        parser
+            .warnings()
+            .iter()
+            .any(|lint| matches!(lint, xml2arrow::Lint::FieldInsideNestedTable { field, .. } if field == "count")),
+        "{:?}",
+        parser.warnings()
+    );
+    // Why it is an error under version 2: the value is in the document, and
+    // the column is empty anyway.
+    let batches = parser
+        .parse_slice(br#"<r><a><bs count="2"><b><v>1</v></b></bs></a></r>"#)
+        .unwrap();
+    let outer = batches.get("outer").unwrap();
+    assert_eq!(outer.num_rows(), 1);
+    assert_eq!(outer.column_by_name("count").unwrap().null_count(), 1);
+}
+
 // ---------------------------------------------------------------------------
 // Realistic end-to-end scenario
 // ---------------------------------------------------------------------------
