@@ -230,6 +230,7 @@ likely to surprise. They never change how a document is parsed.
 | Lint | When |
 |---|---|
 | `UnknownKey` | the config sets a key it does not define, usually a misspelling, so the key is ignored |
+| `DotSegmentInPath` | a table's `xml_path`, a field's `xml_path` or a `stop_at_paths` entry has a `.` or `..` segment, so it matches nothing |
 | `InferredRowBoundary` | a table's rows end at more than one child element |
 | `NeverFinalizesRows` | no child element can end a row of a table, so it produces no rows |
 | `ExcessLevels` | a table has more `levels` than tables to count |

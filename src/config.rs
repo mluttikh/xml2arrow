@@ -199,6 +199,17 @@ pub(crate) fn path_segments(path: &str) -> impl DoubleEndedIterator<Item = &str>
         .filter(|s| !s.is_empty())
 }
 
+/// Whether `path` has a `.` or `..` segment.
+///
+/// No element can match one: an XML name cannot be `.` or `..`, so such a path
+/// silently matches nothing, and a table built on it has no rows or a column
+/// that is never filled. A `row:` or `path:` of exactly `.` is a different
+/// spelling, meaning the table or row element itself, and callers let it
+/// through before asking.
+pub(crate) fn has_dot_segment(path: &str) -> bool {
+    path_segments(path).any(|segment| segment == "." || segment == "..")
+}
+
 /// Returns true when `descendant` is equal to or nested under `ancestor`,
 /// compared segment-wise. A plain string prefix test is not enough:
 /// `/root/items_other` starts with `/root/item` as a string but is not under
@@ -504,6 +515,15 @@ impl Config {
                 }
                 .into());
             }
+            // `row:` is new in this release, so no config that loads today
+            // spells one this way, and every version can reject it.
+            if row != "." && has_dot_segment(row) {
+                return Err(ConfigIssue::DotSegmentInPath {
+                    location: format!("the row of table '{}'", table.name),
+                    path: row.clone(),
+                }
+                .into());
+            }
             let row_path = resolve_row_path(&table.xml_path, row);
             if !path_is_under(&row_path, &table.xml_path) {
                 return Err(ConfigIssue::RowPathNotUnderTable {
@@ -576,7 +596,17 @@ impl Config {
             .map(|field| field.name.clone())
             .collect();
 
-        for link in links {
+        for (link_idx, link) in links.iter().enumerate() {
+            // New in this release, like `row:`, so rejected in every version.
+            if let Some(index_of) = link.index_of.as_deref()
+                && has_dot_segment(index_of)
+            {
+                return Err(ConfigIssue::DotSegmentInPath {
+                    location: format!("link {} of table '{}'", link_idx + 1, table.name),
+                    path: index_of.to_string(),
+                }
+                .into());
+            }
             match (link.parent.as_deref(), link.index_of.as_deref()) {
                 (Some(parent), None) => self.validate_parent_link(table, &scope, parent)?,
                 (None, Some(index_of)) => self.validate_index_of_link(table, &scope, index_of)?,
@@ -723,6 +753,19 @@ impl Config {
                 _ => {}
             }
 
+            // `path:` is new in this release, so rejected in every version. The
+            // `xml_path:` spelling is older; see `dot_segment_paths`.
+            if let Some(path) = field.path.as_deref()
+                && path != "."
+                && has_dot_segment(path)
+            {
+                return Err(ConfigIssue::DotSegmentInPath {
+                    location: format!("field '{}' of table '{}'", field.name, table.name),
+                    path: path.to_string(),
+                }
+                .into());
+            }
+
             // A relative `path` is relative to the row element, so without
             // a declared row there is nothing to resolve against. Caught
             // here rather than resolving to something plausible-looking.
@@ -855,6 +898,15 @@ impl Config {
                 key: key.to_string(),
             })
             .collect();
+        // Then paths with a `.` or `..` segment in the keys older than this
+        // release. Like a misspelled key, such a path explains what follows:
+        // a table on one never has a row to declare.
+        steps.extend(self.dot_segment_paths().map(|(location, path)| {
+            MigrationStep::RemoveDotSegment {
+                location,
+                path: path.to_string(),
+            }
+        }));
         for table in &self.tables {
             if table.row.is_none() {
                 steps.push(MigrationStep::DeclareRow {
@@ -966,6 +1018,11 @@ impl Config {
             .peekable();
         nested.peek()?;
         let field_path = resolve_field_path(table, field)?;
+        // As in `location_outside`: a path no element can match is reported
+        // for that alone.
+        if has_dot_segment(&field_path) {
+            return None;
+        }
         nested
             .filter(|other| path_is_under(&field_path, &other.xml_path))
             .max_by_key(|other| path_segments(&other.xml_path).count())
@@ -1188,6 +1245,41 @@ impl Config {
             };
             Some((self.describe_key_location(parents), key.as_str()))
         })
+    }
+
+    /// Every path with a `.` or `..` segment in the keys that predate this
+    /// release, as `(where, path)`, in document order: `stop_at_paths`, each
+    /// table's `xml_path`, and each field's `xml_path`.
+    ///
+    /// Only these, because a version 1 config may use them today and must keep
+    /// loading. The newer `row:`, `path:` and `index_of:` are rejected in every
+    /// version when the config is validated.
+    pub(crate) fn dot_segment_paths(&self) -> impl Iterator<Item = (String, &str)> + '_ {
+        let stop_paths = self
+            .parser_options
+            .stop_at_paths
+            .iter()
+            .filter(|path| has_dot_segment(path))
+            .map(|path| ("`parser_options.stop_at_paths`".to_string(), path.as_str()));
+        let tables = self.tables.iter().flat_map(|table| {
+            let table_path = has_dot_segment(&table.xml_path).then(|| {
+                (
+                    format!("the xml_path of table '{}'", table.name),
+                    table.xml_path.as_str(),
+                )
+            });
+            let fields = table.fields.iter().filter_map(move |field| {
+                let xml_path = field.xml_path.as_deref()?;
+                has_dot_segment(xml_path).then(|| {
+                    (
+                        format!("field '{}' of table '{}'", field.name, table.name),
+                        xml_path,
+                    )
+                })
+            });
+            table_path.into_iter().chain(fields)
+        });
+        stop_paths.chain(tables)
     }
 
     fn describe_key_location(&self, parents: &[KeySegment]) -> String {
@@ -1950,7 +2042,9 @@ impl FieldConfig {
             (None, Some(path)) if path.starts_with('/') => path,
             _ => return None,
         };
-        (!path_is_under(location, row_path)).then_some(location)
+        // A location no element can match is reported for that alone: where
+        // it sits relative to the row does not matter until it is fixed.
+        (!path_is_under(location, row_path) && !has_dot_segment(location)).then_some(location)
     }
 
     /// Whether the field names its location absolutely, and so could lie
@@ -4591,6 +4685,106 @@ tables:
             let written = yaml_serde::to_string(&config).unwrap();
             assert!(!written.contains("scal"), "{written}");
             assert!(!written.contains("unknown"), "{written}");
+        }
+    }
+
+    /// Paths with a `.` or `..` segment, which no element can match.
+    mod dot_segments {
+        use super::*;
+
+        fn rejection(yaml: &str) -> (String, String) {
+            let err = Config::from_yaml_str(yaml).unwrap_err();
+            let Error::InvalidConfig {
+                reason: ConfigIssue::DotSegmentInPath { location, path },
+            } = err
+            else {
+                panic!("expected DotSegmentInPath, got {err:?}");
+            };
+            (location, path)
+        }
+
+        /// `row:`, `path:` and `index_of:` are new in this release, so no
+        /// config that loads today spells one this way, and every version
+        /// rejects them. Each case is a version 1 config, the one that has to
+        /// show it.
+        #[rstest]
+        #[case::row(
+            "row: ./station",
+            r#"[{name: id, path: "@id", data_type: Utf8}]"#,
+            "",
+            "the row of table 't'",
+            "./station"
+        )]
+        #[case::relative_path(
+            "row: station",
+            "[{name: up, path: ../x, data_type: Utf8}]",
+            "",
+            "field 'up' of table 't'",
+            "../x"
+        )]
+        #[case::absolute_path(
+            "row: station",
+            "[{name: n, path: /r/s/./station/name, data_type: Utf8}]",
+            "",
+            "field 'n' of table 't'",
+            "/r/s/./station/name"
+        )]
+        #[case::index_of(
+            "row: station",
+            r#"[{name: id, path: "@id", data_type: Utf8}]"#,
+            ", links: [{index_of: /r/s/./station}]",
+            "link 1 of table 't'",
+            "/r/s/./station"
+        )]
+        fn a_new_key_is_rejected_in_every_version(
+            #[case] row: &str,
+            #[case] fields: &str,
+            #[case] links: &str,
+            #[case] expected_location: &str,
+            #[case] expected_path: &str,
+        ) {
+            let yaml = format!(
+                "tables:\n  - {{name: t, xml_path: /r/s, {row}{links}, fields: {fields}}}\n"
+            );
+            assert_eq!(
+                rejection(&yaml),
+                (expected_location.to_string(), expected_path.to_string())
+            );
+        }
+
+        /// The keys older than this release keep loading in version 1, and are
+        /// rejected once a config declares version 2.
+        #[rstest]
+        #[case::table_xml_path(
+            "tables:\n  - {name: t, xml_path: /r/../s, row: station, fields: [{name: id, path: \"@id\", data_type: Utf8}]}\n",
+            "the xml_path of table 't'",
+            "/r/../s"
+        )]
+        #[case::stop_at_paths(
+            "parser_options: {stop_at_paths: [/r/./end]}\ntables:\n  - {name: t, xml_path: /r/s, row: station, fields: [{name: id, path: \"@id\", data_type: Utf8}]}\n",
+            "`parser_options.stop_at_paths`",
+            "/r/./end"
+        )]
+        fn an_older_key_is_rejected_in_version_2_only(
+            #[case] yaml: &str,
+            #[case] expected_location: &str,
+            #[case] expected_path: &str,
+        ) {
+            assert!(Config::from_yaml_str(yaml).is_ok());
+            assert_eq!(
+                rejection(&format!("version: 2\n{yaml}")),
+                (expected_location.to_string(), expected_path.to_string())
+            );
+        }
+
+        /// `.` on its own names the table or row element, and a name may
+        /// contain dots; only a whole `.` or `..` segment is rejected.
+        #[test]
+        fn a_whole_dot_and_names_with_dots_are_accepted() {
+            let config = Config::from_yaml_str(
+                "version: 2\ntables:\n  - {name: t, xml_path: /r/s.t, row: \".\", fields: [{name: v, path: \".\", data_type: Utf8}, {name: w, path: a.b/c.., data_type: Utf8}]}\n",
+            );
+            assert!(config.is_ok(), "{config:?}");
         }
     }
 }

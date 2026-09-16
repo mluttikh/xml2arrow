@@ -364,6 +364,9 @@ impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::ValuePolicie
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::ValuePolicies
 pub mod xml2arrow::errors
 #[non_exhaustive] pub enum xml2arrow::errors::ConfigIssue
+pub xml2arrow::errors::ConfigIssue::DotSegmentInPath
+pub xml2arrow::errors::ConfigIssue::DotSegmentInPath::location: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::DotSegmentInPath::path: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::DuplicateFieldName
 pub xml2arrow::errors::ConfigIssue::DuplicateFieldName::field: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::DuplicateFieldName::table: alloc::string::String
@@ -612,6 +615,9 @@ pub mod xml2arrow::lint
 #[non_exhaustive] pub enum xml2arrow::lint::Lint
 pub xml2arrow::lint::Lint::ConfigVersion1
 pub xml2arrow::lint::Lint::ConfigVersion1::steps: alloc::vec::Vec<xml2arrow::lint::MigrationStep>
+pub xml2arrow::lint::Lint::DotSegmentInPath
+pub xml2arrow::lint::Lint::DotSegmentInPath::location: alloc::string::String
+pub xml2arrow::lint::Lint::DotSegmentInPath::path: alloc::string::String
 pub xml2arrow::lint::Lint::ExcessLevels
 pub xml2arrow::lint::Lint::ExcessLevels::available: usize
 pub xml2arrow::lint::Lint::ExcessLevels::declared: usize
@@ -675,6 +681,9 @@ pub xml2arrow::lint::MigrationStep::MoveFieldToNestedTable::field: alloc::string
 pub xml2arrow::lint::MigrationStep::MoveFieldToNestedTable::field_path: alloc::string::String
 pub xml2arrow::lint::MigrationStep::MoveFieldToNestedTable::nested_table: alloc::string::String
 pub xml2arrow::lint::MigrationStep::MoveFieldToNestedTable::table: alloc::string::String
+pub xml2arrow::lint::MigrationStep::RemoveDotSegment
+pub xml2arrow::lint::MigrationStep::RemoveDotSegment::location: alloc::string::String
+pub xml2arrow::lint::MigrationStep::RemoveDotSegment::path: alloc::string::String
 pub xml2arrow::lint::MigrationStep::RemoveUnknownKey
 pub xml2arrow::lint::MigrationStep::RemoveUnknownKey::key: alloc::string::String
 pub xml2arrow::lint::MigrationStep::RemoveUnknownKey::location: alloc::string::String
@@ -702,6 +711,9 @@ impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::lint::MigrationStep
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::lint::MigrationStep
 pub mod xml2arrow::migrate
 #[non_exhaustive] pub enum xml2arrow::migrate::Unconverted
+pub xml2arrow::migrate::Unconverted::DotSegmentInPath
+pub xml2arrow::migrate::Unconverted::DotSegmentInPath::location: alloc::string::String
+pub xml2arrow::migrate::Unconverted::DotSegmentInPath::path: alloc::string::String
 pub xml2arrow::migrate::Unconverted::ExcessLevels
 pub xml2arrow::migrate::Unconverted::ExcessLevels::available: usize
 pub xml2arrow::migrate::Unconverted::ExcessLevels::declared: usize
@@ -867,6 +879,9 @@ impl !core::panic::unwind_safe::UnwindSafe for xml2arrow::errors::Error
 #[non_exhaustive] pub enum xml2arrow::Lint
 pub xml2arrow::Lint::ConfigVersion1
 pub xml2arrow::Lint::ConfigVersion1::steps: alloc::vec::Vec<xml2arrow::lint::MigrationStep>
+pub xml2arrow::Lint::DotSegmentInPath
+pub xml2arrow::Lint::DotSegmentInPath::location: alloc::string::String
+pub xml2arrow::Lint::DotSegmentInPath::path: alloc::string::String
 pub xml2arrow::Lint::ExcessLevels
 pub xml2arrow::Lint::ExcessLevels::available: usize
 pub xml2arrow::Lint::ExcessLevels::declared: usize
@@ -1008,6 +1023,9 @@ impl core::marker::UnsafeUnpin for xml2arrow::config::RowId
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::RowId
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::RowId
 #[non_exhaustive] pub enum xml2arrow::Unconverted
+pub xml2arrow::Unconverted::DotSegmentInPath
+pub xml2arrow::Unconverted::DotSegmentInPath::location: alloc::string::String
+pub xml2arrow::Unconverted::DotSegmentInPath::path: alloc::string::String
 pub xml2arrow::Unconverted::ExcessLevels
 pub xml2arrow::Unconverted::ExcessLevels::available: usize
 pub xml2arrow::Unconverted::ExcessLevels::declared: usize

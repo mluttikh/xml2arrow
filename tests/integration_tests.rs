@@ -1048,6 +1048,40 @@ tables:
     );
 }
 
+#[test]
+fn test_a_path_with_a_dot_segment_is_rejected() {
+    // Regression: `row: ./station` was taken literally, as a child element
+    // named `.`, which no document can contain, so the table loaded and parsed
+    // to zero rows with no error. `path: ./name` likewise gave a column that
+    // was never filled. `row:` and `path:` are new in this release, so every
+    // version now rejects a `.` or `..` segment in them.
+    let err = Config::from_yaml_str(
+        r#"
+        tables:
+          - name: stations
+            xml_path: /report/stations
+            row: ./station
+            fields:
+              - {name: id, path: "@id", data_type: Utf8}
+        "#,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            xml2arrow::Error::InvalidConfig {
+                reason: xml2arrow::errors::ConfigIssue::DotSegmentInPath { .. }
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(
+        err.to_string()
+            .starts_with("The path './station' in the row of table 'stations'"),
+        "{err}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Realistic end-to-end scenario
 // ---------------------------------------------------------------------------

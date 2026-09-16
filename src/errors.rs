@@ -571,6 +571,21 @@ pub enum ConfigIssue {
         /// The unknown key, as written.
         key: String,
     },
+    /// A path has a `.` or `..` segment, which no element can match: an XML
+    /// name cannot be `.` or `..`. A `row:` or `path:` of exactly `.` is a
+    /// different spelling, and allowed.
+    ///
+    /// Rejected in every version for `row:`, `path:` and `index_of:`, which
+    /// are new in this release. For the older `xml_path` and `stop_at_paths`,
+    /// a version 1 config loads, and reports it as
+    /// [`Lint::DotSegmentInPath`](crate::Lint::DotSegmentInPath).
+    DotSegmentInPath {
+        /// Where the path is: `the row of table 'stations'`, `field 'id' of
+        /// table 'stations'`, `link 1 of table 'readings'`.
+        location: String,
+        /// The path, as written.
+        path: String,
+    },
     /// A table's or field's `metadata` uses a key beginning `ARROW:`, which the
     /// Arrow format reserves for its own use. Some of those keys change how
     /// readers interpret a column, so the config would do more than annotate.
@@ -889,6 +904,10 @@ impl fmt::Display for ConfigIssue {
             ConfigIssue::UnknownKey { location, key } => write!(
                 f,
                 "Unknown key '{key}' in {location}; check its spelling, or remove it (a note belongs in a YAML comment, and a value that should reach the output in metadata:)"
+            ),
+            ConfigIssue::DotSegmentInPath { location, path } => write!(
+                f,
+                "The path '{path}' in {location} has a '.' or '..' segment, which no element can match; write it without one, as an absolute path starting with '/' where it has to reach another part of the document"
             ),
             ConfigIssue::ReservedMetadataKey { table, field, key } => {
                 match field {

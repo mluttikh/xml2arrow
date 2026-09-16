@@ -138,6 +138,9 @@ These are checked when the config is loaded:
   inner table would take the rows.
 - A table with `xml_path: /` cannot use `row: "."`, because the document itself
   never closes. Name the document element instead, as in `row: report`.
+- No path has a `.` or `..` segment, since no element can have that name. `"."`
+  on its own, as above, is the one exception; write `row: station`, not
+  `row: ./station`.
 
 ## Fields
 
@@ -166,6 +169,12 @@ These are checked when the config is loaded:
 Quote a path that starts with `@`; YAML reserves the character. Error messages
 show the resolved, absolute path, which is what you need to find the value in
 the document.
+
+A path has no `.` or `..` segments, and one that does is rejected when the
+config is loaded: no element can have that name, so the path would match
+nothing. `"."` on its own is the row element, a value inside the row needs no
+`./`, and a value elsewhere is written absolutely. The same holds for
+`index_of:`, a table's `xml_path` and `stop_at_paths`.
 
 A field must lie inside its row element. A field whose absolute path lies outside
 it is rejected when the config is loaded: its value would attach to whichever

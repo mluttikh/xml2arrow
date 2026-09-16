@@ -138,11 +138,13 @@ What the converter writes:
 
 It never makes a change to the output for you: it does not choose a `row:` for
 a table whose rows are split, and it does not replace position columns with
-`parent:` join keys. It also leaves three things that version 2 rejects, where
+`parent:` join keys. It also leaves four things that version 2 rejects, where
 the fix can change the output and the choice is yours:
 
 - an unknown key, usually a misspelling. Version 1 ignores it, so removing it
   changes nothing, but correcting it can. The written file does not keep it.
+- a path with a `.` or `..` segment. No element matches it, so writing it
+  correctly changes the output.
 - a field inside the `xml_path` of a table nested inside its own. That table
   captures every value there, so the column has always been empty.
 - a field outside its table's row element. Its value attaches to whichever row
