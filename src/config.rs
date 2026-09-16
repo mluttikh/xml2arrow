@@ -4556,17 +4556,22 @@ tables:
             assert_eq!(read, legacy, "{yaml}");
         }
 
-        /// Reading a field through its explicit twin must not cost a type
-        /// error its position, which the flattened struct used to lose for a
-        /// policy key.
+        /// Reading a field through its explicit twin names the policy key a
+        /// type error is in, and points at its value. The flattened read could
+        /// only name the field, and pointed at the start of it.
         #[test]
-        fn a_type_error_in_a_field_still_names_its_line() {
+        fn a_type_error_in_a_policy_names_the_key_and_its_position() {
             let err = Config::from_yaml_str(
                 "tables:\n  - name: t\n    xml_path: /r\n    row: i\n    fields:\n      - {name: v, path: v, data_type: Int32, trim: maybe}\n",
             )
             .unwrap_err();
             assert!(matches!(err, Error::Yaml(_)), "{err:?}");
-            assert!(err.to_string().contains("line 6"), "{err}");
+            let message = err.to_string();
+            assert!(
+                message.starts_with("tables[0].fields[0].trim:"),
+                "{message}"
+            );
+            assert!(message.ends_with("at line 6 column 52"), "{message}");
         }
 
         /// Only where a key was is recorded, not its value, so nothing is
