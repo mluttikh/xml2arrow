@@ -37,7 +37,9 @@ use crate::errors::ConfigIssue;
 /// Reported, all together, by [`Lint::ConfigVersion1`]. The same list drives
 /// `Config::validate` for a config that *does* declare `version: 2` — the first
 /// entry is the error — so what the lint says is left and what validation
-/// rejects cannot disagree.
+/// rejects cannot disagree. Version 2 has rules that no step names, because
+/// only a version 2 config can break them: a field outside its table's
+/// `row:`, for one.
 ///
 /// `#[non_exhaustive]`: configuration format version 2 may tighten further
 /// before 1.0, and each new requirement arrives as a variant.
@@ -111,23 +113,6 @@ pub enum MigrationStep {
         /// The nested table that captures values there.
         nested_table: String,
     },
-    /// The field lies outside its table's row element, so its value attaches
-    /// to whichever row ends next. It must point inside the row, or move to a
-    /// table of its own.
-    ///
-    /// Listed only for a table that declares `row:`: which fields fall outside
-    /// depends on the row element, so a table still told to declare one is
-    /// checked once it has. See [`Lint::FieldOutsideRow`].
-    MoveFieldIntoRow {
-        /// The table the field is declared on.
-        table: String,
-        /// The field outside the row element.
-        field: String,
-        /// The field's path, as written.
-        field_path: String,
-        /// The table's resolved row element.
-        row_path: String,
-    },
 }
 
 impl MigrationStep {
@@ -169,17 +154,6 @@ impl MigrationStep {
                 field,
                 field_path,
                 nested_table,
-            },
-            MigrationStep::MoveFieldIntoRow {
-                table,
-                field,
-                field_path,
-                row_path,
-            } => ConfigIssue::FieldOutsideRow {
-                table,
-                field,
-                field_path,
-                row_path,
             },
         }
     }
@@ -227,17 +201,6 @@ impl fmt::Display for MigrationStep {
                  '{nested_table}', which captures every value there, so it never receives one; \
                  declare it on '{nested_table}', or remove it"
             ),
-            MigrationStep::MoveFieldIntoRow {
-                table,
-                field,
-                field_path,
-                row_path,
-            } => write!(
-                f,
-                "field '{field}' of table '{table}': its path {field_path} is outside the row \
-                 element {row_path}, so its value attaches to whichever row ends next; point it \
-                 inside the row, or give it a table of its own"
-            ),
         }
     }
 }
@@ -252,11 +215,11 @@ impl fmt::Display for MigrationStep {
 pub enum Lint {
     /// The document sets a key the configuration does not define, so the key
     /// is ignored. Usually a misspelling, which leaves the setting it was meant
-    /// to be at its default: `trimm: false` trims anyway.
+    /// to be at its default: `scal: 0.1` leaves the column unscaled.
     ///
-    /// Reported rather than rejected in a version 1 config, which loads today;
-    /// `version: 2` rejects it. Only a config read from a document can have
-    /// one, and `Config::to_yaml_file` does not write it back.
+    /// Reported for a version 1 config, which loads today; version 2 rejects
+    /// it. Only a config read from a document can have one, and
+    /// `Config::to_yaml_file` does not write it back.
     UnknownKey {
         /// Where the key is, as a reader would look for it: `field 'value' of
         /// table 'readings'`, `parser_options`, `the top level`.
@@ -269,9 +232,8 @@ pub enum Lint {
     /// filled, or the stop path never stops the parse.
     ///
     /// Reported for a table's `xml_path`, a field's `xml_path` and
-    /// `stop_at_paths` in a version 1 config, which loads today; `version: 2`
-    /// rejects them. The newer `row:`, `path:` and `index_of:` are rejected in
-    /// every version.
+    /// `stop_at_paths` in a version 1 config, which loads today; version 2
+    /// rejects every path with one.
     DotSegmentInPath {
         /// Where the path is: `the xml_path of table 'stations'`, `field 'id'
         /// of table 'stations'`, `` `parser_options.stop_at_paths` ``.
@@ -296,32 +258,14 @@ pub enum Lint {
         /// order. Each one finalizes a row of this table when it closes.
         child_elements: Vec<String>,
     },
-    /// A table declares `row:`, but one of its fields sits outside that row's
-    /// subtree, so the field cannot be part of the row it is configured on.
-    ///
-    /// Advisory in a version 1 config, because the field still behaves exactly
-    /// as it did before the `row:` line was added — its value attaches to
-    /// whichever row finalizes next. That is rarely what the author meant, but
-    /// it is not a new failure, and adding `row:` should not break a config
-    /// that works. `version: 2` rejects it.
-    FieldOutsideRow {
-        /// The table declaring the row.
-        table: String,
-        /// The field that sits outside it.
-        field: String,
-        /// The field's resolved path.
-        field_path: String,
-        /// The row element's resolved path, which does not contain it.
-        row_path: String,
-    },
     /// A field lies inside the `xml_path` of another table nested within its
     /// own, so it never receives a value: whenever a value there arrives, the
     /// nested table is the innermost open table, and values go to its fields
     /// only.
     ///
     /// The column is all null, all `""`, or a `MissingRequiredField` error,
-    /// however the document is written. Reported rather than rejected in a
-    /// version 1 config, which loads today; `version: 2` rejects it.
+    /// however the document is written. Reported for a version 1 config, which
+    /// loads today; version 2 rejects it.
     FieldInsideNestedTable {
         /// The table the field is declared on.
         table: String,
@@ -380,9 +324,8 @@ pub enum Lint {
     /// visible: set `nullable: true` on these fields to distinguish "absent"
     /// from "present but empty".
     ///
-    /// Only fields left on that default are reported. A field whose
-    /// `on_missing` is stated, on the field or under `defaults:`, has chosen
-    /// its behavior; and under `version: 2` the default is an error.
+    /// Reported for version 1 only. Version 2 makes a missing non-nullable
+    /// value an error whatever the type, unless the field sets `on_missing`.
     ImplicitEmptyString {
         /// The table containing the fields.
         table: String,
@@ -398,10 +341,10 @@ pub enum Lint {
     /// exactly what is left: `steps` is everything `version: 2` would still
     /// reject, in the order it appears in the YAML.
     ///
-    /// An empty `steps` means the config already uses only version 2 keys and
-    /// needs nothing but the `version: 2` line — which is the step that can
-    /// change values, since it switches two defaults (see
-    /// [`Config::version`](crate::Config::version)).
+    /// Every table of a version 1 config has at least one step, since none can
+    /// declare `row:`, so `steps` is empty only for a config without tables.
+    /// The notice also says that declaring `version: 2` switches two defaults
+    /// (see [`Config::version`](crate::Config::version)).
     ConfigVersion1 {
         /// What must change before the config can declare `version: 2`.
         steps: Vec<MigrationStep>,
@@ -428,25 +371,14 @@ impl fmt::Display for Lint {
                 f,
                 "Table '{table}' (xml_path {xml_path}) has {} distinct configured child \
                  elements ({}); row boundaries are inferred, so this table produces {} \
-                 partially-filled rows per <{}> rather than one. Declare `row:` to fix it: \
-                 `row: \".\"` for one row per <{}>, or `row: <element>` to name the \
-                 repeating element",
+                 partially-filled rows per <{}> rather than one. Configuration format \
+                 version 2 fixes it by declaring the row: `row: \".\"` for one row per <{}>, \
+                 or `row: <element>` to name the repeating element",
                 child_elements.len(),
                 child_elements.join(", "),
                 child_elements.len(),
                 path_segments(xml_path).next_back().unwrap_or("/"),
                 path_segments(xml_path).next_back().unwrap_or("/"),
-            ),
-            Lint::FieldOutsideRow {
-                table,
-                field,
-                field_path,
-                row_path,
-            } => write!(
-                f,
-                "Table '{table}' declares its row at '{row_path}', but field '{field}' \
-                 (xml_path '{field_path}') is outside that subtree, so its value attaches to \
-                 whichever row finalizes next rather than to a row of its own element"
             ),
             Lint::FieldInsideNestedTable {
                 table,
@@ -516,7 +448,6 @@ fn write_config_version_1(f: &mut fmt::Formatter<'_>, steps: &[MigrationStep]) -
         Vec::new(),
         Vec::new(),
     );
-    let mut outside = Vec::new();
     for step in steps {
         match step {
             MigrationStep::RemoveUnknownKey { location, key } => {
@@ -540,9 +471,6 @@ fn write_config_version_1(f: &mut fmt::Formatter<'_>, steps: &[MigrationStep]) -
                 nested_table,
                 ..
             } => captured.push(format!("{table}.{field} inside {nested_table}")),
-            MigrationStep::MoveFieldIntoRow { table, field, .. } => {
-                outside.push(format!("{table}.{field}"))
-            }
         }
     }
 
@@ -602,16 +530,6 @@ fn write_config_version_1(f: &mut fmt::Formatter<'_>, steps: &[MigrationStep]) -
             first_few(&captured),
         ));
     }
-    if !outside.is_empty() {
-        left.push(format!(
-            "{} outside {} table's row element must move inside it or to a table of {} own ({})",
-            counted(outside.len(), "field", "fields"),
-            if outside.len() == 1 { "its" } else { "their" },
-            if outside.len() == 1 { "its" } else { "their" },
-            first_few(&outside),
-        ));
-    }
-
     write!(
         f,
         "This config uses configuration format version 1, which is deprecated. "
@@ -619,7 +537,7 @@ fn write_config_version_1(f: &mut fmt::Formatter<'_>, steps: &[MigrationStep]) -
     if left.is_empty() {
         write!(
             f,
-            "It already uses only version 2 keys; add `version: 2` to finish. "
+            "Nothing in it needs to change; add `version: 2` to finish. "
         )?;
     } else {
         write!(
@@ -708,44 +626,26 @@ impl Config {
                 continue;
             }
 
-            // The row-boundary lints describe the *inferred* rule. A table that
-            // declares `row:` has opted out of it, so reporting inference
-            // there would be advice to do what it already did.
-            match table.row_path() {
-                Some(row_path) => {
-                    // The same check `version: 2` validation makes, so the
-                    // lint and the rejection cannot disagree about a field.
-                    for field in &table.fields {
-                        if let Some(field_path) = field.location_outside(&row_path) {
-                            lints.push(Lint::FieldOutsideRow {
-                                table: table.name.clone(),
-                                field: field.name.clone(),
-                                field_path: field_path.to_string(),
-                                row_path: row_path.clone(),
-                            });
-                        }
-                    }
-                }
-                None => {
-                    let children = self.row_delimiting_children(&table.xml_path);
-                    match children.len() {
-                        0 => lints.push(Lint::NeverFinalizesRows {
-                            table: table.name.clone(),
-                            xml_path: table.xml_path.clone(),
-                        }),
-                        1 => {} // Unambiguous: exactly the element a `row:` would name.
-                        _ => lints.push(Lint::InferredRowBoundary {
-                            table: table.name.clone(),
-                            xml_path: table.xml_path.clone(),
-                            child_elements: children,
-                        }),
-                    }
+            // The row-boundary lints describe the *inferred* rule, which only
+            // version 1 has. A version 2 table declares `row:`.
+            if table.row.is_none() {
+                let children = self.row_delimiting_children(&table.xml_path);
+                match children.len() {
+                    0 => lints.push(Lint::NeverFinalizesRows {
+                        table: table.name.clone(),
+                        xml_path: table.xml_path.clone(),
+                    }),
+                    1 => {} // Unambiguous: exactly the element a `row:` would name.
+                    _ => lints.push(Lint::InferredRowBoundary {
+                        table: table.name.clone(),
+                        xml_path: table.xml_path.clone(),
+                        child_elements: children,
+                    }),
                 }
             }
 
-            // Independent of how rows are found: the field is empty whether
-            // they are inferred or declared, because values are routed by
-            // which table's `xml_path` is open, not by which row is.
+            // Values are routed by which table's `xml_path` is open, not by which
+            // row is, so a nested table captures the field however rows end.
             for field in &table.fields {
                 if let Some((field_path, nested)) = self.nested_table_capturing(table, field) {
                     lints.push(Lint::FieldInsideNestedTable {
@@ -767,22 +667,13 @@ impl Config {
                 });
             }
 
-            // Only where the "" is the type-dependent default nobody asked for.
-            // Under `version: 2` that default is an error, and a field (or
-            // `defaults:`) stating `on_missing` has chosen its behavior —
-            // neither relies on the asymmetry this lint points out.
+            // Version 1 only: under version 2 a missing non-nullable value is an
+            // error whatever the type, unless the field says otherwise, so no
+            // version 2 config relies on the asymmetry this lint points out.
             let implicit_empty: Vec<String> = table
                 .fields
                 .iter()
-                .filter(|f| f.data_type == DType::Utf8 && !f.nullable)
-                .filter(|f| {
-                    self.version != Some(2)
-                        && f.policies.on_missing.is_none()
-                        && self
-                            .defaults
-                            .as_ref()
-                            .is_none_or(|d| d.on_missing.is_none())
-                })
+                .filter(|f| self.is_version_1() && f.data_type == DType::Utf8 && !f.nullable)
                 .map(|f| f.name.clone())
                 .collect();
             if !implicit_empty.is_empty() {
@@ -794,10 +685,9 @@ impl Config {
         }
 
         // Last, after the per-table findings: those describe what a document
-        // does *today*, which is more urgent than a deprecation. Absent and
-        // `1` are the same format; any other value is a validation error, not
-        // a version 1 config.
-        if matches!(self.version, None | Some(1)) {
+        // does *today*, which is more urgent than a deprecation. Any version
+        // other than 1 or 2 is a validation error, not a version 1 config.
+        if self.is_version_1() {
             lints.push(Lint::ConfigVersion1 {
                 steps: self.version_2_steps(),
             });
@@ -930,9 +820,8 @@ tables:
       - {name: v, xml_path: /report/stations/station/ms/m/v, data_type: Int32}
   - name: notes
     xml_path: /report/stations/station/notes
-    row: note
     fields:
-      - {name: text, path: text, data_type: Utf8}
+      - {name: text, xml_path: /report/stations/station/notes/note/text, data_type: Utf8}
 "#
             )
         }
@@ -959,6 +848,13 @@ tables:
                         table: "measurements".into(),
                         field: "v".into(),
                     },
+                    MigrationStep::DeclareRow {
+                        table: "notes".into()
+                    },
+                    MigrationStep::RenameFieldXmlPath {
+                        table: "notes".into(),
+                        field: "text".into(),
+                    },
                     MigrationStep::LinkNestedTable {
                         table: "notes".into(),
                         enclosing_table: "stations".into(),
@@ -979,29 +875,24 @@ tables:
             )));
         }
 
-        /// `links: []` is a declaration — "deliberately unlinked" — so a
-        /// table carrying it has nothing left to do on that front.
-        #[test]
-        fn a_table_declaring_links_empty_is_not_told_to_add_links() {
-            let config = config_from_yaml!(
-                r#"
-tables:
-  - {name: outer, xml_path: /r/os, row: o, fields: [{name: a, path: a, data_type: Int32}]}
-  - {name: inner, xml_path: /r/os/o/is, row: i, links: [], fields: [{name: b, path: b, data_type: Int32}]}
-"#
-            );
-            assert_eq!(steps(&config), Some(vec![]));
-        }
-
         #[rstest::rstest]
         #[case::absent("")]
         #[case::explicit("version: 1\n")]
         fn absent_and_version_1_are_the_same_format(#[case] header: &str) {
             let yaml = format!(
-                "{header}tables:\n  - {{name: t, xml_path: /r, row: i, fields: [{{name: v, path: v, data_type: Int32}}]}}\n"
+                "{header}tables:\n  - {{name: t, xml_path: /r, fields: [{{name: v, xml_path: /r/i/v, data_type: Int32}}]}}\n"
             );
-            let config: Config = yaml_serde::from_str(&yaml).unwrap();
-            assert_eq!(steps(&config), Some(vec![]));
+            let config = Config::from_yaml_str(&yaml).unwrap();
+            assert_eq!(
+                steps(&config),
+                Some(vec![
+                    MigrationStep::DeclareRow { table: "t".into() },
+                    MigrationStep::RenameFieldXmlPath {
+                        table: "t".into(),
+                        field: "v".into(),
+                    },
+                ])
+            );
         }
 
         #[test]
@@ -1016,16 +907,11 @@ tables:
             assert_eq!(steps(&config), None);
         }
 
-        /// Only the `version: 2` line is left — and that line is the one step
-        /// that can change values, so the message must still say so.
+        /// Only a config without tables has no step left, and the `version: 2`
+        /// line can still change values, so the message says so.
         #[test]
-        fn a_config_using_only_version_2_keys_is_told_the_last_step_changes_defaults() {
-            let config = config_from_yaml!(
-                r#"
-tables:
-  - {name: t, xml_path: /r, row: i, fields: [{name: v, path: v, data_type: Utf8}]}
-"#
-            );
+        fn a_config_with_nothing_left_is_told_the_line_changes_defaults() {
+            let config = config_from_yaml!("tables: []\n");
             assert_eq!(steps(&config), Some(vec![]));
             let message = config
                 .lint()
@@ -1034,19 +920,18 @@ tables:
                 .unwrap()
                 .to_string();
             assert!(
-                message.contains("already uses only version 2 keys"),
+                message.contains("Nothing in it needs to change"),
                 "{message}"
             );
             assert!(message.contains("trimmed"), "{message}");
         }
 
-        /// Uses only version 2 keys, and otherwise declares everything, but
-        /// misspells `trim` on a field.
+        /// Misspells `scale` on a field.
         fn unknown_key() -> Config {
             config_from_yaml!(
                 r#"
 tables:
-  - {name: t, xml_path: /r, row: i, fields: [{name: v, path: v, data_type: Utf8, trimm: false}]}
+  - {name: t, xml_path: /r, fields: [{name: v, xml_path: /r/i/v, data_type: Float64, scal: 0.1}]}
 "#
             )
         }
@@ -1058,7 +943,7 @@ tables:
             let config = config_from_yaml!(
                 r#"
 tables:
-  - {name: t, xml_path: /r, rows: i, fields: [{name: v, path: /r/i/v, data_type: Utf8}]}
+  - {name: t, xml_path: /r, rows: i, fields: [{name: v, xml_path: /r/i/v, data_type: Utf8}]}
 "#
             );
             assert_eq!(
@@ -1069,6 +954,10 @@ tables:
                         key: "rows".into(),
                     },
                     MigrationStep::DeclareRow { table: "t".into() },
+                    MigrationStep::RenameFieldXmlPath {
+                        table: "t".into(),
+                        field: "v".into(),
+                    },
                 ]
             );
             let message = config
@@ -1086,31 +975,31 @@ tables:
             );
         }
 
-        /// Uses only version 2 keys, but `outer.count` lies inside `inner`,
-        /// which captures its value.
+        /// `outer.count` lies inside `inner`, which captures its value.
         fn field_inside_nested_table() -> Config {
             config_from_yaml!(
                 r#"
 tables:
-  - {name: outer, xml_path: /r, row: a, fields: [{name: count, path: bs/@count, data_type: Int32, nullable: true}]}
-  - {name: inner, xml_path: /r/a/bs, row: b, links: [], fields: [{name: v, path: v, data_type: Int32}]}
+  - {name: outer, xml_path: /r, fields: [{name: count, xml_path: /r/a/bs/@count, data_type: Int32, nullable: true}]}
+  - {name: inner, xml_path: /r/a/bs, fields: [{name: v, xml_path: /r/a/bs/b/v, data_type: Int32}]}
 "#
             )
         }
 
-        /// Declaring `version: 2` rejects this config, so the notice must not
-        /// say the line is all that is left.
+        /// Version 2 rejects the field, and no rename fixes it, so it is a step
+        /// of its own.
         #[test]
         fn a_field_inside_a_nested_table_is_a_step() {
             let config = field_inside_nested_table();
-            assert_eq!(
-                steps(&config).unwrap(),
-                vec![MigrationStep::MoveFieldToNestedTable {
+            let steps = steps(&config).unwrap();
+            assert!(
+                steps.contains(&MigrationStep::MoveFieldToNestedTable {
                     table: "outer".into(),
                     field: "count".into(),
                     field_path: "/r/a/bs/@count".into(),
                     nested_table: "inner".into(),
-                }]
+                }),
+                "{steps:?}"
             );
             let message = config
                 .lint()
@@ -1127,82 +1016,27 @@ tables:
             );
         }
 
-        /// Uses only version 2 keys, but `items.label` lies beside the rows,
-        /// outside the row element.
-        fn field_outside_row() -> Config {
-            config_from_yaml!(
-                r#"
-tables:
-  - {name: items, xml_path: /report/data, row: item, fields: [{name: label, path: /report/data/label, data_type: Utf8, nullable: true}, {name: v, path: v, data_type: Int32}]}
-"#
-            )
-        }
-
-        #[test]
-        fn a_field_outside_its_row_is_a_step() {
-            let config = field_outside_row();
-            assert_eq!(
-                steps(&config).unwrap(),
-                vec![MigrationStep::MoveFieldIntoRow {
-                    table: "items".into(),
-                    field: "label".into(),
-                    field_path: "/report/data/label".into(),
-                    row_path: "/report/data/item".into(),
-                }]
-            );
-            let message = config
-                .lint()
-                .into_iter()
-                .find(|l| matches!(l, Lint::ConfigVersion1 { .. }))
-                .unwrap()
-                .to_string();
-            assert!(
-                message.contains(
-                    "1 field outside its table's row element must move inside it or to a table \
-                     of its own (items.label)"
-                ),
-                "{message}"
-            );
-        }
-
-        /// A table without `row:` is told to declare one, and nothing about
-        /// its fields: which of them fall outside depends on the element the
-        /// author picks.
-        #[test]
-        fn fields_of_a_table_without_a_row_are_not_checked_against_one() {
-            let config = config_from_yaml!(
-                r#"
-tables:
-  - {name: items, xml_path: /data, fields: [{name: id, path: /data/@id, data_type: Utf8}, {name: v, path: /data/item/v, data_type: Int32}]}
-"#
-            );
-            assert_eq!(
-                steps(&config).unwrap(),
-                vec![MigrationStep::DeclareRow {
-                    table: "items".into()
-                }]
-            );
-        }
-
-        /// Uses only version 2 keys, but its stop path has a `.` segment.
+        /// The stop path has a `.` segment.
         fn dot_segment() -> Config {
             config_from_yaml!(
                 r#"
 parser_options: {stop_at_paths: [/r/./end]}
 tables:
-  - {name: t, xml_path: /r, row: i, fields: [{name: v, path: v, data_type: Utf8}]}
+  - {name: t, xml_path: /r, fields: [{name: v, xml_path: /r/i/v, data_type: Utf8}]}
 "#
             )
         }
 
+        /// Listed before the tables' steps, like an unknown key: a path that
+        /// matches nothing explains what follows.
         #[test]
         fn a_path_with_a_dot_segment_is_a_step() {
             assert_eq!(
-                steps(&dot_segment()).unwrap(),
-                vec![MigrationStep::RemoveDotSegment {
+                steps(&dot_segment()).unwrap().first(),
+                Some(&MigrationStep::RemoveDotSegment {
                     location: "`parser_options.stop_at_paths`".into(),
                     path: "/r/./end".into(),
-                }]
+                })
             );
         }
 
@@ -1210,6 +1044,9 @@ tables:
         /// nothing exactly when declaring `version: 2` would validate, and
         /// otherwise the validation error is the lint's first step. A second
         /// copy of the rules for either side could drift; one copy cannot.
+        ///
+        /// Only a config without tables has nothing left, since no version 1
+        /// table declares a row.
         #[test]
         fn the_notice_and_version_2_validation_agree() {
             let with_version = |config: &Config| {
@@ -1219,23 +1056,15 @@ tables:
             };
             let configs = [
                 legacy(),
+                config_from_yaml!("tables: []\n"),
                 config_from_yaml!(
                     r#"
 tables:
-  - {name: t, xml_path: /r, row: i, fields: [{name: v, path: v, data_type: Int32}]}
-"#
-                ),
-                // A root metadata table: the table below it is nested, and must
-                // say so — the lint and validation must agree on that too.
-                config_from_yaml!(
-                    r#"
-tables:
-  - {name: doc, xml_path: /, row: report, fields: [{name: title, path: title, data_type: Utf8}]}
-  - {name: s, xml_path: /report/ss, row: s, fields: [{name: v, path: v, data_type: Int32}]}
+  - {name: doc, xml_path: /, fields: [{name: title, xml_path: /report/title, data_type: Utf8}]}
+  - {name: s, xml_path: /report/ss, fields: [{name: v, xml_path: /report/ss/s/v, data_type: Int32}]}
 "#
                 ),
                 field_inside_nested_table(),
-                field_outside_row(),
                 unknown_key(),
                 dot_segment(),
             ];
@@ -1263,10 +1092,8 @@ tables:
             let fields: String = (0..40)
                 .map(|i| format!("      - {{name: f{i}, xml_path: /r/i/f{i}, data_type: Int32}}\n"))
                 .collect();
-            let yaml = format!(
-                "tables:\n  - name: t\n    xml_path: /r\n    row: i\n    fields:\n{fields}"
-            );
-            let config: Config = yaml_serde::from_str(&yaml).unwrap();
+            let yaml = format!("tables:\n  - name: t\n    xml_path: /r\n    fields:\n{fields}");
+            let config = Config::from_yaml_str(&yaml).unwrap();
             let message = config
                 .lint()
                 .into_iter()
@@ -1279,11 +1106,11 @@ tables:
         }
 
         #[test]
-        fn a_single_step_reads_in_the_singular() {
+        fn one_of_a_kind_reads_in_the_singular() {
             let config = config_from_yaml!(
                 r#"
 tables:
-  - {name: t, xml_path: /r, fields: [{name: v, path: /r/i/v, data_type: Int32}]}
+  - {name: t, xml_path: /r, fields: [{name: v, xml_path: /r/i/v, data_type: Int32}]}
 "#
             );
             let message = config
@@ -1293,7 +1120,10 @@ tables:
                 .unwrap()
                 .to_string();
             assert!(
-                message.contains("1 table must declare `row:` rather than infer its rows (t)"),
+                message.contains(
+                    "1 table must declare `row:` rather than infer its rows (t); 1 field must \
+                     rename the `xml_path:` key to `path:` (t.v)"
+                ),
                 "{message}"
             );
         }
@@ -1586,46 +1416,6 @@ tables:
     }
 
     #[test]
-    fn non_nullable_utf8_fields_that_state_on_missing_are_not_reported() {
-        let config = config_from_yaml!(
-            r#"
-tables:
-  - name: items
-    xml_path: /data
-    row: item
-    fields:
-      - {name: name, path: name, data_type: Utf8, on_missing: error}
-      - {name: label, path: label, data_type: Utf8, on_missing: empty}
-      - {name: note, path: note, data_type: Utf8}
-"#
-        );
-        assert_eq!(
-            config.lint_excluding_deprecation(),
-            vec![Lint::ImplicitEmptyString {
-                table: "items".to_string(),
-                fields: vec!["note".to_string()],
-            }]
-        );
-    }
-
-    #[test]
-    fn an_on_missing_default_covers_every_field() {
-        let config = config_from_yaml!(
-            r#"
-defaults:
-  on_missing: error
-tables:
-  - name: items
-    xml_path: /data
-    row: item
-    fields:
-      - {name: name, path: name, data_type: Utf8}
-"#
-        );
-        assert_eq!(config.lint_excluding_deprecation(), vec![]);
-    }
-
-    #[test]
     fn version_2_has_no_implicit_empty_strings_to_report() {
         // Under `version: 2` a missing non-nullable `Utf8` value is an error,
         // so a warning that it yields "" would be false.
@@ -1725,14 +1515,14 @@ tables:
 
         let declared = config_from_yaml!(
             r#"
+            version: 2
             tables:
               - name: header
                 xml_path: /report/header
                 row: "."
-                levels: []
                 fields:
-                  - {name: title, xml_path: /report/header/title, data_type: Utf8}
-                  - {name: created, xml_path: /report/header/created, data_type: Utf8}
+                  - {name: title, path: title, data_type: Utf8}
+                  - {name: created, path: created, data_type: Utf8}
             "#
         );
         assert!(
@@ -1749,13 +1539,13 @@ tables:
     fn declaring_a_row_silences_the_never_finalizes_lint() {
         let config = config_from_yaml!(
             r#"
+            version: 2
             tables:
               - name: t
                 xml_path: /a
                 row: "."
-                levels: []
                 fields:
-                  - {name: id, xml_path: /a/@id, data_type: Utf8}
+                  - {name: id, path: "@id", data_type: Utf8}
             "#
         );
         assert!(
@@ -1764,37 +1554,6 @@ tables:
                 .iter()
                 .any(|l| matches!(l, Lint::NeverFinalizesRows { .. }))
         );
-    }
-
-    #[test]
-    fn a_field_outside_the_declared_row_is_reported() {
-        let config = config_from_yaml!(
-            r#"
-            tables:
-              - name: t
-                xml_path: /report/data
-                row: item
-                levels: []
-                fields:
-                  - {name: v, xml_path: /report/data/item/v, data_type: Int32}
-                  - {name: stray, xml_path: /report/data/summary, data_type: Utf8}
-            "#
-        );
-        let lints = config.lint_excluding_deprecation();
-        let outside: Vec<&Lint> = lints
-            .iter()
-            .filter(|l| matches!(l, Lint::FieldOutsideRow { .. }))
-            .collect();
-        assert_eq!(outside.len(), 1, "got {lints:?}");
-        let Lint::FieldOutsideRow {
-            field, row_path, ..
-        } = outside[0]
-        else {
-            unreachable!()
-        };
-        assert_eq!(field, "stray");
-        assert_eq!(row_path, "/report/data/item");
-        assert!(outside[0].to_string().contains("'stray'"));
     }
 
     /// No element is named `.` or `..`, so a version 1 path with such a
@@ -1838,9 +1597,8 @@ tables:
             tables:
               - name: t
                 xml_path: /r
-                row: i
                 fields:
-                  - {name: v, path: v, data_type: Utf8, trimm: false}
+                  - {name: v, xml_path: /r/i/v, data_type: Float64, scal: 0.1}
             "#
         );
         let lints = config.lint_excluding_deprecation();
@@ -1853,14 +1611,14 @@ tables:
                 },
                 Lint::UnknownKey {
                     location: "field 'v' of table 't'".into(),
-                    key: "trimm".into(),
+                    key: "scal".into(),
                 },
             ],
             "{lints:?}"
         );
         assert_eq!(
             lints[1].to_string(),
-            "Unknown key 'trimm' in field 'v' of table 't' is ignored; check its spelling, or \
+            "Unknown key 'scal' in field 'v' of table 't' is ignored; check its spelling, or \
              remove it"
         );
     }
@@ -1906,31 +1664,6 @@ tables:
         assert!(
             message.contains("'n'") && message.contains("'inner'"),
             "{message}"
-        );
-    }
-
-    /// An attribute of the row element is inside the row subtree, so declaring
-    /// a row must not flag it.
-    #[test]
-    fn an_attribute_of_the_row_element_is_inside_the_row() {
-        let config = config_from_yaml!(
-            r#"
-            tables:
-              - name: t
-                xml_path: /report/data
-                row: item
-                levels: []
-                fields:
-                  - {name: id, xml_path: /report/data/item/@id, data_type: Utf8}
-            "#
-        );
-        assert!(
-            !config
-                .lint()
-                .iter()
-                .any(|l| matches!(l, Lint::FieldOutsideRow { .. })),
-            "got {:?}",
-            config.lint_excluding_deprecation()
         );
     }
 }

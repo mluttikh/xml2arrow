@@ -1,12 +1,16 @@
 # Fields written relative to the declared row. Every path here has an absolute
 # equivalent that resolves to the same trie node, which is the whole content of
-# the change: `path:` is ergonomics, not semantics. Covers the three shapes —
-# a child element, an attribute of the row, and a nested element and attribute.
+# the change: a relative `path:` is ergonomics, not semantics. Covers the three
+# shapes — a child element, an attribute of the row, and a nested element and
+# attribute.
+version: 2
 tables:
   - name: readings
     xml_path: /report/stations/station/readings
     row: reading
-    levels: [stations]
+    links:
+      - index_of: /report/stations/station
+        name: "<stations>"
     fields:
       - {name: seq, path: "@seq", data_type: Int32, nullable: true}
       - {name: value, path: value, data_type: Int32, nullable: true}
@@ -14,6 +18,6 @@ tables:
       - {name: unit, path: sensor/@unit, data_type: Utf8, nullable: true}
   - name: stations
     xml_path: /report/stations
-    levels: []
+    row: station
     fields:
-      - {name: id, xml_path: /report/stations/station/@id, data_type: Utf8, nullable: true}
+      - {name: id, path: "@id", data_type: Utf8, nullable: true}

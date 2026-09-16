@@ -62,9 +62,11 @@
 //! A config without `version: 2` uses configuration format version 1, the
 //! format of every release before 0.20. It is deprecated, and keeps working
 //! unchanged until 1.0: its rows are inferred from the configured fields, and
-//! nested tables use `levels:` position columns. [`Config::lint`] reports what
-//! such a config still needs to change, and the [migration guide] takes it
-//! there step by step.
+//! nested tables use `levels:` position columns. A config is one version or the
+//! other, so a version 1 config cannot use a version 2 key. [`Config::lint`]
+//! reports what such a config needs to change, [`Config::to_version_2`]
+//! converts it without changing its output, and the [migration guide] covers
+//! the rest.
 //!
 //! [configuration reference]: https://github.com/mluttikh/xml2arrow/blob/main/docs/configuration.md
 //! [migration guide]: https://github.com/mluttikh/xml2arrow/blob/main/docs/migrating-to-version-2.md

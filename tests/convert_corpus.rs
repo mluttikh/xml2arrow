@@ -1,11 +1,14 @@
 //! Converting to configuration format version 2 changes no output.
 //!
 //! `Config::to_version_2` promises that every document parses to the same
-//! tables, columns, values and errors under the converted config as under the
-//! original. The frozen corpus holds a version 1 config and a document for
+//! tables, columns, values and errors under a fully converted config as under
+//! the original. The frozen corpus holds a version 1 config and a document for
 //! every behavior worth freezing, so each of its version 1 cases is converted
 //! here, written out as YAML and read back the way a user would, and parsed
 //! under both configs. The two results must be identical.
+//!
+//! A case that does not convert fully still declares version 2, and must not
+//! load: the parts left over are what the author has to decide.
 
 use std::fs;
 use std::path::Path;
@@ -34,10 +37,10 @@ fn converting_a_corpus_config_changes_no_output() {
         }
         version_1 += 1;
 
-        if let Err(message) = check_case(&original, &xml) {
-            failures.push(format!("--- {name} ---\n{message}"));
-        } else if original.to_version_2().unwrap().unconverted.is_empty() {
-            converted += 1;
+        match check_case(&original, &xml) {
+            Ok(true) => converted += 1,
+            Ok(false) => {}
+            Err(message) => failures.push(format!("--- {name} ---\n{message}")),
         }
     }
 
@@ -53,10 +56,28 @@ fn converting_a_corpus_config_changes_no_output() {
     println!("{converted} of {version_1} version 1 corpus configs converted fully");
 }
 
-fn check_case(original: &Config, xml: &[u8]) -> Result<(), String> {
+/// Whether the case converted fully, or why it broke the promise.
+fn check_case(original: &Config, xml: &[u8]) -> Result<bool, String> {
     let conversion = original
         .to_version_2()
         .map_err(|e| format!("conversion failed: {e}"))?;
+    if conversion.config.version != Some(2) {
+        return Err(format!(
+            "declares version {:?} rather than 2",
+            conversion.config.version
+        ));
+    }
+    if !conversion.unconverted.is_empty() {
+        // Checked on the config itself rather than a written copy, which
+        // drops unknown keys and so could load without them being resolved.
+        return match conversion.config.validate() {
+            Err(_) => Ok(false),
+            Ok(()) => Err(format!(
+                "loads, although parts are unconverted: {:?}",
+                conversion.unconverted
+            )),
+        };
+    }
 
     // The config the promise is about is the one a user reads back from disk.
     let written = yaml_serde::to_string(&conversion.config).map_err(|e| e.to_string())?;
@@ -66,19 +87,11 @@ fn check_case(original: &Config, xml: &[u8]) -> Result<(), String> {
         return Err(format!("converted config does not round-trip:\n{written}"));
     }
 
-    let fully_converted = conversion.unconverted.is_empty();
-    if fully_converted != (converted.version == Some(2)) {
-        return Err(format!(
-            "declares version {:?} with unconverted parts {:?}",
-            converted.version, conversion.unconverted
-        ));
-    }
-
     let before = Parser::new(original).and_then(|p| p.parse_slice(xml));
     let after = Parser::new(&converted).and_then(|p| p.parse_slice(xml));
     match (before, after) {
-        (Ok(before), Ok(after)) if before == after => Ok(()),
-        (Err(before), Err(after)) if before.to_string() == after.to_string() => Ok(()),
+        (Ok(before), Ok(after)) if before == after => Ok(true),
+        (Err(before), Err(after)) if before.to_string() == after.to_string() => Ok(true),
         (before, after) => Err(format!(
             "original:  {before:?}\nconverted: {after:?}\nconverted config:\n{written}"
         )),

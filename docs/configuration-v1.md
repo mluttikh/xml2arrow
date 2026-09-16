@@ -16,7 +16,7 @@ Every config written for xml2arrow 0.19 or earlier is version 1.
 - [`levels`](#levels)
 - [Fields](#fields)
 - [Values](#values)
-- [Version 2 keys in a version 1 config](#version-2-keys-in-a-version-1-config)
+- [Keys only version 2 has](#keys-only-version-2-has)
 - [Checking a version 1 config](#checking-a-version-1-config)
 - [Complete schema](#complete-schema)
 
@@ -208,16 +208,20 @@ document is read, so whitespace-only text becomes no text. `Config::lint()`
 reports the non-nullable `Utf8` fields that would produce `""` for a missing
 value (`ImplicitEmptyString`).
 
-## Version 2 keys in a version 1 config
+## Keys only version 2 has
 
-A version 1 config may use any key from version 2: `row`, `path`, `links`,
-`row_id`, `defaults`, `metadata` and the value policies. Each works as described in the
-[reference](configuration.md), with one difference: a value policy that neither
-the field nor `defaults` sets keeps the version 1 behavior from [Values](#values).
+Version 1 is the format xml2arrow 0.19 read, and a config is version 1 or
+version 2 as a whole. A version 1 config that sets a key only version 2 has
+(`row`, `path`, `links`, `row_id`, `defaults`, `metadata` or a value policy) is
+rejected when it is loaded:
 
-This is what lets a config move to version 2 one table or field at a time, with
-nothing else changing until it declares `version: 2`. A table uses `levels` or
-`links`, not both, and a field sets `xml_path` or `path`, not both.
+```text
+The key 'row:' in table 'header' is part of configuration format version 2; declare `version: 2` at the top of the config to use it
+```
+
+To use one, move the whole config to version 2. `Config::to_version_2()` does
+that without changing the output; see the
+[migration guide](migrating-to-version-2.md).
 
 The [parser options](configuration.md#parser-options) are the same in both
 versions.
@@ -236,12 +240,11 @@ likely to surprise. They never change how a document is parsed.
 | `ExcessLevels` | a table has more `levels` than tables to count |
 | `ImplicitEmptyString` | a non-nullable `Utf8` field produces `""` when its value is missing |
 | `FieldInsideNestedTable` | a field lies inside the `xml_path` of a table nested inside its own table, which captures every value there, so the field never receives one |
-| `FieldOutsideRow` | a field's path lies outside the table's `row:`, so its value attaches to whichever row ends next |
 | `StructuralTable` | a table has no fields, so it is left out of the output |
 | `ConfigVersion1` | every version 1 config: the deprecation notice |
 
-The deprecation notice lists what `version: 2` would still reject, grouped by
-kind, and shrinks as you migrate. For the example config:
+The deprecation notice lists what `version: 2` would reject, grouped by kind.
+For the example config:
 
 ```text
 This config uses configuration format version 1, which is deprecated. Before
@@ -255,7 +258,7 @@ non-nullable `Utf8` value is an error rather than ""
 
 In Rust, the notice is `Lint::ConfigVersion1 { steps }`, with one
 `MigrationStep` per remaining change. A host that fails on any warning sees the
-notice for every version 1 config; filter out `Lint::ConfigVersion1` while you
+notice for every version 1 config; filter out `Lint::ConfigVersion1` until you
 migrate.
 
 ## Complete schema

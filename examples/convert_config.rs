@@ -5,11 +5,13 @@
 //! ```
 //!
 //! Writes the converted config to stdout, and to stderr one line for each part
-//! left for you to decide. Exits 0 when the config is fully converted and
-//! declares `version: 2`, 1 when parts are left, and 2 on an error.
+//! left for you to decide. The converted config always declares `version: 2`.
+//! Exits 0 when the config is fully converted, 1 when parts are left, in which
+//! case the written config does not load until you resolve them, and 2 on an
+//! error.
 //!
-//! The conversion changes no output by construction; `config_diff` shows that
-//! on your own documents. The written file is fresh: the original's comments
+//! A full conversion changes no output by construction; `config_diff` shows
+//! that on your own documents. The written file is fresh: the original's comments
 //! and layout are not kept.
 //!
 //! A dev-only example rather than a shipped binary, like `config_diff`: it
@@ -50,8 +52,7 @@ fn main() -> ExitCode {
         eprintln!("left for you: {part}");
     }
     eprintln!(
-        "{} part(s) left: the config keeps its version until they are resolved. Resolve them, \
-         then convert again.",
+        "{} part(s) left: the config declares version: 2, and does not load until they are resolved.",
         conversion.unconverted.len()
     );
     ExitCode::FAILURE

@@ -821,6 +821,7 @@ fn test_null_values_make_a_utf8_value_missing() {
     let batches = parse_xml_file(
         r#"<data><item><s>N/A</s></item><item><s>   </s></item><item><s>ok</s></item></data>"#,
         r#"
+        version: 2
         tables:
           - name: items
             xml_path: /data
@@ -882,8 +883,8 @@ fn test_version_2_rejects_a_field_that_a_nested_table_captures() {
     // table, so a field located inside a nested table's `xml_path` is never
     // filled. `version: 2` accepted such a config, and the column came out null
     // in every row with no error and no warning. Version 2 now rejects it at
-    // load; the same config without the version line still loads, as it did
-    // before, and is warned instead.
+    // load; the same mapping in version 1 still loads, as it did before, and is
+    // warned instead.
     let version_2 = r#"version: 2
 tables:
   - name: outer
@@ -916,7 +917,21 @@ tables:
         "{message}"
     );
 
-    let version_1 = Config::from_yaml_str(version_2.trim_start_matches("version: 2\n")).unwrap();
+    let version_1 = Config::from_yaml_str(
+        r#"tables:
+  - name: outer
+    xml_path: /r
+    levels: []
+    fields:
+      - {name: count, xml_path: /r/a/bs/@count, data_type: Int32, nullable: true}
+  - name: inner
+    xml_path: /r/a/bs
+    levels: []
+    fields:
+      - {name: v, xml_path: /r/a/bs/b/v, data_type: Int32}
+"#,
+    )
+    .unwrap();
     let parser = Parser::new(&version_1).unwrap();
     assert!(
         parser
@@ -941,8 +956,8 @@ fn test_version_2_rejects_a_field_outside_its_row() {
     // Regression: a field outside its table's row element attaches to whichever
     // row ends next, so a value that appears once in the container filled the
     // first row and left every other row null. `version: 2` accepted that with
-    // only a lint. It now rejects the field at load; the same config without
-    // the version line still loads and parses as before, and is warned.
+    // only a lint. It now rejects the field at load. Only version 2 declares a
+    // row element, so no version 1 config has this shape.
     let version_2 = r#"version: 2
 tables:
   - name: items
@@ -968,30 +983,6 @@ tables:
             && message.contains("outside the row element '/report/data/item'"),
         "{message}"
     );
-
-    let version_1 = Config::from_yaml_str(version_2.trim_start_matches("version: 2\n")).unwrap();
-    let parser = Parser::new(&version_1).unwrap();
-    assert!(
-        parser
-            .warnings()
-            .iter()
-            .any(|lint| matches!(lint, xml2arrow::Lint::FieldOutsideRow { field, .. } if field == "label")),
-        "{:?}",
-        parser.warnings()
-    );
-    // Why it is an error under version 2: one label, and only the first row
-    // has it.
-    let batches = parser
-        .parse_slice(b"<report><data><label>L</label><item><v>1</v></item><item><v>2</v></item></data></report>")
-        .unwrap();
-    let items = batches.get("items").unwrap();
-    let label = items
-        .column_by_name("label")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap();
-    assert_eq!(label.iter().collect::<Vec<_>>(), vec![Some("L"), None]);
 }
 
 #[test]
@@ -999,8 +990,8 @@ fn test_version_2_rejects_an_unknown_key() {
     // Regression: a key the configuration does not define was ignored without
     // a word, so a misspelled optional key left its setting at the default.
     // Here `scal: 100.0` was meant to be `scale`, and values came out unscaled.
-    // `version: 2` now rejects the key at load; the same config without the
-    // version line still loads and parses as before, and is warned.
+    // `version: 2` now rejects the key at load; the same mapping in version 1
+    // still loads and parses as before, and is warned.
     let version_2 = r#"version: 2
 tables:
   - name: readings
@@ -1025,7 +1016,16 @@ tables:
         "{err}"
     );
 
-    let version_1 = Config::from_yaml_str(version_2.trim_start_matches("version: 2\n")).unwrap();
+    let version_1 = Config::from_yaml_str(
+        r#"tables:
+  - name: readings
+    xml_path: /report
+    levels: []
+    fields:
+      - {name: pressure, xml_path: /report/reading/value, data_type: Float64, scal: 100.0}
+"#,
+    )
+    .unwrap();
     let parser = Parser::new(&version_1).unwrap();
     assert!(
         parser
@@ -1049,14 +1049,53 @@ tables:
 }
 
 #[test]
+fn test_version_1_rejects_a_version_2_key() {
+    // Regression: a config without `version: 2` could set `links:`, `row:` or
+    // any other key version 2 added, and was parsed as a mix of both formats,
+    // one table at a time. Version 1 is the format 0.19 read, and 0.19 ignored
+    // those keys, so the same file meant different things to different
+    // releases. A config is now one version or the other, and version 1
+    // rejects a version 2 key at load, naming the line that allows it.
+    let yaml = r#"
+tables:
+  - name: stations
+    xml_path: /report/stations
+    levels: []
+    fields:
+      - {name: id, xml_path: /report/stations/station/@id, data_type: Utf8}
+  - name: readings
+    xml_path: /report/stations/station/readings
+    links: [{parent: stations}]
+    fields:
+      - {name: v, xml_path: /report/stations/station/readings/reading/v, data_type: Int32}
+"#;
+    let err = Config::from_yaml_str(yaml).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            xml2arrow::Error::InvalidConfig {
+                reason: xml2arrow::errors::ConfigIssue::KeyRequiresVersion2 { key: "links", .. }
+            }
+        ),
+        "{err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        "The key 'links:' in table 'readings' is part of configuration format version 2; \
+         declare `version: 2` at the top of the config to use it"
+    );
+}
+
+#[test]
 fn test_a_path_with_a_dot_segment_is_rejected() {
     // Regression: `row: ./station` was taken literally, as a child element
     // named `.`, which no document can contain, so the table loaded and parsed
     // to zero rows with no error. `path: ./name` likewise gave a column that
-    // was never filled. `row:` and `path:` are new in this release, so every
-    // version now rejects a `.` or `..` segment in them.
+    // was never filled. Version 2 now rejects a `.` or `..` segment in any
+    // path, and `row:` and `path:` exist only in version 2.
     let err = Config::from_yaml_str(
         r#"
+        version: 2
         tables:
           - name: stations
             xml_path: /report/stations
@@ -1220,7 +1259,7 @@ fn test_truncated_file_is_rejected_rather_than_silently_short() {
 
 #[test]
 fn builders_produce_the_same_config_as_yaml() {
-    use xml2arrow::config::{DType, FieldConfigBuilder, TableConfig};
+    use xml2arrow::config::{DType, FieldConfigBuilder, Link, TableConfig};
 
     let built = Config::builder()
         .table(
@@ -1256,13 +1295,13 @@ tables:
     xml_path: /report/stations
     levels: []
     fields:
-      - {name: id, path: /report/stations/station/@id, data_type: Int32}
+      - {name: id, xml_path: /report/stations/station/@id, data_type: Int32}
   - name: measurements
     xml_path: /report/stations/station/measurements
     levels: [stations]
     fields:
       - name: value
-        path: /report/stations/station/measurements/measurement/value
+        xml_path: /report/stations/station/measurements/measurement/value
         data_type: Float64
         nullable: true
         scale: 0.001
@@ -1270,11 +1309,57 @@ tables:
     )
     .unwrap();
 
-    // The YAML uses `path:`, because `FieldConfigBuilder` writes that key.
-    // A config spelled with the legacy `xml_path:` parses to an equivalent
-    // configuration but not an *equal* one — the two keys are preserved as
-    // written, and only path resolution unifies them. `legacy_and_relative_
-    // field_paths_agree` covers that equivalence where it matters: the output.
+    // The YAML uses `xml_path:`, the version 1 spelling, which is also what
+    // `FieldConfigBuilder` holds.
+    assert_eq!(built, from_yaml);
+
+    // Building a version 2 config moves each field's location to `path:`.
+    let mut link = Link::default();
+    link.parent = Some("stations".to_string());
+    let built = Config::builder()
+        .version(2)
+        .table(
+            TableConfig::builder("stations", "/report/stations")
+                .row("station")
+                .field(
+                    FieldConfigBuilder::new("id", "@id", DType::Int32)
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .table(
+            TableConfig::builder("measurements", "/report/stations/station/measurements")
+                .row("measurement")
+                .links([link])
+                .fields([FieldConfigBuilder::new("value", "value", DType::Float64)
+                    .nullable(true)
+                    .scale(0.001)
+                    .build()
+                    .unwrap()])
+                .build(),
+        )
+        .build()
+        .unwrap();
+
+    let from_yaml: Config = yaml_serde::from_str(
+        r#"
+version: 2
+tables:
+  - name: stations
+    xml_path: /report/stations
+    row: station
+    fields:
+      - {name: id, path: "@id", data_type: Int32}
+  - name: measurements
+    xml_path: /report/stations/station/measurements
+    row: measurement
+    links: [{parent: stations}]
+    fields:
+      - {name: value, path: value, data_type: Float64, nullable: true, scale: 0.001}
+"#,
+    )
+    .unwrap();
     assert_eq!(built, from_yaml);
 }
 

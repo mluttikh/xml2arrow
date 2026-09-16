@@ -489,10 +489,26 @@ pub enum ConfigIssue {
         /// The version the config asked for.
         version: u32,
     },
+    /// A config that does not declare `version: 2` sets a key only
+    /// configuration format version 2 defines, such as `row:`, `links:` or a
+    /// value policy.
+    ///
+    /// Version 1 is exactly the format 0.19 read, and version 2 is the format
+    /// that replaces it; a config is one or the other. Ignoring the key, as
+    /// 0.19 would have, would silently parse under rules the author did not
+    /// write, so it is rejected. Exists only while version 1 does.
+    KeyRequiresVersion2 {
+        /// Where the key is: `table 'readings'`, `field 'value' of table
+        /// 'readings'`, `the top level`.
+        location: String,
+        /// The key: `row`, `links`, `row_id`, `path`, `defaults`, `metadata`,
+        /// or a value policy.
+        key: &'static str,
+    },
     // The variants below are the rules of configuration format version 2. While
     // version 1 is supported, only a config declaring `version: 2` is held to
-    // them, and a version 1 config hears about the same shapes as lints and as
-    // steps in its deprecation notice. They are named after the rule rather than
+    // them, and a version 1 config hears about the shapes it can have as lints
+    // and as steps in its deprecation notice. They are named after the rule rather than
     // the version, and their messages state the rule and the fix, so that
     // neither goes stale once version 2 is the only format.
     /// A table does not declare `row:`, the element that makes one row.
@@ -547,8 +563,8 @@ pub enum ConfigIssue {
     ///
     /// Its value would attach to whichever row ends next rather than to a row
     /// of its own, so a value that appears once in the document lands on one
-    /// row and leaves the rest empty. A version 1 config with this shape loads,
-    /// and reports it as [`Lint::FieldOutsideRow`](crate::Lint::FieldOutsideRow).
+    /// row and leaves the rest empty. Only version 2 declares rows, so only a
+    /// version 2 config can have this shape.
     FieldOutsideRow {
         /// The table the field is declared on.
         table: String,
@@ -575,9 +591,8 @@ pub enum ConfigIssue {
     /// name cannot be `.` or `..`. A `row:` or `path:` of exactly `.` is a
     /// different spelling, and allowed.
     ///
-    /// Rejected in every version for `row:`, `path:` and `index_of:`, which
-    /// are new in this release. For the older `xml_path` and `stop_at_paths`,
-    /// a version 1 config loads, and reports it as
+    /// Rejected whenever a version 2 config has one. For `xml_path` and
+    /// `stop_at_paths`, a version 1 config loads, and reports it as
     /// [`Lint::DotSegmentInPath`](crate::Lint::DotSegmentInPath).
     DotSegmentInPath {
         /// Where the path is: `the row of table 'stations'`, `field 'id' of
@@ -848,6 +863,10 @@ impl fmt::Display for ConfigIssue {
             } => write!(
                 f,
                 "Table '{table}' declares a row element at '{row_path}', but table '{nested_table}' (xml_path '{nested_table_path}') lies between them; rows finalize against the innermost open table, so '{nested_table}' would receive them"
+            ),
+            ConfigIssue::KeyRequiresVersion2 { location, key } => write!(
+                f,
+                "The key '{key}:' in {location} is part of configuration format version 2; declare `version: 2` at the top of the config to use it"
             ),
             ConfigIssue::UnsupportedConfigVersion { version } => write!(
                 f,

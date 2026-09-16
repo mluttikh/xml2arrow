@@ -1,28 +1,28 @@
 # Migrating to configuration format version 2
 
 [Configuration format version 1](configuration-v1.md) is deprecated, and keeps
-working until 1.0. This guide moves a version 1 config to
-[version 2](configuration.md) in four steps. Each step is a small edit that you
-can check before taking the next, and most of them leave the output unchanged.
+working until 1.0. A config is version 1 or version 2 as a whole: version 1
+rejects every key that version 2 adds. So the move itself is one change, which
+the converter makes without changing the output. After it, you adopt what
+version 2 offers one small edit at a time, and check each before the next.
 
 - [What changes](#what-changes)
 - [Before you start](#before-you-start)
-- [Converting automatically](#converting-automatically)
-- [Step 1: rename `xml_path:` to `path:`](#step-1-rename-xml_path-to-path)
-- [Step 2: declare each table's `row:`](#step-2-declare-each-tables-row)
-- [Step 3: replace `levels:` with `links:`](#step-3-replace-levels-with-links)
-- [Step 4: declare `version: 2`](#step-4-declare-version-2)
+- [Step 1: convert](#step-1-convert)
+- [Step 2: resolve what is left](#step-2-resolve-what-is-left)
+- [Step 3: use join keys](#step-3-use-join-keys)
+- [Step 4: adopt the version 2 value defaults](#step-4-adopt-the-version-2-value-defaults)
 - [The result](#the-result)
 - [Configs built in Rust](#configs-built-in-rust)
 
 ## What changes
 
-| Step | Version 1 | Version 2 | Output |
-|---|---|---|---|
-| 1 | `xml_path:` on a field | `path:` | unchanged |
-| 2 | rows are inferred | `row:` | unchanged, except for tables whose rows were split |
-| 3 | `levels:` | `links:` | unchanged with `index_of:`; key columns replace the position columns if you use `parent:` |
-| 4 | `Utf8` whitespace kept; a missing non-nullable `Utf8` value is `""` | trimmed; an error | changes where it applies, unless you keep the old behavior per field |
+| Version 1 | Version 2 | Output |
+|---|---|---|
+| `xml_path:` on a field | `path:` | unchanged |
+| rows are inferred | `row:` | unchanged, except for tables whose rows were split |
+| `levels:` | `links:` | unchanged with `index_of:`; key columns replace the position columns if you use `parent:` |
+| `Utf8` whitespace kept; a missing non-nullable `Utf8` value is `""` | trimmed; an error | unchanged while a field states the version 1 behavior |
 
 ## Before you start
 
@@ -56,8 +56,8 @@ for name in sorted(before.keys() | after.keys()):
         print("differs:", name)
 ```
 
-The deprecation notice from `parser.warnings()` doubles as a checklist: it lists
-what is left, and shrinks after each step.
+The deprecation notice from `parser.warnings()` lists everything version 2
+needs.
 
 This guide migrates the [version 1 example](configuration-v1.md#example):
 
@@ -97,13 +97,12 @@ also changes two defaults: `Utf8` values are trimmed, and a missing
 non-nullable `Utf8` value is an error rather than ""
 ```
 
-## Converting automatically
+## Step 1: convert
 
-`Config::to_version_2` takes the four steps below for you, and changes no
+`Config::to_version_2` writes the config in version 2 without changing its
 output: every document parses to the same tables, columns, values and errors
-under the converted config as under the original. Where a step can only be
-taken by changing the output, it leaves that part as it was and says why. The
-converted config declares `version: 2` only when nothing is left.
+under the converted config as under the original. Where a part can only be
+written by changing the output, it leaves that part as it was and says why.
 
 From a clone of this repository:
 
@@ -116,25 +115,24 @@ at two child elements:
 
 ```text
 left for you: table 'header': its rows end at 2 child elements of /report/header (title, created), and no `row:` keeps that; `row: "."` gives one row per <header>, which changes the row count
-1 part(s) left: the config keeps its version until they are resolved. Resolve them, then convert again.
+1 part(s) left: the config declares version: 2, and does not load until they are resolved.
 ```
 
-Declaring `row: "."` on `header` in `after.yaml` and converting that file again
-produces a version 2 config.
+The converted config always declares `version: 2`. It loads once you resolve
+what is left, in [step 2](#step-2-resolve-what-is-left).
 
 What the converter writes:
 
-- `path:` in place of each field's `xml_path:`, with the same absolute value
-  ([step 1](#step-1-rename-xml_path-to-path)).
-- `row:` on each table whose rows end at one child element
-  ([step 2](#step-2-declare-each-tables-row)).
+- `version: 2` at the top.
+- `path:` in place of each field's `xml_path:`, with the same absolute value.
+- `row:` on each table whose rows end at one child element. A row already ended
+  there, so the output does not change.
 - An `index_of:` link with `name:` for each `levels` entry, keeping every
-  column, and `links: []` on nested tables without `levels`
-  ([step 3](#step-3-replace-levels-with-links)).
+  column, and `links: []` on nested tables without `levels`.
 - `trim: false` on each `Utf8` field, and `on_missing: empty` on each
-  non-nullable one, unless the field or `defaults:` already sets them, so that
-  `version: 2` changes no value ([step 4](#step-4-declare-version-2)). Remove
-  them where you want the version 2 behavior.
+  non-nullable one, so that version 2's defaults change no value. Remove them
+  where you want the version 2 behavior, in
+  [step 4](#step-4-adopt-the-version-2-value-defaults).
 
 It never makes a change to the output for you: it does not choose a `row:` for
 a table whose rows are split, and it does not replace position columns with
@@ -150,8 +148,6 @@ the fix can change the output and the choice is yours:
 - a field outside its table's row element. Its value attaches to whichever row
   ends next.
 
-Check the result on your own documents with `config_diff`.
-
 The written file is fresh. The original's comments and layout are not kept,
 and keys left at their defaults are left out.
 
@@ -165,89 +161,28 @@ for part in &conversion.unconverted {
 conversion.config.to_yaml_file("after.yaml")?;
 ```
 
-## Step 1: rename `xml_path:` to `path:`
+### Converting by hand
 
-On every field, rename the key and keep the value:
+A config with only some of these changes does not load, so make them in one
+edit, and check the output once they are all made:
 
-```yaml
-      # before
-      - {name: title, xml_path: /report/header/title, data_type: Utf8, nullable: true}
-      # after
-      - {name: title, path: /report/header/title, data_type: Utf8, nullable: true}
-```
-
-Tables keep their `xml_path:`; only fields change.
-
-**The output does not change**: an absolute path means the same under either
-key.
-
-```text
-  = header: unchanged (2 rows)
-  = readings: unchanged (3 rows)
-  = stations: unchanged (2 rows)
-
-No differences.
-```
-
-## Step 2: declare each table's `row:`
-
-Name the element that makes one row:
-
-```yaml
-  - name: header
-    xml_path: /report/header
-    row: "."        # one row per <header>
-
-  - name: stations
-    xml_path: /report/stations
-    row: station    # one row per <station>
-
-  - name: readings
-    xml_path: /report/stations/station/readings
-    row: reading    # one row per <reading>
-```
-
-Use the name of the repeating element, or `"."` when the `xml_path` element
-itself is the row, as for a header. [`row`](configuration.md#row) lists every
-spelling.
-
-**For a table that `parser.warnings()` does not report, the output does not
-change.** Its fields all sit under one child element, and a row already ended
-there. Here that is `stations` and `readings`.
-
-**A table reported as `InferredRowBoundary` changes, and that is the fix.** Its
-rows were split, one for each configured child element. `header` had two rows
-holding one value each, and now has one row holding both:
-
-```text
-  ~ header:
-      rows: 2 -> 1
-  = readings: unchanged (3 rows)
-  = stations: unchanged (2 rows)
-
-Configs differ on this document.
-```
-
-Update anything downstream that worked around the split rows.
-
-**A field outside the row element you declare is reported as `FieldOutsideRow`.**
-Its value attaches to whichever row ends next, so a value that appears once
-fills one row. Version 2 rejects it, so resolve it before step 4: give the value
-a table of its own, or point the field inside the row. A value on the `xml_path`
-element itself, such as an attribute of `<data>` around `<item>` rows, has no
-version 2 spelling; see [`path`](configuration.md#path).
-
-With `row:` declared, fields can use paths relative to the row element, such as
-`path: "@id"` instead of `path: /report/stations/station/@id`. That is optional
-and does not change the output.
-
-## Step 3: replace `levels:` with `links:`
-
-Version 2 does not allow `levels:`. Each entry becomes an `index_of:` link that
-names the row element of the table the entry counts. Reading the entries from
-the outside in, each one counts the rows of one enclosing table; when there is
-one entry more than there are enclosing tables, the last one counts the table's
-own rows. (The full rule is under [`levels`](configuration-v1.md#levels).)
+1. Add `version: 2` at the top.
+2. On every field, rename `xml_path:` to `path:` and keep the value. Tables keep
+   their `xml_path:`.
+3. On every table, declare `row:`: the name of the repeating element, or `"."`
+   when the `xml_path` element itself is the row, as for a header.
+   [`row`](configuration.md#row) lists every spelling. For a table that
+   `parser.warnings()` does not report as `InferredRowBoundary`, name its one
+   configured child element, and the output does not change.
+4. Replace `levels:` with `links:`. Each entry becomes an `index_of:` link that
+   names the row element of the table the entry counts, with `name:` keeping
+   the column name. Reading the entries from the outside in, each one counts the
+   rows of one enclosing table; when there is one entry more than there are
+   enclosing tables, the last one counts the table's own rows. (The full rule is
+   under [`levels`](configuration-v1.md#levels).) A nested table always needs
+   `links:`, so give one that had no `levels:` `links: []`.
+5. On every `Utf8` field, set `trim: false`, and on every non-nullable one,
+   `on_missing: empty`.
 
 | `levels:` entry | Replace it with | Output |
 |---|---|---|
@@ -255,14 +190,7 @@ own rows. (The full rule is under [`levels`](configuration-v1.md#levels).)
 | counts an enclosing table's rows | `index_of:` that table's row element, with `name:` | unchanged |
 | counts the table's own rows | `index_of:` the table's own row element, with `name:` | unchanged |
 
-In the example, `<station>` on `readings` counts rows of the enclosing
-`stations` table. `<station>` on `stations` and `<reading>` on `readings` count
-their own table's rows.
-
-A nested table always needs `links:` in version 2, even one that had no
-`levels:`. The deprecation notice names each one.
-
-### Keeping the position values
+For the example's `stations` and `readings`:
 
 ```yaml
   - name: stations
@@ -282,24 +210,61 @@ A nested table always needs `links:` in version 2, even one that had no
         name: "<reading>"
 ```
 
-`name:` keeps each column's version 1 name, so the output is identical:
+Loading the config checks that nothing from version 1 is left, and an error
+names anything that is.
+
+## Step 2: resolve what is left
+
+Each part the converter left is a decision about the output. For the example,
+declare `row: "."` on `header`:
+
+```yaml
+  - name: header
+    xml_path: /report/header
+    row: "."        # one row per <header>
+```
+
+The config now loads, and `config_diff` against `before.yaml` shows the one
+change:
 
 ```text
-  = header: unchanged (1 rows)
+  ~ header:
+      rows: 2 -> 1
   = readings: unchanged (3 rows)
   = stations: unchanged (2 rows)
 
-No differences.
+Configs differ on this document.
 ```
 
-The version 1 join on `<station>` still works, with the weakness it always had:
-positions start again in every `<stations>` element, so once that element
-repeats, the join pairs readings with the wrong station. For a join, use keys
-instead.
+That is the fix. `header` had two rows holding one value each, and now has one
+row holding both. Update anything downstream that worked around the split rows.
 
-### Using join keys (recommended)
+The other parts the converter can leave:
+
+- **An unknown key.** Correct its spelling, or remove it.
+- **A path with a `.` or `..` segment.** Write it without one.
+- **A field inside a nested table.** Declare it on that table, or remove it.
+- **A field outside its table's row element.** Give the value a table of its
+  own, or point the field inside the row. A value on the `xml_path` element
+  itself, such as an attribute of `<data>` around `<item>` rows, has no version
+  2 spelling; see [`path`](configuration.md#path).
+- **`levels:` it could not replace.** Replace them with `links:` as described
+  under [Converting by hand](#converting-by-hand). The converter leaves the
+  `levels:` of a table whose row it could not declare, and of a table that
+  counts that table's rows, because the links name the row element you choose.
+
+## Step 3: use join keys
+
+The converted links keep the version 1 position columns, and their weakness:
+positions start again in every `<stations>` element, so once that element
+repeats, a join on `<station>` pairs readings with the wrong station. A
+`parent:` link gives a key instead:
 
 ```yaml
+  - name: stations
+    xml_path: /report/stations
+    row: station
+
   - name: readings
     xml_path: /report/stations/station/readings
     row: reading
@@ -320,32 +285,34 @@ Configs differ on this document.
 ```
 
 Join on `readings._stations_id = stations._id`. This join stays correct when
-`<stations>` repeats, where positions would pair rows with the wrong parent; see
-[`index_of:`](configuration.md#index_of). The keys are `UInt64`. To keep the
-column names from version 1, set `row_id: "<station>"` on `stations` and
-`name: "<station>"` on the link.
+`<stations>` repeats; see [`index_of:`](configuration.md#index_of). The keys
+are `UInt64`. To keep the column names from version 1, set
+`row_id: "<station>"` on `stations` and `name: "<station>"` on the link.
 
-The rest of this guide uses join keys.
+With `row:` declared, fields can also use paths relative to the row element,
+such as `path: "@id"` instead of `path: /report/stations/station/@id`. That does
+not change the output.
 
-## Step 4: declare `version: 2`
+## Step 4: adopt the version 2 value defaults
 
-Add the line at the top of the config:
-
-```yaml
-version: 2
-```
-
-Loading the config now checks that nothing from version 1 is left, and an error
-names anything that is. Once it loads, the deprecation notice is gone.
-
-Two defaults change with it:
+The converter kept the version 1 value handling on every `Utf8` field. Version
+2's defaults differ:
 
 | | Version 1 | Version 2 |
 |---|---|---|
 | Whitespace around a `Utf8` value | kept | trimmed |
 | A missing value in a non-nullable `Utf8` column | `""` | an error |
 
-In the example, one station name has whitespace around it:
+Remove `trim: false` from a field to trim its value, and `on_missing: empty` to
+make a missing value an error. In the example, one station name has whitespace
+around it:
+
+```yaml
+      # before
+      - {name: name, path: name, data_type: Utf8, trim: false, on_missing: empty}
+      # after
+      - {name: name, path: name, data_type: Utf8, on_missing: empty}
+```
 
 ```text
   = header: unchanged (1 rows)
@@ -356,23 +323,14 @@ In the example, one station name has whitespace around it:
 Configs differ on this document.
 ```
 
-To keep the version 1 behavior, set it on the field:
+Keep `trim: false` on individual fields rather than moving it to `defaults:`:
+there it would also stop numbers from being trimmed, and a value like `" 42 "`
+would fail to parse.
 
-```yaml
-      - {name: name, path: name, data_type: Utf8, trim: false}         # keep the whitespace
-      - {name: note, path: note, data_type: Utf8, on_missing: empty}   # missing -> ""
-```
-
-With `trim: false` on `name`, the example's output is identical to step 3.
-Set `trim: false` on individual fields rather than in `defaults:`: it would also
-stop numbers from being trimmed, and a value like `" 42 "` would fail to parse.
-
-A missing value in a non-nullable `Utf8` column now fails the parse, which
-`config_diff` reports as an error rather than a difference. Test with documents
-where values can be absent. Where that is legitimate, set `nullable: true`, or
-`on_missing: empty` to keep `""`.
-
-To undo this step, delete the line.
+A missing value in a non-nullable `Utf8` column without `on_missing: empty`
+fails the parse, which `config_diff` reports as an error rather than a
+difference. Test with documents where values can be absent. Where that is
+legitimate, set `nullable: true`, or keep `on_missing: empty`.
 
 ## The result
 
@@ -424,14 +382,14 @@ readings
 
 ## Configs built in Rust
 
-The same steps apply to a config built in code:
+A config built in code is version 1 or version 2 as a whole too:
 
 | YAML | Rust |
 |---|---|
 | `version: 2` | `ConfigBuilder::version(2)` |
 | `row:` | `TableConfigBuilder::row` |
 | `links:` | `TableConfigBuilder::links`, with `Link` values |
-| `path:` | `FieldConfigBuilder::new(name, path, data_type)`, which already sets `path` |
+| `path:` | `FieldConfigBuilder::new(name, path, data_type)`, which `ConfigBuilder::build` spells `path` in a version 2 config |
 | value policies | `FieldConfigBuilder::policies` and `ConfigBuilder::defaults` |
 
 `TableConfig::new` takes `levels`; build version 2 tables with
@@ -461,5 +419,6 @@ let config = Config::builder()
     .build()?;
 ```
 
-To drive a migration from code, `Lint::ConfigVersion1 { steps }` lists the
-remaining changes as `MigrationStep` values.
+To drive a migration from code, `Config::to_version_2` converts a config, and
+`Lint::ConfigVersion1 { steps }` lists what version 2 needs as `MigrationStep`
+values.

@@ -4,6 +4,7 @@
 # says "0" for both, because each is the first station of its own <group>.
 # Reading the two columns side by side in the snapshot is the argument for
 # preferring `parent:` when you want a join key.
+version: 2
 tables:
   - name: stations
     xml_path: /report/group

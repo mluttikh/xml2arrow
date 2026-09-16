@@ -11,13 +11,12 @@
 //!   mistake is an error at load rather than a wrong column at parse — which
 //!   is the trade this crate makes everywhere, since silently plausible data
 //!   is the worst failure it could produce.
-//! - **There are two configuration formats.** A config whose
-//!   [`Config::version`] is `2` must use [`TableConfig::row`],
-//!   [`TableConfig::links`] and [`FieldConfig::path`]. A config without it is
-//!   configuration format version 1, which is deprecated: rows are inferred
-//!   and nested tables use [`TableConfig::levels`]. A version 1 config may
-//!   adopt the newer keys one at a time, and a config that sets none of them
-//!   behaves exactly as it did before they existed.
+//! - **There are two configuration formats, and a config is one or the
+//!   other.** A config whose [`Config::version`] is `2` uses
+//!   [`TableConfig::row`], [`TableConfig::links`] and [`FieldConfig::path`]. A
+//!   config without it is configuration format version 1, exactly the format
+//!   0.19 read, which is deprecated: rows are inferred, nested tables use
+//!   [`TableConfig::levels`], and a key only version 2 defines is rejected.
 //!
 //! See the crate-level documentation for a worked example, and the
 //! [configuration reference](https://github.com/mluttikh/xml2arrow/blob/main/docs/configuration.md)
@@ -329,32 +328,28 @@ pub(crate) fn paths_equal(a: &str, b: &str) -> bool {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[non_exhaustive]
 pub struct Config {
-    /// Which generation of configuration semantics this file is written
-    /// against. Absent — or `1` — is every release before this one.
+    /// Which configuration format this file is written in. Absent — or `1` —
+    /// is configuration format version 1, exactly the format 0.19 read, and it
+    /// may not set a key only version 2 defines.
     ///
-    /// `2` is an **assertion, not a switch**. It does not select a different
-    /// engine; it says "this config is fully migrated", and validation holds it
-    /// to that: every table declares [`TableConfig::row`], no table uses
-    /// `levels`, every field uses `path` rather than the deprecated
-    /// `xml_path`, every key is one the configuration defines, every table
-    /// nested inside another declares
-    /// [`TableConfig::links`] — `links: []` when it deliberately has none —
-    /// every field lies inside its table's row element, and no field lies
-    /// inside a table nested within its own, where the nested table would
-    /// capture every value it could receive. A config that
-    /// has not finished migrating is rejected at load with a message naming
-    /// what is left, rather than parsing under semantics its author did not
-    /// intend.
+    /// `2` is configuration format version 2. Validation holds a config
+    /// declaring it to that format: every table declares [`TableConfig::row`],
+    /// no table uses `levels`, every field uses `path` rather than `xml_path`,
+    /// every key is one the configuration defines, every table nested inside
+    /// another declares [`TableConfig::links`] — `links: []` when it
+    /// deliberately has none — every field lies inside its table's row
+    /// element, and no field lies inside a table nested within its own, where
+    /// the nested table would capture every value it could receive. A config
+    /// that breaks one of these is rejected at load with a message naming it,
+    /// rather than parsing under semantics its author did not intend.
     ///
-    /// In exchange it opts into the value defaults 1.0 will make mandatory,
-    /// a full release cycle early: `trim` on for every type, and a missing
-    /// non-nullable value an error whatever the column's type — the two places
-    /// where the historical defaults differ by type rather than by intent.
-    /// Both are overridable per field, and deleting the line reverts
-    /// everything.
+    /// Its value defaults are the ones 1.0 makes mandatory: `trim` on for every
+    /// type, and a missing non-nullable value an error whatever the column's
+    /// type — the two places where the version 1 defaults differ by type rather
+    /// than by intent. Both are overridable per field.
     ///
-    /// Declaring `2` therefore has one purpose: to find out, at load time and
-    /// on your own schedule, whether you are ready for 1.0.
+    /// [`Config::to_version_2`] writes a version 1 config in version 2 without
+    /// changing its output, including those two defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<u32>,
     /// A vector of `TableConfig` structs, each defining a table to be extracted from the XML.
@@ -363,7 +358,8 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "ParserOptions::is_default")]
     pub parser_options: ParserOptions,
     /// Value-handling policies applied to every field that does not set its
-    /// own. Absent leaves every field on current behavior.
+    /// own. Version 2 only; absent leaves every field on the version 2
+    /// defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defaults: Option<ValuePolicies>,
     /// Keys the document set that the configuration does not define, in the
@@ -402,6 +398,9 @@ impl Config {
     /// - Field `xml_path` must be a descendant of (or equal to) the parent table's
     ///   `xml_path`, compared per path segment. The root table `/` allows any field path.
     /// - Scale/offset may only be used with Float32 and Float64 fields.
+    /// - A version 1 config, which declares no `version:` or `version: 1`, sets
+    ///   no key only version 2 defines: `row`, `links`, `row_id`, `path`,
+    ///   `metadata`, `defaults` or a value policy.
     /// - When [`Config::version`] declares `2`, the config must be fully
     ///   migrated: every key is one the configuration defines, every table
     ///   declares `row:`, none uses `levels:`, every field uses `path:` rather
@@ -420,9 +419,25 @@ impl Config {
         // order rather than the first problem of whichever kind is checked
         // earliest. The four helpers below are in the order a reader meets
         // them in the YAML.
+        if self.is_version_1() && self.defaults.is_some() {
+            return Err(ConfigIssue::KeyRequiresVersion2 {
+                location: "the top level".to_string(),
+                key: "defaults",
+            }
+            .into());
+        }
         let mut table_names = HashSet::with_capacity(self.tables.len());
         for (table_idx, table) in self.tables.iter().enumerate() {
             self.validate_table_identity(table, table_idx, &mut table_names)?;
+            if self.is_version_1()
+                && let Some(key) = table.version_2_key()
+            {
+                return Err(ConfigIssue::KeyRequiresVersion2 {
+                    location: format!("table '{}'", table.name),
+                    key,
+                }
+                .into());
+            }
             self.validate_declared_row(table)?;
             self.validate_declared_links(table)?;
             self.validate_table_fields(table)?;
@@ -433,6 +448,16 @@ impl Config {
         // bug, while "this table still uses levels" is unfinished migration.
         self.validate_declared_version()?;
         Ok(())
+    }
+
+    /// Whether this config uses configuration format version 1: it declares
+    /// no `version:`, or `version: 1`.
+    ///
+    /// Version 1 is exactly the format 0.19 read. A config is version 1 or
+    /// version 2, never a mix, so the keys version 2 added are rejected here
+    /// rather than half-honored.
+    pub(crate) fn is_version_1(&self) -> bool {
+        matches!(self.version, None | Some(1))
     }
 
     /// A table must be nameable and addressable: a non-empty name unique
@@ -515,8 +540,7 @@ impl Config {
                 }
                 .into());
             }
-            // `row:` is new in this release, so no config that loads today
-            // spells one this way, and every version can reject it.
+            // Only version 2 has `row:`, and it rejects every such path.
             if row != "." && has_dot_segment(row) {
                 return Err(ConfigIssue::DotSegmentInPath {
                     location: format!("the row of table '{}'", table.name),
@@ -597,7 +621,7 @@ impl Config {
             .collect();
 
         for (link_idx, link) in links.iter().enumerate() {
-            // New in this release, like `row:`, so rejected in every version.
+            // Only version 2 has `links:`, and it rejects every such path.
             if let Some(index_of) = link.index_of.as_deref()
                 && has_dot_segment(index_of)
             {
@@ -725,6 +749,15 @@ impl Config {
                 }
                 .into());
             }
+            if self.is_version_1()
+                && let Some(key) = field.version_2_key()
+            {
+                return Err(ConfigIssue::KeyRequiresVersion2 {
+                    location: format!("field '{}' of table '{}'", field.name, table.name),
+                    key,
+                }
+                .into());
+            }
             // `path` and `xml_path` are two spellings of one thing, so
             // exactly one must be present. Accepting both would mean
             // silently picking a winner.
@@ -753,8 +786,8 @@ impl Config {
                 _ => {}
             }
 
-            // `path:` is new in this release, so rejected in every version. The
-            // `xml_path:` spelling is older; see `dot_segment_paths`.
+            // Only version 2 has `path:`, and it rejects every such path. The
+            // keys version 1 has are checked in `dot_segment_paths`.
             if let Some(path) = field.path.as_deref()
                 && path != "."
                 && has_dot_segment(path)
@@ -875,10 +908,46 @@ impl Config {
         // so what the lint says is left and what this rejects cannot disagree.
         // The first entry is the error: the first problem in the order a
         // reader meets them in the YAML.
-        match self.version_2_steps().into_iter().next() {
-            Some(step) => Err(step.into_config_issue().into()),
-            None => Ok(()),
+        if let Some(step) = self.version_2_steps().into_iter().next() {
+            return Err(step.into_config_issue().into());
         }
+        self.validate_fields_inside_rows()
+    }
+
+    /// Rejects a field that lies outside its table's row element, whose value
+    /// would attach to whichever row ends next.
+    ///
+    /// Not a migration step, because only version 2 declares rows: a version 1
+    /// config has no row element for a field to lie outside. Checked after the
+    /// steps, so a table without `row:` has already been rejected for that, and
+    /// a field a nested table captures has been rejected for the capture. Such
+    /// a field never receives a value at all, and moving it to that table is
+    /// the fix; telling it to move into its row as well would send the author
+    /// two ways at once.
+    fn validate_fields_inside_rows(&self) -> Result<()> {
+        for table in &self.tables {
+            // Resolved only when a field could fall outside it: a relative
+            // `path` resolves inside the row element by construction, and
+            // resolving allocates on every `Parser::new`.
+            if !table.fields.iter().any(FieldConfig::has_absolute_location) {
+                continue;
+            }
+            let Some(row_path) = table.row_path() else {
+                continue;
+            };
+            for field in &table.fields {
+                if let Some(field_path) = field.location_outside(&row_path) {
+                    return Err(ConfigIssue::FieldOutsideRow {
+                        table: table.name.clone(),
+                        field: field.name.clone(),
+                        field_path: field_path.to_string(),
+                        row_path,
+                    }
+                    .into());
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Every change this configuration still needs before it can declare
@@ -918,15 +987,6 @@ impl Config {
                     table: table.name.clone(),
                 });
             }
-            // Resolved once per table, and only when a field could fall outside
-            // it. A table without `row:` has already been told to declare one,
-            // and which fields end up outside depends on the element chosen.
-            let row_path = table
-                .fields
-                .iter()
-                .any(FieldConfig::has_absolute_location)
-                .then(|| table.row_path())
-                .flatten();
             for field in &table.fields {
                 if field.xml_path.is_some() {
                     steps.push(MigrationStep::RenameFieldXmlPath {
@@ -934,28 +994,15 @@ impl Config {
                         field: field.name.clone(),
                     });
                 }
-                // Version 1 cannot reject these two: the config loads today,
-                // and the column is merely empty, or filled on the wrong rows.
-                // Version 2 has no such config to protect.
+                // Version 1 cannot reject this: the config loads today, and the
+                // column is merely empty. Version 2 has no such config to
+                // protect.
                 if let Some((field_path, nested)) = self.nested_table_capturing(table, field) {
                     steps.push(MigrationStep::MoveFieldToNestedTable {
                         table: table.name.clone(),
                         field: field.name.clone(),
                         field_path,
                         nested_table: nested.name.clone(),
-                    });
-                } else if let Some(row_path) = &row_path
-                    && let Some(field_path) = field.location_outside(row_path)
-                {
-                    // `else`: a field a nested table captures never receives a
-                    // value at all, and moving it to that table is the fix.
-                    // Also telling it to move into its row would give one field
-                    // two contradictory steps.
-                    steps.push(MigrationStep::MoveFieldIntoRow {
-                        table: table.name.clone(),
-                        field: field.name.clone(),
-                        field_path: field_path.to_string(),
-                        row_path: row_path.clone(),
                     });
                 }
             }
@@ -1096,6 +1143,7 @@ impl Config {
     /// use xml2arrow::Config;
     ///
     /// let config = Config::from_yaml_str(r#"
+    /// version: 2
     /// tables:
     ///   - name: items
     ///     xml_path: /data
@@ -1247,13 +1295,13 @@ impl Config {
         })
     }
 
-    /// Every path with a `.` or `..` segment in the keys that predate this
-    /// release, as `(where, path)`, in document order: `stop_at_paths`, each
-    /// table's `xml_path`, and each field's `xml_path`.
+    /// Every path with a `.` or `..` segment in the keys version 1 has, as
+    /// `(where, path)`, in document order: `stop_at_paths`, each table's
+    /// `xml_path`, and each field's `xml_path`.
     ///
     /// Only these, because a version 1 config may use them today and must keep
-    /// loading. The newer `row:`, `path:` and `index_of:` are rejected in every
-    /// version when the config is validated.
+    /// loading. The keys only version 2 has, `row:`, `path:` and `index_of:`,
+    /// are checked where they are validated.
     pub(crate) fn dot_segment_paths(&self) -> impl Iterator<Item = (String, &str)> + '_ {
         let stop_paths = self
             .parser_options
@@ -1492,19 +1540,17 @@ pub enum OnRepeat {
     Last,
 }
 
-/// Per-field value-handling policies.
+/// Per-field value-handling policies, in configuration format version 2.
 ///
-/// Every key is optional and **absent means current behavior**, including the
-/// type-dependent quirks — setting one is opting out of a specific quirk, not
-/// switching to a different engine. A [`Config::defaults`] block sets them for
-/// every field at once; a field's own setting wins.
+/// Every key is optional, and absent means the version 2 default: values are
+/// trimmed, a missing non-nullable value is an error, as is an unparseable or
+/// repeated one. A [`Config::defaults`] block sets them for every field at
+/// once; a field's own setting wins.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ValuePolicies {
-    /// Whether to strip surrounding whitespace before using the value.
-    ///
-    /// Absent keeps the existing split: numeric and boolean fields trim,
-    /// `Utf8` does not. Setting it applies uniformly, whatever the type.
+    /// Whether to strip surrounding whitespace before using the value, whatever
+    /// the type. Absent trims.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trim: Option<bool>,
     /// See [`OnMissing`].
@@ -1655,14 +1701,14 @@ pub struct TableConfig {
     /// The XML path to the table elements. For example `/data/dataset/table`.
     pub xml_path: String,
     /// The element whose closing tag finalizes a row — **declared** instead of
-    /// inferred.
+    /// inferred. Version 2 only, where every table declares one.
     ///
-    /// Absent (the default) keeps the historical rule: a row ends whenever any
-    /// configured direct child of `xml_path` closes. That rule is invisible in
-    /// the config and depends on which fields happen to be configured, so a
-    /// table with two distinct configured children silently yields two
-    /// half-filled rows per container, and adding a field can change a table's
-    /// row count. [`Config::lint`] reports that shape.
+    /// Version 1 has no `row:` and keeps the historical rule: a row ends
+    /// whenever any configured direct child of `xml_path` closes. That rule is
+    /// invisible in the config and depends on which fields happen to be
+    /// configured, so a table with two distinct configured children silently
+    /// yields two half-filled rows per container, and adding a field can change
+    /// a table's row count. [`Config::lint`] reports that shape.
     ///
     /// Three spellings, all resolving to one trie node:
     ///
@@ -1672,12 +1718,10 @@ pub struct TableConfig {
     ///   `xml_path`.
     /// - an absolute path (`"/report/…"`) — must still resolve to `xml_path`
     ///   or a descendant of it.
-    ///
-    /// Declaring a row changes nothing else about the table: `levels`,
-    /// absolute field paths and scoping all behave as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub row: Option<String>,
     /// Declared relationships to ancestor tables, replacing [`TableConfig::levels`].
+    /// Version 2 only.
     ///
     /// A table uses one or the other, never both. `levels` names *labels* and
     /// takes its values positionally from whatever ancestor tables happen to
@@ -1695,6 +1739,7 @@ pub struct TableConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub links: Option<Vec<Link>>,
     /// Whether this table materializes its own key column, and under what name.
+    /// Version 2 only.
     ///
     /// Defaults to materializing `_id` (`UInt64`, non-null) exactly when some
     /// other table declares a `parent:` link to this one, so both sides of a
@@ -1705,14 +1750,14 @@ pub struct TableConfig {
     /// For example if the `xml_path` is `/data/dataset/table/item/properties` the levels should
     /// be `["table", "properties"]`.
     ///
-    /// Optional since 0.20: a table that declares [`TableConfig::links`] — or
-    /// that needs no parent columns at all — omits the key entirely rather than
-    /// writing `levels: []`. Existing configs are unaffected.
+    /// Version 1 only; version 2 replaces it with [`TableConfig::links`].
+    /// Optional since 0.20: a table that needs no index columns may omit the key
+    /// rather than write `levels: []`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub levels: Vec<String>,
     /// Key-value pairs copied into this table's Arrow schema metadata, and so
     /// into every batch it produces and, for example, the Parquet file written
-    /// from them. The parser does nothing else with them.
+    /// from them. The parser does nothing else with them. Version 2 only.
     ///
     /// Keys and values are strings, taken exactly as the YAML spells them:
     /// `version: 1.50` is `"1.50"`, not a number. Keys beginning `ARROW:` are
@@ -1728,6 +1773,26 @@ pub struct TableConfig {
 }
 
 impl TableConfig {
+    /// The first key this table sets that only configuration format version 2
+    /// defines, if any. A version 1 config is rejected for setting one.
+    ///
+    /// Checked in the validation pass that already visits every table, rather
+    /// than in one of its own: `Parser::new` validates, and its fixed cost is
+    /// the whole parse for a small document.
+    pub(crate) fn version_2_key(&self) -> Option<&'static str> {
+        if self.row.is_some() {
+            Some("row")
+        } else if self.links.is_some() {
+            Some("links")
+        } else if self.row_id.is_some() {
+            Some("row_id")
+        } else if !self.metadata.is_empty() {
+            Some("metadata")
+        } else {
+            None
+        }
+    }
+
     /// Builds a table from the four keys every config has always had.
     ///
     /// Leaves `row`, `links` and `row_id` unset, which is the pre-0.20
@@ -1845,7 +1910,20 @@ impl ConfigBuilder {
     ///
     /// Returns [`Error::InvalidConfig`] (or [`Error::UnsupportedConversion`])
     /// for any violation listed on [`Config::validate`].
-    pub fn build(self) -> Result<Config> {
+    ///
+    /// A field built with [`FieldConfigBuilder::new`] holds its location as
+    /// `xml_path`, the version 1 spelling. In a version 2 config, `build` moves
+    /// the location to `path`, the spelling that format has, so one builder
+    /// serves both, and a config written back out spells its fields as its
+    /// version does.
+    pub fn build(mut self) -> Result<Config> {
+        if self.version == Some(2) {
+            for field in self.tables.iter_mut().flat_map(|t| t.fields.iter_mut()) {
+                if field.path.is_none() {
+                    field.path = field.xml_path.take();
+                }
+            }
+        }
         let config = Config {
             version: self.version,
             tables: self.tables,
@@ -1969,9 +2047,8 @@ pub struct FieldConfig {
     pub name: String,
     /// Where the value lives, relative to the table's row element or absolute.
     ///
-    /// Exactly one of `path` and [`FieldConfig::xml_path`] must be set; they
-    /// are two spellings of the same thing, and `path` is the one that
-    /// survives — `xml_path` is removed in 1.0.
+    /// The version 2 spelling of [`FieldConfig::xml_path`]: a version 1 config
+    /// sets `xml_path`, and a version 2 config sets `path`.
     ///
     /// Resolution follows the same rule as [`TableConfig::row`], so there is
     /// one path rule in the whole configuration:
@@ -1986,9 +2063,9 @@ pub struct FieldConfig {
     pub path: Option<String>,
     /// The absolute XML path to the element or attribute.
     ///
-    /// The original spelling, kept working for every existing configuration.
-    /// [`FieldConfig::path`] replaces it: renaming the key is a mechanical
-    /// change, because an absolute value means the same under either name.
+    /// The version 1 spelling. Version 2 replaces it with [`FieldConfig::path`]:
+    /// renaming the key is a mechanical change, because an absolute value means
+    /// the same under either name.
     ///
     /// Removed in 1.0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2013,11 +2090,12 @@ pub struct FieldConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset: Option<f64>,
     /// Value-handling policies for this field. Flattened, so they are written
-    /// as ordinary field keys (`trim:`, `on_missing:`, …).
+    /// as ordinary field keys (`trim:`, `on_missing:`, …). Version 2 only.
     #[serde(flatten)]
     pub policies: ValuePolicies,
     /// Key-value pairs copied into this column's Arrow field metadata, such as
-    /// a unit or a description. The parser does nothing else with them.
+    /// a unit or a description. The parser does nothing else with them. Version
+    /// 2 only.
     ///
     /// Strings, taken exactly as the YAML spells them, and keys beginning
     /// `ARROW:` are rejected, as for [`TableConfig::metadata`]. Arrow reserves
@@ -2028,6 +2106,30 @@ pub struct FieldConfig {
 }
 
 impl FieldConfig {
+    /// The first key this field sets that only configuration format version 2
+    /// defines, if any: `path`, a value policy, or `metadata`. A version 1
+    /// config is rejected for setting one.
+    pub(crate) fn version_2_key(&self) -> Option<&'static str> {
+        let policies = &self.policies;
+        if self.path.is_some() {
+            Some("path")
+        } else if policies.trim.is_some() {
+            Some("trim")
+        } else if policies.on_missing.is_some() {
+            Some("on_missing")
+        } else if policies.on_invalid.is_some() {
+            Some("on_invalid")
+        } else if policies.on_repeat.is_some() {
+            Some("on_repeat")
+        } else if policies.null_values.is_some() {
+            Some("null_values")
+        } else if !self.metadata.is_empty() {
+            Some("metadata")
+        } else {
+            None
+        }
+    }
+
     /// The field's location when it lies outside `row_path`, the resolved row
     /// element of its table; `None` when it lies inside.
     ///
@@ -2105,22 +2207,23 @@ impl FieldConfigBuilder {
     ///
     /// * `name` - The name of the field.
     /// * `path` - Where the value lives: absolute (`/report/data/item/v`) or,
-    ///   when the table declares `row:`, relative to that row element (`v`).
-    ///   See [`FieldConfig::path`].
+    ///   in a version 2 config, relative to the table's row element (`v`).
     /// * `data_type` - The data type of the field.
     ///
     /// # Returns
     ///
     /// A new `FieldConfigBuilder` instance with the provided properties.
     ///
-    /// This populates [`FieldConfig::path`] rather than the deprecated
-    /// [`FieldConfig::xml_path`]. An absolute path means the same under either
-    /// key, so existing callers are unaffected.
+    /// The field holds the location as [`FieldConfig::xml_path`], as it did in
+    /// 0.19, which is the spelling a version 1 config uses. Building a version
+    /// 2 config with [`ConfigBuilder::build`] moves it to
+    /// [`FieldConfig::path`], the spelling version 2 uses, so the same builder
+    /// serves both formats.
     #[must_use]
     pub fn new(name: &str, path: &str, data_type: DType) -> Self {
         Self {
             name: name.to_string(),
-            path: Some(path.to_string()),
+            xml_path: Some(path.to_string()),
             data_type,
             ..Default::default()
         }
@@ -2391,6 +2494,7 @@ mod tests {
     #[test]
     fn from_yaml_str_matches_from_yaml_file() {
         let yaml = r"
+version: 2
 tables:
   - name: items
     xml_path: /data
@@ -2671,10 +2775,10 @@ tables:
             .unwrap();
 
         assert_eq!(field.name, "test_field");
-        // The builder populates `path`, the spelling that survives to 1.0.
-        // An absolute value means the same under either key.
-        assert_eq!(field.path.as_deref(), Some("/path/to/field"));
-        assert_eq!(field.xml_path, None);
+        // The version 1 spelling, which `ConfigBuilder::build` moves to `path`
+        // for a version 2 config.
+        assert_eq!(field.xml_path.as_deref(), Some("/path/to/field"));
+        assert_eq!(field.path, None);
         assert_eq!(field.data_type, DType::Float64);
         assert!(field.nullable);
         assert_eq!(field.scale, Some(0.001));
@@ -3074,9 +3178,7 @@ tables:
 
     // --- Declared row boundaries (`row:`) -------------------------------------
 
-    /// Resolution is pure string work, so pin it directly: these three
-    /// spellings are the whole surface `version: 2` will later narrow to
-    /// absolute-only.
+    /// Resolution is pure string work, so pin it directly.
     #[rstest]
     #[case::dot("/report/header", ".", "/report/header")]
     #[case::relative_name("/report/data", "item", "/report/data/item")]
@@ -3087,11 +3189,13 @@ tables:
         assert_eq!(resolve_row_path(xml_path, row), expected);
     }
 
+    /// A table with one field, relative to the row, so it lies inside the row
+    /// whatever the row is.
     fn table_with_row(xml_path: &str, row: &str) -> TableConfig {
         TableConfig::builder("t", xml_path)
             .row(row)
             .field(
-                FieldConfigBuilder::new("v", &format!("{xml_path}/item/v"), DType::Int32)
+                FieldConfigBuilder::new("v", "v", DType::Int32)
                     .build()
                     .unwrap(),
             )
@@ -3100,7 +3204,10 @@ tables:
 
     #[test]
     fn empty_row_is_rejected() {
-        let config = Config::builder().table(table_with_row("/a", "  ")).build();
+        let config = Config::builder()
+            .version(2)
+            .table(table_with_row("/a", "  "))
+            .build();
         assert!(matches!(
             config,
             Err(Error::InvalidConfig {
@@ -3112,6 +3219,7 @@ tables:
     #[test]
     fn row_outside_the_table_is_rejected() {
         let config = Config::builder()
+            .version(2)
             .table(table_with_row("/a", "/b/item"))
             .build();
         assert!(matches!(
@@ -3128,6 +3236,7 @@ tables:
     #[test]
     fn a_table_between_a_table_and_its_row_is_rejected() {
         let config = Config::builder()
+            .version(2)
             .table(table_with_row("/a", "b/item"))
             .table(TableConfig::new("inner", "/a/b", vec![], vec![]))
             .build();
@@ -3142,11 +3251,24 @@ tables:
 
     /// A table whose path *equals* the row path is fine: `close_element` pops
     /// that scope before finalizing, so the row still lands on the declarer.
+    /// `t` has no fields, because `inner` would capture every one inside the
+    /// row.
     #[test]
     fn a_table_at_the_row_element_itself_is_accepted() {
         let config = Config::builder()
-            .table(table_with_row("/a", "b"))
-            .table(TableConfig::new("inner", "/a/b", vec![], vec![]))
+            .version(2)
+            .table(TableConfig::builder("t", "/a").row("b").build())
+            .table(
+                TableConfig::builder("inner", "/a/b")
+                    .row(".")
+                    .links(vec![])
+                    .field(
+                        FieldConfigBuilder::new("v", "v", DType::Int32)
+                            .build()
+                            .unwrap(),
+                    )
+                    .build(),
+            )
             .build();
         assert!(config.is_ok(), "got {config:?}");
     }
@@ -3159,6 +3281,7 @@ tables:
     fn a_row_resolving_to_the_root_table_is_rejected() {
         for row in [".", "/"] {
             let config = Config::builder()
+                .version(2)
                 .table(
                     TableConfig::builder("doc", "/")
                         .row(row)
@@ -3186,6 +3309,7 @@ tables:
     #[test]
     fn row_dot_below_the_root_is_accepted() {
         let config = Config::builder()
+            .version(2)
             .table(
                 TableConfig::builder("doc", "/report")
                     .row(".")
@@ -3203,6 +3327,7 @@ tables:
     #[test]
     fn row_survives_a_yaml_round_trip() {
         let config = Config::builder()
+            .version(2)
             .table(table_with_row("/a", "."))
             .build()
             .unwrap();
@@ -3238,6 +3363,7 @@ tables:
     fn a_written_config_omits_default_keys_and_round_trips() {
         let config: Config = yaml_serde::from_str(
             r#"
+            version: 2
             parser_options:
               trim_text: true
               validate_attributes: false
@@ -3280,6 +3406,7 @@ tables:
         assert_eq!(yaml_serde::from_str::<Config>(&yaml).unwrap(), config);
 
         let defaults_only = Config::builder()
+            .version(2)
             .table(table_with_row("/a", "item"))
             .build()
             .unwrap();
@@ -3382,7 +3509,7 @@ tables:
     fn config_with_field(row: Option<&str>, field: FieldConfig) -> Result<Config> {
         let mut table = TableConfig::new("t", "/a", vec![], vec![field]);
         table.row = row.map(String::from);
-        Config::builder().table(table).build()
+        Config::builder().version(2).table(table).build()
     }
 
     #[test]
@@ -3423,11 +3550,20 @@ tables:
         assert_eq!(path, "v");
     }
 
-    /// An *absolute* path needs no row, so the same table is fine.
+    /// An *absolute* path resolves without a row, so the same table is
+    /// rejected for the missing row instead.
     #[test]
-    fn an_absolute_path_without_a_declared_row_is_accepted() {
+    fn an_absolute_path_without_a_declared_row_is_rejected_for_the_row() {
         let config = config_with_field(None, field_config(Some("/a/item/v"), None));
-        assert!(config.is_ok(), "got {config:?}");
+        assert!(
+            matches!(
+                config,
+                Err(Error::InvalidConfig {
+                    reason: ConfigIssue::MissingRow { .. }
+                })
+            ),
+            "got {config:?}"
+        );
     }
 
     #[test]
@@ -3436,8 +3572,8 @@ tables:
         let yaml = yaml_serde::to_string(&config).unwrap();
         let restored: Config = yaml_serde::from_str(&yaml).unwrap();
         assert_eq!(restored, config);
-        // Neither key is emitted when unset, so a legacy config round-trips
-        // without sprouting a `path: null`.
+        // Neither key is emitted when unset, so a written config never
+        // sprouts a `xml_path: null` beside its `path`.
         assert!(!yaml.contains("xml_path: null"));
         assert!(!yaml.contains("path: null"));
     }
@@ -3464,7 +3600,11 @@ tables:
             .links(links)
             .build();
         inner.levels = levels;
-        Config::builder().table(outer).table(inner).build()
+        Config::builder()
+            .version(2)
+            .table(outer)
+            .table(inner)
+            .build()
     }
 
     fn parent_link(parent: &str) -> Link {
@@ -3516,7 +3656,11 @@ tables:
             )
             .links(vec![parent_link("sibling")])
             .build();
-        let config = Config::builder().table(sibling).table(child).build();
+        let config = Config::builder()
+            .version(2)
+            .table(sibling)
+            .table(child)
+            .build();
         assert!(matches!(
             config,
             Err(Error::InvalidConfig {
@@ -3539,7 +3683,7 @@ tables:
             .links(vec![parent_link("t")])
             .build();
         assert!(matches!(
-            Config::builder().table(table).build(),
+            Config::builder().version(2).table(table).build(),
             Err(Error::InvalidConfig {
                 reason: ConfigIssue::ParentNotAncestor { .. }
             })
@@ -3643,6 +3787,7 @@ tables:
     fn levels_may_be_omitted() {
         let config: Config = yaml_serde::from_str(
             r#"
+            version: 2
             tables:
               - name: t
                 xml_path: /a
@@ -3711,6 +3856,7 @@ tables:
             .build()
             .unwrap();
         Config::builder()
+            .version(2)
             .table(
                 TableConfig::builder("t", "/a")
                     .row("item")
@@ -3848,7 +3994,11 @@ tables:
         /// for the one key whose job is to pin them.
         #[test]
         fn an_unknown_version_is_rejected() {
-            let mut config = Config::builder().table(migrated_root()).build().unwrap();
+            let mut config = Config::builder()
+                .version(2)
+                .table(migrated_root())
+                .build()
+                .unwrap();
             config.version = Some(3);
             assert!(matches!(
                 config.validate(),
@@ -3898,14 +4048,20 @@ tables:
             ));
         }
 
+        /// Set after building, because `ConfigBuilder::build` moves a builder's
+        /// `xml_path` to `path` for a version 2 config.
         #[test]
         fn a_field_spelled_xml_path_is_rejected() {
-            let mut table = migrated_root();
-            table.fields[0].path = None;
-            table.fields[0].xml_path = Some("/report/stations/station/@id".into());
-            let config = Config::builder().version(2).table(table).build();
+            let mut config = Config::builder()
+                .version(2)
+                .table(migrated_root())
+                .build()
+                .unwrap();
+            let field = &mut config.tables[0].fields[0];
+            field.path = None;
+            field.xml_path = Some("/report/stations/station/@id".into());
             assert!(matches!(
-                config,
+                config.validate(),
                 Err(Error::InvalidConfig {
                     reason: ConfigIssue::ReplacedKey {
                         key: "xml_path",
@@ -4279,29 +4435,36 @@ tables:
                         .unwrap(),
                 )
                 .build();
-            let mut config = Config::builder()
+            let config = Config::builder()
+                .version(2)
                 .table(outer)
                 .table(nested_table("inner", "/r/bs", "b"))
-                .build()
-                .unwrap();
-            let steps = config.version_2_steps();
+                .build();
             assert!(
                 matches!(
-                    steps.as_slice(),
-                    [MigrationStep::MoveFieldToNestedTable { .. }]
-                ),
-                "{steps:?}"
-            );
-
-            config.version = Some(2);
-            assert!(
-                matches!(
-                    config.validate(),
+                    config,
                     Err(Error::InvalidConfig {
                         reason: ConfigIssue::FieldInsideNestedTable { .. }
                     })
                 ),
                 "{config:?}"
+            );
+        }
+
+        /// A builder field is spelled `xml_path`, and a version 2 config
+        /// spells it `path`, so that a config built in code writes out in the
+        /// format it declares.
+        #[test]
+        fn building_a_version_2_config_moves_field_locations_to_path() {
+            let config = Config::builder()
+                .version(2)
+                .table(migrated_root())
+                .build()
+                .unwrap();
+            let field = &config.tables[0].fields[0];
+            assert_eq!(
+                (field.path.as_deref(), field.xml_path.as_deref()),
+                (Some("@id"), None)
             );
         }
 
@@ -4319,7 +4482,17 @@ tables:
             assert!(yaml.contains("version: 2"));
             assert_eq!(yaml_serde::from_str::<Config>(&yaml).unwrap(), config);
 
-            let unversioned = Config::builder().table(migrated_root()).build().unwrap();
+            let version_1 = TableConfig::new(
+                "stations",
+                "/report/stations",
+                vec![],
+                vec![
+                    FieldConfigBuilder::new("id", "/report/stations/station/@id", DType::Utf8)
+                        .build()
+                        .unwrap(),
+                ],
+            );
+            let unversioned = Config::builder().table(version_1).build().unwrap();
             assert!(
                 !yaml_serde::to_string(&unversioned)
                     .unwrap()
@@ -4333,6 +4506,7 @@ tables:
         use super::*;
 
         const YAML: &str = r#"
+version: 2
 tables:
   - name: readings
     xml_path: /report/readings
@@ -4397,7 +4571,7 @@ tables:
         #[case::a_mapping("owner: {team: data}")]
         fn a_value_that_is_not_a_scalar_is_rejected(#[case] entry: &str) {
             let yaml = format!(
-                "tables:\n  - name: t\n    xml_path: /r\n    row: i\n    metadata:\n      {entry}\n    fields: [{{name: v, path: v, data_type: Int32}}]\n"
+                "version: 2\ntables:\n  - name: t\n    xml_path: /r\n    row: i\n    metadata:\n      {entry}\n    fields: [{{name: v, path: v, data_type: Int32}}]\n"
             );
             let err = Config::from_yaml_str(&yaml).unwrap_err();
             assert!(matches!(err, Error::Yaml(_)), "{err:?}");
@@ -4421,7 +4595,11 @@ tables:
                 .metadata([("ARROW:extension:name", "x")])
                 .field(field_with(&[]))
                 .build();
-            let err = Config::builder().table(on_table).build().unwrap_err();
+            let err = Config::builder()
+                .version(2)
+                .table(on_table)
+                .build()
+                .unwrap_err();
             assert!(
                 matches!(
                     &err,
@@ -4439,7 +4617,11 @@ tables:
                     ("ARROW:extension:metadata", "{}"),
                 ]))
                 .build();
-            let err = Config::builder().table(on_field).build().unwrap_err();
+            let err = Config::builder()
+                .version(2)
+                .table(on_field)
+                .build()
+                .unwrap_err();
             assert_eq!(
                 err.to_string(),
                 "Field 'v' in table 't' sets metadata key 'ARROW:extension:metadata', but keys \
@@ -4460,7 +4642,7 @@ tables:
                 .metadata([(key, "x")])
                 .field(field_with(&[(key, "x")]))
                 .build();
-            let config = Config::builder().table(table).build();
+            let config = Config::builder().version(2).table(table).build();
             assert!(config.is_ok(), "{config:?}");
         }
 
@@ -4551,11 +4733,13 @@ tables:
             );
         }
 
-        /// The same config without `version: 2` loads, as it always has.
+        /// A version 1 config with the same misspelling.
+        const VERSION_1: &str = "tables:\n  - name: readings\n    xml_path: /r/readings\n    levels: []\n    fields:\n      - {name: v, xml_path: /r/readings/reading/v, data_type: Float64, nullable: true, scal: 100.0}\n";
+
+        /// Version 1 loads a config with an unknown key, as it always has.
         #[test]
         fn version_1_still_loads_a_config_with_an_unknown_key() {
-            let yaml = version_2("", "", "", ", scal: 100.0").replacen("version: 2\n", "", 1);
-            let config = Config::from_yaml_str(&yaml).unwrap();
+            let config = Config::from_yaml_str(VERSION_1).unwrap();
             assert_eq!(
                 config.unknown_keys().collect::<Vec<_>>(),
                 vec![("field 'v' of table 'readings'".to_string(), "scal")]
@@ -4680,11 +4864,135 @@ tables:
         /// written back; a config built in code has none to begin with.
         #[test]
         fn unknown_keys_are_not_written_back() {
-            let yaml = version_2("", "", "", ", scal: 100.0").replacen("version: 2\n", "", 1);
-            let config = Config::from_yaml_str(&yaml).unwrap();
+            let config = Config::from_yaml_str(VERSION_1).unwrap();
             let written = yaml_serde::to_string(&config).unwrap();
             assert!(!written.contains("scal"), "{written}");
             assert!(!written.contains("unknown"), "{written}");
+        }
+    }
+
+    /// Version 1 is exactly the format 0.19 read, so a config without
+    /// `version: 2` may not set a key only version 2 defines.
+    mod version_1 {
+        use super::*;
+
+        const TABLE: &str = "    xml_path: /r/s\n";
+        const FIELD: &str = "{name: id, xml_path: /r/s/station/@id, data_type: Utf8";
+
+        fn rejection(yaml: &str) -> (String, &'static str) {
+            let err = Config::from_yaml_str(yaml).unwrap_err();
+            let Error::InvalidConfig {
+                reason: ConfigIssue::KeyRequiresVersion2 { location, key },
+            } = err
+            else {
+                panic!("expected KeyRequiresVersion2, got {err:?}");
+            };
+            (location, key)
+        }
+
+        #[rstest]
+        #[case::defaults("defaults: {trim: true}\n", "", "}", "the top level", "defaults")]
+        #[case::row("", "    row: station\n", "}", "table 't'", "row")]
+        #[case::links("", "    links: []\n", "}", "table 't'", "links")]
+        #[case::row_id("", "    row_id: false\n", "}", "table 't'", "row_id")]
+        #[case::table_metadata("", "    metadata: {a: b}\n", "}", "table 't'", "metadata")]
+        #[case::trim("", "", ", trim: false}", "field 'id' of table 't'", "trim")]
+        #[case::on_missing(
+            "",
+            "",
+            ", on_missing: empty}",
+            "field 'id' of table 't'",
+            "on_missing"
+        )]
+        #[case::on_invalid(
+            "",
+            "",
+            ", on_invalid: error}",
+            "field 'id' of table 't'",
+            "on_invalid"
+        )]
+        #[case::on_repeat("", "", ", on_repeat: first}", "field 'id' of table 't'", "on_repeat")]
+        #[case::null_values(
+            "",
+            "",
+            ", null_values: [NA]}",
+            "field 'id' of table 't'",
+            "null_values"
+        )]
+        #[case::field_metadata(
+            "",
+            "",
+            ", metadata: {a: b}}",
+            "field 'id' of table 't'",
+            "metadata"
+        )]
+        fn a_version_2_key_is_rejected(
+            #[case] top: &str,
+            #[case] table: &str,
+            #[case] field_end: &str,
+            #[case] expected_location: &str,
+            #[case] expected_key: &str,
+        ) {
+            let yaml = format!(
+                "{top}tables:\n  - name: t\n{TABLE}{table}    fields:\n      - {FIELD}{field_end}\n"
+            );
+            assert_eq!(
+                rejection(&yaml),
+                (expected_location.to_string(), expected_key)
+            );
+            // Saying `version: 1` out loud is the same format.
+            assert_eq!(
+                rejection(&format!("version: 1\n{yaml}")),
+                (expected_location.to_string(), expected_key)
+            );
+        }
+
+        /// `path:` is the version 2 spelling of `xml_path:`, so a field using
+        /// it is rejected rather than read as the same location.
+        #[test]
+        fn a_field_spelled_path_is_rejected() {
+            let yaml = "tables:\n  - name: t\n    xml_path: /r/s\n    fields:\n      - {name: id, path: /r/s/station/@id, data_type: Utf8}\n";
+            assert_eq!(
+                rejection(yaml),
+                ("field 'id' of table 't'".to_string(), "path")
+            );
+        }
+
+        /// A builder field is spelled `xml_path`, so a version 1 config built
+        /// in code loads, and a table builder setting a version 2 key does not.
+        #[test]
+        fn builders_follow_the_same_rule() {
+            let field = FieldConfigBuilder::new("id", "/r/s/station/@id", DType::Utf8)
+                .build()
+                .unwrap();
+            let table = TableConfig::builder("t", "/r/s")
+                .field(field.clone())
+                .build();
+            assert!(Config::builder().table(table).build().is_ok());
+
+            let with_row = TableConfig::builder("t", "/r/s")
+                .row("station")
+                .field(field)
+                .build();
+            assert!(matches!(
+                Config::builder().table(with_row).build(),
+                Err(Error::InvalidConfig {
+                    reason: ConfigIssue::KeyRequiresVersion2 { key: "row", .. }
+                })
+            ));
+        }
+
+        #[test]
+        fn the_message_names_the_key_and_the_line_that_allows_it() {
+            let err = ConfigIssue::KeyRequiresVersion2 {
+                location: "table 'readings'".to_string(),
+                key: "row",
+            };
+            assert_eq!(
+                err.to_string(),
+                "The key 'row:' in table 'readings' is part of configuration format version 2; \
+                 declare `version: 2` at the top of the config to use it"
+            );
         }
     }
 
@@ -4703,10 +5011,7 @@ tables:
             (location, path)
         }
 
-        /// `row:`, `path:` and `index_of:` are new in this release, so no
-        /// config that loads today spells one this way, and every version
-        /// rejects them. Each case is a version 1 config, the one that has to
-        /// show it.
+        /// Version 2 rejects a dot segment in the keys only it has.
         #[rstest]
         #[case::row(
             "row: ./station",
@@ -4736,7 +5041,7 @@ tables:
             "link 1 of table 't'",
             "/r/s/./station"
         )]
-        fn a_new_key_is_rejected_in_every_version(
+        fn a_version_2_key_is_rejected(
             #[case] row: &str,
             #[case] fields: &str,
             #[case] links: &str,
@@ -4744,7 +5049,7 @@ tables:
             #[case] expected_path: &str,
         ) {
             let yaml = format!(
-                "tables:\n  - {{name: t, xml_path: /r/s, {row}{links}, fields: {fields}}}\n"
+                "version: 2\ntables:\n  - {{name: t, xml_path: /r/s, {row}{links}, fields: {fields}}}\n"
             );
             assert_eq!(
                 rejection(&yaml),
@@ -4752,20 +5057,25 @@ tables:
             );
         }
 
-        /// The keys older than this release keep loading in version 1, and are
-        /// rejected once a config declares version 2.
+        /// The keys version 1 has keep loading there, as they did in 0.19, and
+        /// are rejected once a config declares version 2.
         #[rstest]
         #[case::table_xml_path(
-            "tables:\n  - {name: t, xml_path: /r/../s, row: station, fields: [{name: id, path: \"@id\", data_type: Utf8}]}\n",
+            "tables:\n  - {name: t, xml_path: /r/../s, fields: [{name: id, xml_path: /r/../s/station/@id, data_type: Utf8}]}\n",
             "the xml_path of table 't'",
             "/r/../s"
         )]
+        #[case::field_xml_path(
+            "tables:\n  - {name: t, xml_path: /r/s, fields: [{name: id, xml_path: /r/s/./station/@id, data_type: Utf8}]}\n",
+            "field 'id' of table 't'",
+            "/r/s/./station/@id"
+        )]
         #[case::stop_at_paths(
-            "parser_options: {stop_at_paths: [/r/./end]}\ntables:\n  - {name: t, xml_path: /r/s, row: station, fields: [{name: id, path: \"@id\", data_type: Utf8}]}\n",
+            "parser_options: {stop_at_paths: [/r/./end]}\ntables:\n  - {name: t, xml_path: /r/s, fields: [{name: id, xml_path: /r/s/station/@id, data_type: Utf8}]}\n",
             "`parser_options.stop_at_paths`",
             "/r/./end"
         )]
-        fn an_older_key_is_rejected_in_version_2_only(
+        fn a_version_1_key_is_rejected_in_version_2_only(
             #[case] yaml: &str,
             #[case] expected_location: &str,
             #[case] expected_path: &str,
