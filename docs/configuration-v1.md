@@ -234,7 +234,7 @@ likely to surprise. They never change how a document is parsed.
 | `ExcessLevels` | a table has more `levels` than tables to count |
 | `ImplicitEmptyString` | a non-nullable `Utf8` field produces `""` when its value is missing |
 | `FieldInsideNestedTable` | a field lies inside the `xml_path` of a table nested inside its own table, which captures every value there, so the field never receives one |
-| `FieldOutsideRow` | a field's path lies outside the table's `row:` |
+| `FieldOutsideRow` | a field's path lies outside the table's `row:`, so its value attaches to whichever row ends next |
 | `StructuralTable` | a table has no fields, so it is left out of the output |
 | `ConfigVersion1` | every version 1 config: the deprecation notice |
 

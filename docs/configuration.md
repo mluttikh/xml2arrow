@@ -158,10 +158,19 @@ Quote a path that starts with `@`; YAML reserves the character. Error messages
 show the resolved, absolute path, which is what you need to find the value in
 the document.
 
-A field whose absolute path lies outside its row element is allowed, but rarely
-what you want: its value attaches to whichever row ends next, and
-[`Config::lint()`](#checking-a-config) reports it. Give values from elsewhere in
-the document, such as a header, a table of their own.
+A field must lie inside its row element. A field whose absolute path lies outside
+it is rejected when the config is loaded: its value would attach to whichever
+row ends next, so a value that appears once would fill one row and leave the
+rest empty. Give values from elsewhere in the document, such as a header, a
+table of their own, linked with `parent:` when it encloses the rows.
+
+That leaves one value with no version 2 spelling: an attribute or text of the
+`xml_path` element itself, such as `id` in `<data id="D">` around `<item>` rows.
+It is outside every row of that table except with `row: "."`, and a table
+enclosing that table cannot read it either, as the next paragraph explains. When
+the rows sit in a wrapper of their own, as in `<data id="D"><items><item/>`, a
+table rowed at `<data>` can read `id`, and the table at `<items>` can link to
+it.
 
 A field cannot lie inside the `xml_path` of another table nested inside its own
 table. The nested table captures every value inside its `xml_path`, so the field
@@ -379,7 +388,6 @@ change how a document is parsed. For a version 2 config they report:
 
 | Lint | When |
 |---|---|
-| `FieldOutsideRow` | a field's path lies outside its table's row element |
 | `StructuralTable` | a table has no fields, so it is left out of the output |
 
 Version 1 configs get more lints, described in

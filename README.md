@@ -189,10 +189,10 @@ leak into the next. A `Parser` can also serve several streams concurrently.
 
 `Config::validate` (run by `Parser::new`) rejects configs that cannot work.
 `parser.warnings()` reports the next tier: configs that are valid but whose
-behavior commonly surprises — a field outside its table's row, say, or, in a
-version 1 config, **row boundaries inferred** from several different child
-elements, which yield one partially-filled row per child element rather than one
-row per container.
+behavior commonly surprises — a table with no fields, say, or, in a version 1
+config, **row boundaries inferred** from several different child elements, which
+yield one partially-filled row per child element rather than one row per
+container.
 
 ```rust
 let parser = Parser::new(&config)?;

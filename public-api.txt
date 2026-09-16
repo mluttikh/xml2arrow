@@ -384,6 +384,11 @@ pub xml2arrow::errors::ConfigIssue::FieldInsideNestedTableInVersion2::field: all
 pub xml2arrow::errors::ConfigIssue::FieldInsideNestedTableInVersion2::field_path: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::FieldInsideNestedTableInVersion2::nested_table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::FieldInsideNestedTableInVersion2::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::FieldOutsideRowInVersion2
+pub xml2arrow::errors::ConfigIssue::FieldOutsideRowInVersion2::field: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::FieldOutsideRowInVersion2::field_path: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::FieldOutsideRowInVersion2::row_path: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::FieldOutsideRowInVersion2::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::FieldPathConflict
 pub xml2arrow::errors::ConfigIssue::FieldPathConflict::field: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::FieldPathConflict::table: alloc::string::String
@@ -647,6 +652,11 @@ pub xml2arrow::lint::MigrationStep::DeclareRow::table: alloc::string::String
 pub xml2arrow::lint::MigrationStep::LinkNestedTable
 pub xml2arrow::lint::MigrationStep::LinkNestedTable::enclosing_table: alloc::string::String
 pub xml2arrow::lint::MigrationStep::LinkNestedTable::table: alloc::string::String
+pub xml2arrow::lint::MigrationStep::MoveFieldIntoRow
+pub xml2arrow::lint::MigrationStep::MoveFieldIntoRow::field: alloc::string::String
+pub xml2arrow::lint::MigrationStep::MoveFieldIntoRow::field_path: alloc::string::String
+pub xml2arrow::lint::MigrationStep::MoveFieldIntoRow::row_path: alloc::string::String
+pub xml2arrow::lint::MigrationStep::MoveFieldIntoRow::table: alloc::string::String
 pub xml2arrow::lint::MigrationStep::MoveFieldToNestedTable
 pub xml2arrow::lint::MigrationStep::MoveFieldToNestedTable::field: alloc::string::String
 pub xml2arrow::lint::MigrationStep::MoveFieldToNestedTable::field_path: alloc::string::String
@@ -684,6 +694,10 @@ pub xml2arrow::migrate::Unconverted::FieldInsideNestedTable
 pub xml2arrow::migrate::Unconverted::FieldInsideNestedTable::field: alloc::string::String
 pub xml2arrow::migrate::Unconverted::FieldInsideNestedTable::nested_table: alloc::string::String
 pub xml2arrow::migrate::Unconverted::FieldInsideNestedTable::table: alloc::string::String
+pub xml2arrow::migrate::Unconverted::FieldOutsideRow
+pub xml2arrow::migrate::Unconverted::FieldOutsideRow::field: alloc::string::String
+pub xml2arrow::migrate::Unconverted::FieldOutsideRow::row_path: alloc::string::String
+pub xml2arrow::migrate::Unconverted::FieldOutsideRow::table: alloc::string::String
 pub xml2arrow::migrate::Unconverted::LevelCountsNonEnclosingTable
 pub xml2arrow::migrate::Unconverted::LevelCountsNonEnclosingTable::counted_table: alloc::string::String
 pub xml2arrow::migrate::Unconverted::LevelCountsNonEnclosingTable::level: alloc::string::String
@@ -980,6 +994,10 @@ pub xml2arrow::Unconverted::FieldInsideNestedTable
 pub xml2arrow::Unconverted::FieldInsideNestedTable::field: alloc::string::String
 pub xml2arrow::Unconverted::FieldInsideNestedTable::nested_table: alloc::string::String
 pub xml2arrow::Unconverted::FieldInsideNestedTable::table: alloc::string::String
+pub xml2arrow::Unconverted::FieldOutsideRow
+pub xml2arrow::Unconverted::FieldOutsideRow::field: alloc::string::String
+pub xml2arrow::Unconverted::FieldOutsideRow::row_path: alloc::string::String
+pub xml2arrow::Unconverted::FieldOutsideRow::table: alloc::string::String
 pub xml2arrow::Unconverted::LevelCountsNonEnclosingTable
 pub xml2arrow::Unconverted::LevelCountsNonEnclosingTable::counted_table: alloc::string::String
 pub xml2arrow::Unconverted::LevelCountsNonEnclosingTable::level: alloc::string::String

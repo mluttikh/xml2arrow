@@ -327,8 +327,9 @@ pub struct Config {
     /// `levels`, every field uses `path` rather than the deprecated
     /// `xml_path`, every table nested inside another declares
     /// [`TableConfig::links`] — `links: []` when it deliberately has none —
-    /// and no field lies inside a table nested within its own, where the
-    /// nested table would capture every value it could receive. A config that
+    /// every field lies inside its table's row element, and no field lies
+    /// inside a table nested within its own, where the nested table would
+    /// capture every value it could receive. A config that
     /// has not finished migrating is rejected at load with a message naming
     /// what is left, rather than parsing under semantics its author did not
     /// intend.
@@ -381,8 +382,9 @@ impl Config {
     /// - When [`Config::version`] declares `2`, the config must be fully
     ///   migrated: every table declares `row:`, none uses `levels:`, every
     ///   field uses `path:` rather than `xml_path:`, a table nested inside
-    ///   another declares `links:`, and no field lies inside a table nested
-    ///   within its own. These are checked last, so a config that is both
+    ///   another declares `links:`, every field lies inside its table's row
+    ///   element, and no field lies inside a table nested within its own.
+    ///   These are checked last, so a config that is both
     ///   broken and unmigrated reports the breakage first.
     ///
     /// # Errors
@@ -800,6 +802,15 @@ impl Config {
                     table: table.name.clone(),
                 });
             }
+            // Resolved once per table, and only when a field could fall outside
+            // it. A table without `row:` has already been told to declare one,
+            // and which fields end up outside depends on the element chosen.
+            let row_path = table
+                .fields
+                .iter()
+                .any(FieldConfig::has_absolute_location)
+                .then(|| table.row_path())
+                .flatten();
             for field in &table.fields {
                 if field.xml_path.is_some() {
                     steps.push(MigrationStep::RenameFieldXmlPath {
@@ -807,15 +818,28 @@ impl Config {
                         field: field.name.clone(),
                     });
                 }
-                // Version 1 cannot reject this: the config loads today, and the
-                // column is merely never filled. Version 2 has no such config
-                // to protect, so an empty column is an error there.
+                // Version 1 cannot reject these two: the config loads today,
+                // and the column is merely empty, or filled on the wrong rows.
+                // Version 2 has no such config to protect.
                 if let Some((field_path, nested)) = self.nested_table_capturing(table, field) {
                     steps.push(MigrationStep::MoveFieldToNestedTable {
                         table: table.name.clone(),
                         field: field.name.clone(),
                         field_path,
                         nested_table: nested.name.clone(),
+                    });
+                } else if let Some(row_path) = &row_path
+                    && let Some(field_path) = field.location_outside(row_path)
+                {
+                    // `else`: a field a nested table captures never receives a
+                    // value at all, and moving it to that table is the fix.
+                    // Also telling it to move into its row would give one field
+                    // two contradictory steps.
+                    steps.push(MigrationStep::MoveFieldIntoRow {
+                        table: table.name.clone(),
+                        field: field.name.clone(),
+                        field_path: field_path.to_string(),
+                        row_path: row_path.clone(),
                     });
                 }
             }
@@ -1611,6 +1635,29 @@ pub struct FieldConfig {
 }
 
 impl FieldConfig {
+    /// The field's location when it lies outside `row_path`, the resolved row
+    /// element of its table; `None` when it lies inside.
+    ///
+    /// Only an absolute location can fall outside: `xml_path` always is one,
+    /// and so is a `path` with a leading slash, while a relative `path`
+    /// resolves inside the row element by construction. Checking just those
+    /// needs no resolution and so no allocation, which matters because every
+    /// `Parser::new` of a version 2 config asks.
+    pub(crate) fn location_outside(&self, row_path: &str) -> Option<&str> {
+        let location = match (self.xml_path.as_deref(), self.path.as_deref()) {
+            (Some(xml_path), _) => xml_path,
+            (None, Some(path)) if path.starts_with('/') => path,
+            _ => return None,
+        };
+        (!path_is_under(location, row_path)).then_some(location)
+    }
+
+    /// Whether the field names its location absolutely, and so could lie
+    /// outside its table's row element. See [`FieldConfig::location_outside`].
+    pub(crate) fn has_absolute_location(&self) -> bool {
+        self.xml_path.is_some() || self.path.as_deref().is_some_and(|p| p.starts_with('/'))
+    }
+
     /// Validates that scale/offset are only used with floating point data types.
     ///
     /// # Errors
@@ -3725,6 +3772,101 @@ tables:
                     } if table == "stations" && nested_table == "details"
                 ),
                 "{err:?}"
+            );
+        }
+
+        /// `stations` has one row per `<station>`, with a field at `path`.
+        fn stations_with_field(path: &str) -> Result<Config> {
+            let stations = TableConfig::builder("stations", "/report/stations")
+                .row("station")
+                .field(
+                    FieldConfigBuilder::new("f", path, DType::Utf8)
+                        .nullable(true)
+                        .build()
+                        .unwrap(),
+                )
+                .build();
+            Config::builder().version(2).table(stations).build()
+        }
+
+        /// A value outside the row element attaches to whichever row ends
+        /// next, so a value that appears once fills one row and leaves the rest
+        /// empty. Each case is inside the table's `xml_path`, which is checked
+        /// earlier and for every version, but outside its row.
+        #[rstest]
+        #[case::sibling_of_the_rows("/report/stations/summary")]
+        #[case::attribute_of_the_container("/report/stations/@count")]
+        #[case::text_of_the_container("/report/stations")]
+        fn a_field_outside_its_row_is_rejected(#[case] path: &str) {
+            let config = stations_with_field(path);
+            let Err(Error::InvalidConfig {
+                reason:
+                    ConfigIssue::FieldOutsideRowInVersion2 {
+                        table,
+                        field,
+                        field_path,
+                        row_path,
+                    },
+            }) = &config
+            else {
+                panic!("expected FieldOutsideRowInVersion2, got {config:?}");
+            };
+            assert_eq!(
+                (table.as_str(), field.as_str(), field_path.as_str()),
+                ("stations", "f", path)
+            );
+            assert_eq!(row_path, "/report/stations/station");
+        }
+
+        #[rstest]
+        #[case::absolute_inside_the_row("/report/stations/station/name")]
+        #[case::attribute_of_the_row_element("/report/stations/station/@id")]
+        #[case::the_row_element_itself("/report/stations/station")]
+        #[case::relative("name")]
+        fn a_field_inside_its_row_is_accepted(#[case] path: &str) {
+            let config = stations_with_field(path);
+            assert!(config.is_ok(), "{config:?}");
+        }
+
+        /// A field a nested table captures never receives a value, and the fix
+        /// is to move it to that table. Also rejecting it for lying outside its
+        /// own row would send the author two ways at once, so it is reported
+        /// for the capture alone.
+        #[test]
+        fn a_captured_field_is_not_also_rejected_for_lying_outside_its_row() {
+            // `/r/bs/total` is outside the row `/r/a`, and inside `inner`.
+            let outer = TableConfig::builder("outer", "/r")
+                .row("a")
+                .field(
+                    FieldConfigBuilder::new("f", "/r/bs/total", DType::Int32)
+                        .nullable(true)
+                        .build()
+                        .unwrap(),
+                )
+                .build();
+            let mut config = Config::builder()
+                .table(outer)
+                .table(nested_table("inner", "/r/bs", "b"))
+                .build()
+                .unwrap();
+            let steps = config.version_2_steps();
+            assert!(
+                matches!(
+                    steps.as_slice(),
+                    [MigrationStep::MoveFieldToNestedTable { .. }]
+                ),
+                "{steps:?}"
+            );
+
+            config.version = Some(2);
+            assert!(
+                matches!(
+                    config.validate(),
+                    Err(Error::InvalidConfig {
+                        reason: ConfigIssue::FieldInsideNestedTableInVersion2 { .. }
+                    })
+                ),
+                "{config:?}"
             );
         }
 
