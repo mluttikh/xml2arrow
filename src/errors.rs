@@ -537,6 +537,22 @@ pub enum ConfigIssue {
         /// The nested table that captures values there.
         nested_table: String,
     },
+    /// Under `version: 2`, a field lies outside its table's row element.
+    ///
+    /// Its value would attach to whichever row ends next rather than to a row
+    /// of its own, so a value that appears once in the document lands on one
+    /// row and leaves the rest empty. Version 1 accepts the same config, and
+    /// reports it as [`Lint::FieldOutsideRow`](crate::Lint::FieldOutsideRow).
+    FieldOutsideRowInVersion2 {
+        /// The table the field is declared on.
+        table: String,
+        /// The field outside the row element.
+        field: String,
+        /// The field's path, as written.
+        field_path: String,
+        /// The table's resolved row element, which does not contain the field.
+        row_path: String,
+    },
 }
 
 // --- Display -----------------------------------------------------------------
@@ -820,6 +836,15 @@ impl fmt::Display for ConfigIssue {
             } => write!(
                 f,
                 "version: 2 rejects a field that can never receive a value: field '{field}' of table '{table}' has path '{field_path}', inside the xml_path of table '{nested_table}', which captures every value there; declare the field on '{nested_table}', or remove it"
+            ),
+            ConfigIssue::FieldOutsideRowInVersion2 {
+                table,
+                field,
+                field_path,
+                row_path,
+            } => write!(
+                f,
+                "version: 2 requires every field to lie inside its table's row element, but field '{field}' of table '{table}' has path '{field_path}', outside the row element '{row_path}'; its value would attach to whichever row ends next. Point the field inside the row, or give it a table of its own"
             ),
         }
     }

@@ -2,7 +2,8 @@
 # the row subtree (`label`). The inferred rule would finalize a row per <label>
 # *and* per <item>; the declaration confines rows to <item>. `label` keeps its
 # pre-declaration behavior — it attaches to whichever row finalizes next — which
-# is what Lint::FieldOutsideRow reports rather than rejects.
+# is what Lint::FieldOutsideRow reports in a version 1 config; version 2 rejects
+# it.
 tables:
   - name: items
     xml_path: /report/data

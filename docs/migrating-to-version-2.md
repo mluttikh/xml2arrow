@@ -138,11 +138,15 @@ What the converter writes:
 
 It never makes a change to the output for you: it does not choose a `row:` for
 a table whose rows are split, and it does not replace position columns with
-`parent:` join keys. It also leaves a field that lies inside the `xml_path` of a
-table nested inside its own. That table captures every value there, so the
-column has always been empty, and version 2 rejects the field; moving it to the
-nested table or removing it changes the columns, so the choice is yours. Check
-the result on your own documents with `config_diff`.
+`parent:` join keys. It also leaves two kinds of field that version 2 rejects,
+because every fix changes the output and the choice is yours:
+
+- a field inside the `xml_path` of a table nested inside its own. That table
+  captures every value there, so the column has always been empty.
+- a field outside its table's row element. Its value attaches to whichever row
+  ends next.
+
+Check the result on your own documents with `config_diff`.
 
 The written file is fresh. The original's comments and layout are not kept,
 and keys left at their defaults are left out.
@@ -221,6 +225,13 @@ Configs differ on this document.
 ```
 
 Update anything downstream that worked around the split rows.
+
+**A field outside the row element you declare is reported as `FieldOutsideRow`.**
+Its value attaches to whichever row ends next, so a value that appears once
+fills one row. Version 2 rejects it, so resolve it before step 4: give the value
+a table of its own, or point the field inside the row. A value on the `xml_path`
+element itself, such as an attribute of `<data>` around `<item>` rows, has no
+version 2 spelling; see [`path`](configuration.md#path).
 
 With `row:` declared, fields can use paths relative to the row element, such as
 `path: "@id"` instead of `path: /report/stations/station/@id`. That is optional

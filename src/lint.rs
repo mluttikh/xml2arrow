@@ -91,6 +91,23 @@ pub enum MigrationStep {
         /// The nested table that captures values there.
         nested_table: String,
     },
+    /// The field lies outside its table's row element, so its value attaches
+    /// to whichever row ends next. It must point inside the row, or move to a
+    /// table of its own.
+    ///
+    /// Listed only for a table that declares `row:`: which fields fall outside
+    /// depends on the row element, so a table still told to declare one is
+    /// checked once it has. See [`Lint::FieldOutsideRow`].
+    MoveFieldIntoRow {
+        /// The table the field is declared on.
+        table: String,
+        /// The field outside the row element.
+        field: String,
+        /// The field's path, as written.
+        field_path: String,
+        /// The table's resolved row element.
+        row_path: String,
+    },
 }
 
 impl MigrationStep {
@@ -120,6 +137,17 @@ impl MigrationStep {
                 field,
                 field_path,
                 nested_table,
+            },
+            MigrationStep::MoveFieldIntoRow {
+                table,
+                field,
+                field_path,
+                row_path,
+            } => ConfigIssue::FieldOutsideRowInVersion2 {
+                table,
+                field,
+                field_path,
+                row_path,
             },
         }
     }
@@ -158,6 +186,17 @@ impl fmt::Display for MigrationStep {
                  '{nested_table}', which captures every value there, so it never receives one; \
                  declare it on '{nested_table}', or remove it"
             ),
+            MigrationStep::MoveFieldIntoRow {
+                table,
+                field,
+                field_path,
+                row_path,
+            } => write!(
+                f,
+                "field '{field}' of table '{table}': its path {field_path} is outside the row \
+                 element {row_path}, so its value attaches to whichever row ends next; point it \
+                 inside the row, or give it a table of its own"
+            ),
         }
     }
 }
@@ -190,11 +229,11 @@ pub enum Lint {
     /// A table declares `row:`, but one of its fields sits outside that row's
     /// subtree, so the field cannot be part of the row it is configured on.
     ///
-    /// Advisory rather than an error because the field still behaves exactly
+    /// Advisory in a version 1 config, because the field still behaves exactly
     /// as it did before the `row:` line was added — its value attaches to
     /// whichever row finalizes next. That is rarely what the author meant, but
-    /// it is not a new failure, and adding `row:` should not break a config that
-    /// works.
+    /// it is not a new failure, and adding `row:` should not break a config
+    /// that works. `version: 2` rejects it.
     FieldOutsideRow {
         /// The table declaring the row.
         table: String,
@@ -389,8 +428,14 @@ impl fmt::Display for Lint {
 /// would bury the other kinds of step under a wall of identical ones. The full
 /// list is in `steps` for anything that wants to act on it.
 fn write_config_version_1(f: &mut fmt::Formatter<'_>, steps: &[MigrationStep]) -> fmt::Result {
-    let (mut rows, mut levels, mut fields, mut links, mut captured) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut rows, mut levels, mut fields, mut links, mut captured, mut outside) = (
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
     for step in steps {
         match step {
             MigrationStep::DeclareRow { table } => rows.push(table.clone()),
@@ -408,6 +453,9 @@ fn write_config_version_1(f: &mut fmt::Formatter<'_>, steps: &[MigrationStep]) -
                 nested_table,
                 ..
             } => captured.push(format!("{table}.{field} inside {nested_table}")),
+            MigrationStep::MoveFieldIntoRow { table, field, .. } => {
+                outside.push(format!("{table}.{field}"))
+            }
         }
     }
 
@@ -451,6 +499,15 @@ fn write_config_version_1(f: &mut fmt::Formatter<'_>, steps: &[MigrationStep]) -
                 "receive"
             },
             first_few(&captured),
+        ));
+    }
+    if !outside.is_empty() {
+        left.push(format!(
+            "{} outside {} table's row element must move inside it or to a table of {} own ({})",
+            counted(outside.len(), "field", "fields"),
+            if outside.len() == 1 { "its" } else { "their" },
+            if outside.len() == 1 { "its" } else { "their" },
+            first_few(&outside),
         ));
     }
 
@@ -539,19 +596,14 @@ impl Config {
             // there would be advice to do what it already did.
             match table.row_path() {
                 Some(row_path) => {
+                    // The same check `version: 2` validation makes, so the
+                    // lint and the rejection cannot disagree about a field.
                     for field in &table.fields {
-                        // A relative `path` resolves *into* the row subtree by
-                        // construction, so only an absolute spelling can fall
-                        // outside it. An unresolvable field is a validation
-                        // error, not a lint, so skip it here.
-                        let Some(field_path) = resolve_field_path(table, field) else {
-                            continue;
-                        };
-                        if !path_is_under(&field_path, &row_path) {
+                        if let Some(field_path) = field.location_outside(&row_path) {
                             lints.push(Lint::FieldOutsideRow {
                                 table: table.name.clone(),
                                 field: field.name.clone(),
-                                field_path: field_path.into_owned(),
+                                field_path: field_path.to_string(),
                                 row_path: row_path.clone(),
                             });
                         }
@@ -909,6 +961,63 @@ tables:
             );
         }
 
+        /// Uses only version 2 keys, but `items.label` lies beside the rows,
+        /// outside the row element.
+        fn field_outside_row() -> Config {
+            config_from_yaml!(
+                r#"
+tables:
+  - {name: items, xml_path: /report/data, row: item, fields: [{name: label, path: /report/data/label, data_type: Utf8, nullable: true}, {name: v, path: v, data_type: Int32}]}
+"#
+            )
+        }
+
+        #[test]
+        fn a_field_outside_its_row_is_a_step() {
+            let config = field_outside_row();
+            assert_eq!(
+                steps(&config).unwrap(),
+                vec![MigrationStep::MoveFieldIntoRow {
+                    table: "items".into(),
+                    field: "label".into(),
+                    field_path: "/report/data/label".into(),
+                    row_path: "/report/data/item".into(),
+                }]
+            );
+            let message = config
+                .lint()
+                .into_iter()
+                .find(|l| matches!(l, Lint::ConfigVersion1 { .. }))
+                .unwrap()
+                .to_string();
+            assert!(
+                message.contains(
+                    "1 field outside its table's row element must move inside it or to a table \
+                     of its own (items.label)"
+                ),
+                "{message}"
+            );
+        }
+
+        /// A table without `row:` is told to declare one, and nothing about
+        /// its fields: which of them fall outside depends on the element the
+        /// author picks.
+        #[test]
+        fn fields_of_a_table_without_a_row_are_not_checked_against_one() {
+            let config = config_from_yaml!(
+                r#"
+tables:
+  - {name: items, xml_path: /data, fields: [{name: id, path: /data/@id, data_type: Utf8}, {name: v, path: /data/item/v, data_type: Int32}]}
+"#
+            );
+            assert_eq!(
+                steps(&config).unwrap(),
+                vec![MigrationStep::DeclareRow {
+                    table: "items".into()
+                }]
+            );
+        }
+
         /// The property `version_2_steps` exists to guarantee: the lint lists
         /// nothing exactly when declaring `version: 2` would validate, and
         /// otherwise the validation error is the lint's first step. A second
@@ -938,6 +1047,7 @@ tables:
 "#
                 ),
                 field_inside_nested_table(),
+                field_outside_row(),
             ];
             for config in configs {
                 let steps = steps(&config).expect("every case is version 1");

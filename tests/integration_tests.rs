@@ -936,6 +936,64 @@ tables:
     assert_eq!(outer.column_by_name("count").unwrap().null_count(), 1);
 }
 
+#[test]
+fn test_version_2_rejects_a_field_outside_its_row() {
+    // Regression: a field outside its table's row element attaches to whichever
+    // row ends next, so a value that appears once in the container filled the
+    // first row and left every other row null. `version: 2` accepted that with
+    // only a lint. It now rejects the field at load; the same config without
+    // the version line still loads and parses as before, and is warned.
+    let version_2 = r#"version: 2
+tables:
+  - name: items
+    xml_path: /report/data
+    row: item
+    fields:
+      - {name: label, path: /report/data/label, data_type: Utf8, nullable: true}
+      - {name: v, path: v, data_type: Int32}
+"#;
+    let err = Config::from_yaml_str(version_2).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            xml2arrow::Error::InvalidConfig {
+                reason: xml2arrow::errors::ConfigIssue::FieldOutsideRowInVersion2 { .. }
+            }
+        ),
+        "{err:?}"
+    );
+    let message = err.to_string();
+    assert!(
+        message.contains("field 'label' of table 'items'")
+            && message.contains("outside the row element '/report/data/item'"),
+        "{message}"
+    );
+
+    let version_1 = Config::from_yaml_str(version_2.trim_start_matches("version: 2\n")).unwrap();
+    let parser = Parser::new(&version_1).unwrap();
+    assert!(
+        parser
+            .warnings()
+            .iter()
+            .any(|lint| matches!(lint, xml2arrow::Lint::FieldOutsideRow { field, .. } if field == "label")),
+        "{:?}",
+        parser.warnings()
+    );
+    // Why it is an error under version 2: one label, and only the first row
+    // has it.
+    let batches = parser
+        .parse_slice(b"<report><data><label>L</label><item><v>1</v></item><item><v>2</v></item></data></report>")
+        .unwrap();
+    let items = batches.get("items").unwrap();
+    let label = items
+        .column_by_name("label")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(label.iter().collect::<Vec<_>>(), vec![Some("L"), None]);
+}
+
 // ---------------------------------------------------------------------------
 // Realistic end-to-end scenario
 // ---------------------------------------------------------------------------

@@ -25,10 +25,15 @@
 //!    is not nullable, `on_missing: empty`, so declaring version 2 changes no
 //!    value.
 //!
-//! One part is never rewritten: a field inside the `xml_path` of a table nested
-//! within its own. That table captures every value there, so the field is never
-//! filled, and version 2 rejects it. Moving the field to the nested table or
-//! removing it both change the columns, so it is reported instead.
+//! Two kinds of field are never rewritten, because version 2 rejects both and
+//! every way to satisfy it changes the output:
+//!
+//! - a field inside the `xml_path` of a table nested within its own. That
+//!   table captures every value there, so the field is never filled.
+//! - a field outside its table's row element, once the table has one. Its
+//!   value attaches to whichever row ends next.
+//!
+//! Both are reported instead.
 //!
 //! When nothing is left over, the converted config declares `version: 2`.
 //! Otherwise it keeps the original's version, with every other step already
@@ -128,6 +133,20 @@ pub enum Unconverted {
         /// The nested table that captures values there.
         nested_table: String,
     },
+    /// A field lies outside its table's row element, so its value attaches to
+    /// whichever row ends next rather than to a row of its own.
+    ///
+    /// Version 2 rejects the field. Pointing it inside the row reads a
+    /// different value, and giving it a table of its own moves the column, so
+    /// both change the output.
+    FieldOutsideRow {
+        /// The table the field is declared on.
+        table: String,
+        /// The field outside the row element.
+        field: String,
+        /// The table's resolved row element.
+        row_path: String,
+    },
 }
 
 impl fmt::Display for Unconverted {
@@ -194,6 +213,16 @@ impl fmt::Display for Unconverted {
                  captures every value there, so it is never filled; version 2 rejects it, and \
                  moving it to '{nested_table}' or removing it changes the columns"
             ),
+            Unconverted::FieldOutsideRow {
+                table,
+                field,
+                row_path,
+            } => write!(
+                f,
+                "table '{table}': field '{field}' lies outside the row element {row_path}, so \
+                 its value attaches to whichever row ends next; version 2 rejects it, and \
+                 pointing it inside the row or giving it a table of its own changes the output"
+            ),
         }
     }
 }
@@ -253,7 +282,7 @@ impl Config {
         replace_levels(self, &mut config, &mut unconverted);
         link_nested_tables(&mut config);
         state_utf8_policies(&mut config);
-        report_fields_inside_nested_tables(&config, &mut unconverted);
+        report_misplaced_fields(&config, &mut unconverted);
 
         if unconverted.is_empty() {
             // Every rewrite was taken, so nothing version 2 rejects is left. A
@@ -367,19 +396,34 @@ fn state_utf8_policies(config: &mut Config) {
     }
 }
 
-/// Reports each field that a nested table captures. Nothing is rewritten.
+/// Reports each field that version 2 rejects for where it lies: inside a
+/// nested table, or outside its own table's row element. Nothing is rewritten.
 ///
-/// Read from the converted config rather than the original so that it asks
-/// exactly what version 2 validation will: the rewrites above leave every
-/// resolved path where it was, so the answer is the same either way.
-fn report_fields_inside_nested_tables(config: &Config, unconverted: &mut Vec<Unconverted>) {
+/// Read from the converted config rather than the original, so that it asks
+/// exactly what version 2 validation will. The rewrites above leave every
+/// resolved path where it was, but `declare_rows` gives tables the row element
+/// the outside-the-row check is made against.
+///
+/// A field is reported for one reason at most, as validation lists it: one a
+/// nested table captures never receives a value, and moving it to that table
+/// is the decision to make.
+fn report_misplaced_fields(config: &Config, unconverted: &mut Vec<Unconverted>) {
     for table in &config.tables {
+        let row_path = table.row_path();
         for field in &table.fields {
             if let Some((_, nested)) = config.nested_table_capturing(table, field) {
                 unconverted.push(Unconverted::FieldInsideNestedTable {
                     table: table.name.clone(),
                     field: field.name.clone(),
                     nested_table: nested.name.clone(),
+                });
+            } else if let Some(row_path) = &row_path
+                && field.location_outside(row_path).is_some()
+            {
+                unconverted.push(Unconverted::FieldOutsideRow {
+                    table: table.name.clone(),
+                    field: field.name.clone(),
+                    row_path: row_path.clone(),
                 });
             }
         }
@@ -786,6 +830,38 @@ mod tests {
         assert_eq!(converted.tables[0].fields.len(), 2);
         assert_eq!(converted.tables[0].row.as_deref(), Some("a"));
         assert_eq!(converted.tables[1].links, Some(vec![]));
+    }
+
+    /// The frozen corpus's `attribute_child_of_table`: rows end only at
+    /// `<item>`, so `row: item` is declared as usual, but the container's own
+    /// attribute lies outside that row. Version 2 rejects the field, so it is
+    /// kept and reported, and the table keeps its declared row.
+    #[test]
+    fn a_field_outside_the_declared_row_is_left_and_reported() {
+        let config = config_from_yaml!(
+            r#"
+            tables:
+              - name: items
+                xml_path: /data
+                levels: []
+                fields:
+                  - {name: id, xml_path: /data/@id, data_type: Utf8, nullable: true}
+                  - {name: v, xml_path: /data/item/v, data_type: Int32, nullable: true}
+            "#
+        );
+        let conversion = config.to_version_2().unwrap();
+        assert_eq!(
+            conversion.unconverted,
+            vec![Unconverted::FieldOutsideRow {
+                table: "items".to_string(),
+                field: "id".to_string(),
+                row_path: "/data/item".to_string(),
+            }]
+        );
+        let items = &conversion.config.tables[0];
+        assert_eq!(conversion.config.version, None);
+        assert_eq!(items.row.as_deref(), Some("item"));
+        assert_eq!(items.fields[0].path.as_deref(), Some("/data/@id"));
     }
 
     #[test]
