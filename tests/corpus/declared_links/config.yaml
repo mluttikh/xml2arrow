@@ -7,12 +7,12 @@
 version: 2
 tables:
   - name: stations
-    xml_path: /report/group
+    scope: /report/group
     row: station
     fields:
       - {name: id, path: id, data_type: Utf8, nullable: true}
   - name: measurements
-    xml_path: /report/group/station/ms
+    scope: /report/group/station/ms
     row: m
     links:
       - parent: stations

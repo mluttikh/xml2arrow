@@ -100,7 +100,7 @@ pub enum Error {
     /// With `ParserOptions::error_on_unmatched_fields` enabled, one or more
     /// configured fields never captured a value anywhere in the document.
     ///
-    /// The usual cause is a misspelled `xml_path` (or a document whose schema
+    /// The usual cause is a misspelled path (or a document whose schema
     /// drifted away from the config); without this check the result is a
     /// silently all-null/empty column. Every unmatched field is reported at
     /// once so a broken config is fixed in one round trip.
@@ -304,20 +304,31 @@ pub enum ConfigIssue {
         /// The name claimed by more than one table.
         name: String,
     },
-    /// Two tables resolve to the same `xml_path`. The path registry stores a
-    /// single table per path node, so the earlier table would silently
-    /// receive zero rows — rejected instead.
-    DuplicateTableXmlPath {
-        /// The table that claimed the path first.
+    /// Two tables name the same element. The path registry stores a single
+    /// table per path node, so the earlier table would silently receive zero
+    /// rows — rejected instead.
+    DuplicateTablePath {
+        /// The table that claimed the element first.
         table_a: String,
         /// The table that claimed it again.
         table_b: String,
         /// The contested path, as the later table spelled it.
-        xml_path: String,
+        path: String,
     },
-    /// A table had an empty `xml_path` and so matches nothing.
-    EmptyTableXmlPath {
-        /// The table whose `xml_path` was empty.
+    /// A table named its element with an empty string, so it matches nothing.
+    EmptyTablePath {
+        /// The table whose path was empty.
+        table: String,
+    },
+    /// A table sets both `scope` and `xml_path`, which are two spellings of
+    /// one element.
+    TablePathConflict {
+        /// The table setting both keys.
+        table: String,
+    },
+    /// A table sets neither `scope` nor `xml_path`, so it names no element.
+    TablePathMissing {
+        /// The table naming no element.
         table: String,
     },
     /// A field had an empty `name`. Names become column names.
@@ -333,7 +344,7 @@ pub enum ConfigIssue {
         field: String,
     },
     /// A field named a location with an empty string.
-    EmptyFieldXmlPath {
+    EmptyFieldPath {
         /// The field's table.
         table: String,
         /// The field whose path was empty.
@@ -490,8 +501,8 @@ pub enum ConfigIssue {
         version: u32,
     },
     /// A config that does not declare `version: 2` sets a key only
-    /// configuration format version 2 defines, such as `row:`, `links:` or a
-    /// value policy.
+    /// configuration format version 2 defines, such as `scope:`, `row:`,
+    /// `links:` or a value policy.
     ///
     /// Version 1 is exactly the format 0.19 read, and version 2 is the format
     /// that replaces it; a config is one or the other. Ignoring the key, as
@@ -501,8 +512,8 @@ pub enum ConfigIssue {
         /// Where the key is: `table 'readings'`, `field 'value' of table
         /// 'readings'`, `the top level`.
         location: String,
-        /// The key: `row`, `links`, `row_id`, `path`, `defaults`, `metadata`,
-        /// or a value policy.
+        /// The key: `scope`, `row`, `links`, `row_id`, `path`, `defaults`,
+        /// `metadata`, or a value policy.
         key: &'static str,
     },
     // The variants below are the rules of configuration format version 2. While
@@ -687,9 +698,9 @@ impl fmt::Display for Error {
                 stop_paths_configured,
             } => {
                 let hint = if *stop_paths_configured {
-                    "check the xml_path spellings — and note that parser_options.stop_at_paths ends the parse early, so fields below a stop path never match"
+                    "check the path spellings — and note that parser_options.stop_at_paths ends the parse early, so fields below a stop path never match"
                 } else {
-                    "check the xml_path spellings"
+                    "check the path spellings"
                 };
                 write!(
                     f,
@@ -702,7 +713,7 @@ impl fmt::Display for Error {
                     }
                     write!(
                         f,
-                        " field '{}' of table '{}' (xml_path '{}')",
+                        " field '{}' of table '{}' (path '{}')",
                         unmatched.field, unmatched.table, unmatched.xml_path
                     )?;
                 }
@@ -752,27 +763,35 @@ impl fmt::Display for ConfigIssue {
         match self {
             ConfigIssue::EmptyTableName => f.write_str("Table name must not be empty"),
             ConfigIssue::DuplicateTableName { name } => write!(f, "Duplicate table name '{name}'"),
-            ConfigIssue::DuplicateTableXmlPath {
+            ConfigIssue::DuplicateTablePath {
                 table_a,
                 table_b,
-                xml_path,
+                path,
             } => write!(
                 f,
-                "Tables '{table_a}' and '{table_b}' share the same xml_path '{xml_path}'; each table must have a distinct xml_path"
+                "Tables '{table_a}' and '{table_b}' name the same element '{path}'; each table must name a distinct one, because a table's element is what scopes its rows"
             ),
-            ConfigIssue::EmptyTableXmlPath { table } => {
-                write!(f, "Table '{table}' has an empty xml_path")
+            ConfigIssue::EmptyTablePath { table } => {
+                write!(f, "Table '{table}' names no element: its path is empty")
             }
+            ConfigIssue::TablePathConflict { table } => write!(
+                f,
+                "Table '{table}' sets both 'scope' and 'xml_path'; they are two spellings of the same element, so set exactly one ('scope' is the version 2 key)"
+            ),
+            ConfigIssue::TablePathMissing { table } => write!(
+                f,
+                "Table '{table}' sets neither 'scope' nor 'xml_path', so it names no element"
+            ),
             ConfigIssue::EmptyFieldName { table } => {
                 write!(f, "Field name must not be empty in table '{table}'")
             }
             ConfigIssue::DuplicateFieldName { table, field } => {
                 write!(f, "Duplicate field name '{field}' in table '{table}'")
             }
-            ConfigIssue::EmptyFieldXmlPath { table, field } => {
+            ConfigIssue::EmptyFieldPath { table, field } => {
                 write!(
                     f,
-                    "Field '{field}' in table '{table}' has an empty xml_path"
+                    "Field '{field}' in table '{table}' names no location: its path is empty"
                 )
             }
             ConfigIssue::FieldPathNotUnderTable {
@@ -782,7 +801,7 @@ impl fmt::Display for ConfigIssue {
                 field_path,
             } => write!(
                 f,
-                "Field '{field}' has xml_path '{field_path}' which is not under table '{table}' xml_path '{table_path}'"
+                "Field '{field}' is at '{field_path}', which is not inside table '{table}' at '{table_path}'"
             ),
             ConfigIssue::SingleTableRequired { output_tables } => write!(
                 f,
@@ -799,7 +818,7 @@ impl fmt::Display for ConfigIssue {
                 row_path,
             } => write!(
                 f,
-                "Table '{table}' declares row '{row}' which resolves to '{row_path}', not under its xml_path '{table_path}'"
+                "Table '{table}' declares row '{row}' which resolves to '{row_path}', not inside its scope '{table_path}'"
             ),
             ConfigIssue::InapplicablePolicy {
                 table,
@@ -853,7 +872,7 @@ impl fmt::Display for ConfigIssue {
             ),
             ConfigIssue::RowIsRootTable { table } => write!(
                 f,
-                "Table '{table}' has xml_path '/' and declares a row resolving to it. The implicit document root never closes, so no row would ever be finalized and the table would produce no rows. Name the document's top-level element as the row instead (row: <element>), or set xml_path to that element and keep row: \".\""
+                "Table '{table}' has xml_path '/' and declares a row resolving to it. The implicit document root never closes, so no row would ever be finalized and the table would produce no rows. Name the document's top-level element as the row instead (row: <element>), or set scope to that element and keep row: \".\""
             ),
             ConfigIssue::RowPathCrossesTable {
                 table,
@@ -862,7 +881,7 @@ impl fmt::Display for ConfigIssue {
                 nested_table_path,
             } => write!(
                 f,
-                "Table '{table}' declares a row element at '{row_path}', but table '{nested_table}' (xml_path '{nested_table_path}') lies between them; rows finalize against the innermost open table, so '{nested_table}' would receive them"
+                "Table '{table}' declares a row element at '{row_path}', but table '{nested_table}' (scope '{nested_table_path}') lies between them; rows finalize against the innermost open table, so '{nested_table}' would receive them"
             ),
             ConfigIssue::KeyRequiresVersion2 { location, key } => write!(
                 f,
@@ -909,7 +928,7 @@ impl fmt::Display for ConfigIssue {
                 nested_table,
             } => write!(
                 f,
-                "Field '{field}' of table '{table}' can never receive a value: its path '{field_path}' is inside the xml_path of table '{nested_table}', which captures every value there; declare the field on '{nested_table}', or remove it"
+                "Field '{field}' of table '{table}' can never receive a value: its path '{field_path}' is inside the scope of table '{nested_table}', which captures every value there; declare the field on '{nested_table}', or remove it"
             ),
             ConfigIssue::FieldOutsideRow {
                 table,

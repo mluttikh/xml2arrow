@@ -66,6 +66,12 @@ pub enum MigrationStep {
         /// The path, as written.
         path: String,
     },
+    /// The table's element is spelled with `xml_path:`; the key must be
+    /// renamed to `scope:`. The value needs no change.
+    RenameTableXmlPath {
+        /// The table using `xml_path:`.
+        table: String,
+    },
     /// The table leaves its row boundaries inferred; it must declare `row:`.
     DeclareRow {
         /// The table without a `row:`.
@@ -126,6 +132,11 @@ impl MigrationStep {
             MigrationStep::RemoveDotSegment { location, path } => {
                 ConfigIssue::DotSegmentInPath { location, path }
             }
+            MigrationStep::RenameTableXmlPath { table } => ConfigIssue::ReplacedKey {
+                location: format!("table '{table}'"),
+                key: "xml_path",
+                replacement: "scope",
+            },
             MigrationStep::DeclareRow { table } => ConfigIssue::MissingRow { table },
             MigrationStep::ReplaceLevels { table } => ConfigIssue::ReplacedKey {
                 location: format!("table '{table}'"),
@@ -170,6 +181,10 @@ impl fmt::Display for MigrationStep {
                 f,
                 "{location}: the path '{path}' has a '.' or '..' segment, which no element can \
                  match; write it without one"
+            ),
+            MigrationStep::RenameTableXmlPath { table } => write!(
+                f,
+                "table '{table}': rename the `xml_path:` key to `scope:`; the value is unchanged"
             ),
             MigrationStep::DeclareRow { table } => {
                 write!(f, "table '{table}': declare `row:`; its rows are inferred")
@@ -439,7 +454,7 @@ impl fmt::Display for Lint {
 /// would bury the other kinds of step under a wall of identical ones. The full
 /// list is in `steps` for anything that wants to act on it.
 fn write_config_version_1(f: &mut fmt::Formatter<'_>, steps: &[MigrationStep]) -> fmt::Result {
-    let (mut unknown, mut dotted, mut rows, mut levels, mut fields, mut links, mut captured) = (
+    let (mut unknown, mut dotted, mut scopes, mut rows, mut levels, mut fields, mut links) = (
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -448,6 +463,7 @@ fn write_config_version_1(f: &mut fmt::Formatter<'_>, steps: &[MigrationStep]) -
         Vec::new(),
         Vec::new(),
     );
+    let mut captured = Vec::new();
     for step in steps {
         match step {
             MigrationStep::RemoveUnknownKey { location, key } => {
@@ -456,6 +472,7 @@ fn write_config_version_1(f: &mut fmt::Formatter<'_>, steps: &[MigrationStep]) -
             MigrationStep::RemoveDotSegment { location, path } => {
                 dotted.push(format!("'{path}' in {location}"))
             }
+            MigrationStep::RenameTableXmlPath { table } => scopes.push(table.clone()),
             MigrationStep::DeclareRow { table } => rows.push(table.clone()),
             MigrationStep::ReplaceLevels { table } => levels.push(table.clone()),
             MigrationStep::RenameFieldXmlPath { table, field } => {
@@ -487,6 +504,13 @@ fn write_config_version_1(f: &mut fmt::Formatter<'_>, steps: &[MigrationStep]) -
             "{} with a '.' or '..' segment must be written without one ({})",
             counted(dotted.len(), "path", "paths"),
             first_few(&dotted),
+        ));
+    }
+    if !scopes.is_empty() {
+        left.push(format!(
+            "{} must rename the `xml_path:` key to `scope:` ({})",
+            counted(scopes.len(), "table", "tables"),
+            first_few(&scopes),
         ));
     }
     if !rows.is_empty() {
@@ -629,16 +653,16 @@ impl Config {
             // The row-boundary lints describe the *inferred* rule, which only
             // version 1 has. A version 2 table declares `row:`.
             if table.row.is_none() {
-                let children = self.row_delimiting_children(&table.xml_path);
+                let children = self.row_delimiting_children(table.path());
                 match children.len() {
                     0 => lints.push(Lint::NeverFinalizesRows {
                         table: table.name.clone(),
-                        xml_path: table.xml_path.clone(),
+                        xml_path: table.path().to_string(),
                     }),
                     1 => {} // Unambiguous: exactly the element a `row:` would name.
                     _ => lints.push(Lint::InferredRowBoundary {
                         table: table.name.clone(),
-                        xml_path: table.xml_path.clone(),
+                        xml_path: table.path().to_string(),
                         child_elements: children,
                     }),
                 }
@@ -653,12 +677,12 @@ impl Config {
                         field: field.name.clone(),
                         field_path,
                         nested_table: nested.name.clone(),
-                        nested_table_path: nested.xml_path.clone(),
+                        nested_table_path: nested.path().to_string(),
                     });
                 }
             }
 
-            let available = self.enclosing_table_scopes(&table.xml_path);
+            let available = self.enclosing_table_scopes(table.path());
             if table.levels.len() > available {
                 lints.push(Lint::ExcessLevels {
                     table: table.name.clone(),
@@ -712,8 +736,8 @@ impl Config {
                 .tables
                 .iter()
                 .filter(|ancestor| {
-                    path_segments(&ancestor.xml_path).next().is_some()
-                        && path_is_strictly_under(table_path, &ancestor.xml_path)
+                    path_segments(ancestor.path()).next().is_some()
+                        && path_is_strictly_under(table_path, ancestor.path())
                 })
                 .count()
     }
@@ -751,7 +775,7 @@ impl Config {
             .tables
             .iter()
             .flat_map(|t| {
-                std::iter::once(Cow::Borrowed(t.xml_path.as_str()))
+                std::iter::once(Cow::Borrowed(t.path()))
                     .chain(t.fields.iter().filter_map(|f| resolve_field_path(t, f)))
             })
             .chain(
@@ -831,12 +855,18 @@ tables:
             assert_eq!(
                 steps(&legacy()).unwrap(),
                 vec![
+                    MigrationStep::RenameTableXmlPath {
+                        table: "stations".into()
+                    },
                     MigrationStep::DeclareRow {
                         table: "stations".into()
                     },
                     MigrationStep::RenameFieldXmlPath {
                         table: "stations".into(),
                         field: "id".into(),
+                    },
+                    MigrationStep::RenameTableXmlPath {
+                        table: "measurements".into()
                     },
                     MigrationStep::DeclareRow {
                         table: "measurements".into()
@@ -847,6 +877,9 @@ tables:
                     MigrationStep::RenameFieldXmlPath {
                         table: "measurements".into(),
                         field: "v".into(),
+                    },
+                    MigrationStep::RenameTableXmlPath {
+                        table: "notes".into()
                     },
                     MigrationStep::DeclareRow {
                         table: "notes".into()
@@ -886,6 +919,7 @@ tables:
             assert_eq!(
                 steps(&config),
                 Some(vec![
+                    MigrationStep::RenameTableXmlPath { table: "t".into() },
                     MigrationStep::DeclareRow { table: "t".into() },
                     MigrationStep::RenameFieldXmlPath {
                         table: "t".into(),
@@ -901,7 +935,7 @@ tables:
                 r#"
 version: 2
 tables:
-  - {name: t, xml_path: /r, row: i, fields: [{name: v, path: v, data_type: Int32}]}
+  - {name: t, scope: /r, row: i, fields: [{name: v, path: v, data_type: Int32}]}
 "#
             );
             assert_eq!(steps(&config), None);
@@ -953,6 +987,7 @@ tables:
                         location: "table 't'".into(),
                         key: "rows".into(),
                     },
+                    MigrationStep::RenameTableXmlPath { table: "t".into() },
                     MigrationStep::DeclareRow { table: "t".into() },
                     MigrationStep::RenameFieldXmlPath {
                         table: "t".into(),
@@ -969,7 +1004,7 @@ tables:
             assert!(
                 message.contains(
                     "1 unknown key must be corrected or removed ('rows' in table 't'); 1 table \
-                     must declare `row:`"
+                     must rename the `xml_path:` key to `scope:` (t); 1 table must declare `row:`"
                 ),
                 "{message}"
             );
@@ -1424,7 +1459,7 @@ tables:
 version: 2
 tables:
   - name: items
-    xml_path: /data
+    scope: /data
     row: item
     fields:
       - {name: name, path: name, data_type: Utf8}
@@ -1518,7 +1553,7 @@ tables:
             version: 2
             tables:
               - name: header
-                xml_path: /report/header
+                scope: /report/header
                 row: "."
                 fields:
                   - {name: title, path: title, data_type: Utf8}
@@ -1542,7 +1577,7 @@ tables:
             version: 2
             tables:
               - name: t
-                xml_path: /a
+                scope: /a
                 row: "."
                 fields:
                   - {name: id, path: "@id", data_type: Utf8}

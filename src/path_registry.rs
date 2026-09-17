@@ -265,7 +265,7 @@ impl PathRegistry {
     /// scopes as those elements open and close.
     fn register_table_paths(&mut self, config: &Config) {
         for (table_idx, table_config) in config.tables.iter().enumerate() {
-            let node_id = self.get_or_create_path(&table_config.xml_path);
+            let node_id = self.get_or_create_path(table_config.path());
             self.node_info[node_id.index()].table_index = Some(table_idx);
         }
     }
@@ -334,7 +334,7 @@ impl PathRegistry {
             let Some(row_path) = table_config.row_path() else {
                 continue;
             };
-            let table_node = self.get_or_create_path(&table_config.xml_path);
+            let table_node = self.get_or_create_path(table_config.path());
             let row_node = self.get_or_create_path(&row_path);
             if row_node != table_node {
                 self.node_info[row_node.index()].ends_row = true;
