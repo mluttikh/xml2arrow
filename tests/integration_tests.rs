@@ -740,12 +740,12 @@ fn test_version_2_accepts_a_deliberately_unlinked_nested_table() {
         version: 2
         tables:
           - name: report
-            xml_path: /
+            scope: /
             row: report
             fields:
               - {name: title, path: title, data_type: Utf8}
           - name: stations
-            xml_path: /report/stations
+            scope: /report/stations
             row: station
             links: []
             fields:
@@ -773,7 +773,7 @@ fn test_a_field_path_of_dot_reads_the_row_element() {
         version: 2
         tables:
           - name: values
-            xml_path: /data/values
+            scope: /data/values
             row: v
             fields:
               - {name: v, path: ".", data_type: Int32}
@@ -793,7 +793,7 @@ fn test_version_2_is_not_warned_that_a_missing_utf8_value_yields_empty() {
         version: 2
         tables:
           - name: items
-            xml_path: /data
+            scope: /data
             row: item
             fields:
               - {name: name, path: name, data_type: Utf8}
@@ -824,7 +824,7 @@ fn test_null_values_make_a_utf8_value_missing() {
         version: 2
         tables:
           - name: items
-            xml_path: /data
+            scope: /data
             row: item
             fields:
               - {name: s, path: s, data_type: Utf8, nullable: true, trim: true, null_values: ["N/A"]}
@@ -888,12 +888,12 @@ fn test_version_2_rejects_a_field_that_a_nested_table_captures() {
     let version_2 = r#"version: 2
 tables:
   - name: outer
-    xml_path: /r
+    scope: /r
     row: a
     fields:
       - {name: count, path: bs/@count, data_type: Int32, nullable: true}
   - name: inner
-    xml_path: /r/a/bs
+    scope: /r/a/bs
     row: b
     links: [{parent: outer}]
     fields:
@@ -961,7 +961,7 @@ fn test_version_2_rejects_a_field_outside_its_row() {
     let version_2 = r#"version: 2
 tables:
   - name: items
-    xml_path: /report/data
+    scope: /report/data
     row: item
     fields:
       - {name: label, path: /report/data/label, data_type: Utf8, nullable: true}
@@ -995,7 +995,7 @@ fn test_version_2_rejects_an_unknown_key() {
     let version_2 = r#"version: 2
 tables:
   - name: readings
-    xml_path: /report
+    scope: /report
     row: reading
     fields:
       - {name: pressure, path: value, data_type: Float64, scal: 100.0}
@@ -1098,7 +1098,7 @@ fn test_a_path_with_a_dot_segment_is_rejected() {
         version: 2
         tables:
           - name: stations
-            xml_path: /report/stations
+            scope: /report/stations
             row: ./station
             fields:
               - {name: id, path: "@id", data_type: Utf8}
@@ -1347,12 +1347,12 @@ tables:
 version: 2
 tables:
   - name: stations
-    xml_path: /report/stations
+    scope: /report/stations
     row: station
     fields:
       - {name: id, path: "@id", data_type: Int32}
   - name: measurements
-    xml_path: /report/stations/station/measurements
+    scope: /report/stations/station/measurements
     row: measurement
     links: [{parent: stations}]
     fields:
@@ -1759,7 +1759,7 @@ fn unmatched_field_detection_explains_itself_when_stopping_early() {
 
     // `stop_at_paths` guarantees that everything below the stop path captures
     // nothing, so strict detection reports it. The report is accurate; the
-    // default advice ("check the xml_path spellings") is not, so the message
+    // default advice ("check the path spellings") is not, so the message
     // has to name the real cause.
     let config: Config = yaml_serde::from_str(
         r#"
@@ -1813,7 +1813,7 @@ tables:
         .parse_slice(b"<data><item><value>1</value></item></data>")
         .unwrap_err();
     assert!(
-        err.to_string().contains("check the xml_path spellings"),
+        err.to_string().contains("check the path spellings"),
         "{err}"
     );
     assert!(!err.to_string().contains("stop_at_paths"), "{err}");

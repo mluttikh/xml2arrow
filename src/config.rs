@@ -114,7 +114,7 @@ pub struct ParserOptions {
     /// Whether to fail the parse when a configured field never captured a
     /// value anywhere in the document. Defaults to `false`.
     ///
-    /// The usual cause is a misspelled `xml_path`, whose symptom is otherwise
+    /// The usual cause is a misspelled path, whose symptom is otherwise
     /// a silently all-null or all-empty column — the config looks fine and the
     /// data looks wrong. With this enabled, every offending field is reported
     /// at once as [`Error::UnmatchedFields`](crate::errors::Error).
@@ -243,10 +243,10 @@ pub(crate) fn path_is_strictly_under(descendant: &str, ancestor: &str) -> bool {
     !paths_equal(descendant, ancestor) && path_is_under(descendant, ancestor)
 }
 
-/// Resolves a declared `row` against its table's `xml_path`.
+/// Resolves a declared `row` against its table's element.
 ///
 /// `"."` names the table element itself, a leading `/` means the path is
-/// already absolute, and anything else is relative to `xml_path`. All three
+/// already absolute, and anything else is relative to that element. All three
 /// land on a single trie node, which is what makes `version: 2`'s eventual
 /// switch to absolute-only a pure key rename rather than a semantic change.
 pub(crate) fn resolve_row_path(xml_path: &str, row: &str) -> String {
@@ -334,7 +334,8 @@ pub struct Config {
     ///
     /// `2` is configuration format version 2. Validation holds a config
     /// declaring it to that format: every table declares [`TableConfig::row`],
-    /// no table uses `levels`, every field uses `path` rather than `xml_path`,
+    /// no table uses `levels`, every table names its element with `scope` and
+    /// every field with `path`, rather than with `xml_path`,
     /// every key is one the configuration defines, every table nested inside
     /// another declares [`TableConfig::links`] — `links: []` when it
     /// deliberately has none — every field lies inside its table's row
@@ -390,13 +391,16 @@ impl Config {
     ///
     /// Checks performed:
     /// - Table names must be non-empty and unique across the configuration.
-    /// - Table `xml_path` values must be non-empty and unique (segment-wise):
-    ///   the path registry stores one table per path node, so a duplicate
-    ///   would silently starve the earlier table of rows.
+    /// - Each table names its element with exactly one of `scope` and
+    ///   `xml_path`, and those elements are non-empty and unique
+    ///   (segment-wise): the path registry stores one table per path node, so
+    ///   a duplicate would silently starve the earlier table of rows.
     /// - Field names must be non-empty and unique within each table.
-    /// - Field `xml_path` values must be non-empty.
-    /// - Field `xml_path` must be a descendant of (or equal to) the parent table's
-    ///   `xml_path`, compared per path segment. The root table `/` allows any field path.
+    /// - Each field names its location with exactly one of `path` and
+    ///   `xml_path`, and the location is non-empty.
+    /// - A field's location must be a descendant of (or equal to) its table's
+    ///   element, compared per path segment. The root table `/` allows any
+    ///   field path.
     /// - Scale/offset may only be used with Float32 and Float64 fields.
     /// - A version 1 config, which declares no `version:` or `version: 1`, sets
     ///   no key only version 2 defines: `row`, `links`, `row_id`, `path`,
@@ -404,7 +408,8 @@ impl Config {
     /// - When [`Config::version`] declares `2`, the config must be fully
     ///   migrated: every key is one the configuration defines, every table
     ///   declares `row:`, none uses `levels:`, every field uses `path:` rather
-    ///   than `xml_path:`, a table nested inside
+    ///   than `xml_path:`, every table names its element with `scope:`, a
+    ///   table nested inside
     ///   another declares `links:`, every field lies inside its table's row
     ///   element, and no field lies inside a table nested within its own.
     ///   These are checked last, so a config that is both
@@ -428,7 +433,7 @@ impl Config {
         }
         let mut table_names = HashSet::with_capacity(self.tables.len());
         for (table_idx, table) in self.tables.iter().enumerate() {
-            self.validate_table_identity(table, table_idx, &mut table_names)?;
+            Self::validate_table_name(table, &mut table_names)?;
             if self.is_version_1()
                 && let Some(key) = table.version_2_key()
             {
@@ -438,6 +443,7 @@ impl Config {
                 }
                 .into());
             }
+            self.validate_table_path(table, table_idx)?;
             self.validate_declared_row(table)?;
             self.validate_declared_links(table)?;
             self.validate_table_fields(table)?;
@@ -460,15 +466,12 @@ impl Config {
         matches!(self.version, None | Some(1))
     }
 
-    /// A table must be nameable and addressable: a non-empty name unique
-    /// across the config, and a non-empty `xml_path` no earlier table claims.
+    /// A table must be nameable: a non-empty name no earlier table claims.
     ///
     /// `table_names` accumulates across the caller's loop, which is why it is
     /// threaded through rather than rebuilt here.
-    fn validate_table_identity<'c>(
-        &'c self,
+    fn validate_table_name<'c>(
         table: &'c TableConfig,
-        table_idx: usize,
         table_names: &mut HashSet<&'c String>,
     ) -> Result<()> {
         if table.name.is_empty() {
@@ -480,8 +483,34 @@ impl Config {
             }
             .into());
         }
-        if table.xml_path.is_empty() {
-            return Err(ConfigIssue::EmptyTableXmlPath {
+        Ok(())
+    }
+
+    /// A table must be addressable: exactly one of `scope` and `xml_path`,
+    /// naming a non-empty element no earlier table claims.
+    ///
+    /// Checked after the version 1 key check, so a version 1 config that sets
+    /// `scope` hears which key it may not use rather than which one it lacks.
+    fn validate_table_path(&self, table: &TableConfig, table_idx: usize) -> Result<()> {
+        // `scope` and `xml_path` are two spellings of one element, so exactly
+        // one must be present, as for a field's `path` and `xml_path`.
+        let path = match (table.scope.as_deref(), table.xml_path.as_deref()) {
+            (Some(_), Some(_)) => {
+                return Err(ConfigIssue::TablePathConflict {
+                    table: table.name.clone(),
+                }
+                .into());
+            }
+            (None, None) => {
+                return Err(ConfigIssue::TablePathMissing {
+                    table: table.name.clone(),
+                }
+                .into());
+            }
+            (Some(path), None) | (None, Some(path)) => path,
+        };
+        if path.is_empty() {
+            return Err(ConfigIssue::EmptyTablePath {
                 table: table.name.clone(),
             }
             .into());
@@ -492,11 +521,11 @@ impl Config {
         // than a hash set of built keys) keeps `Parser::new` free of
         // per-table allocations; table counts are small.
         for earlier_table in &self.tables[..table_idx] {
-            if paths_equal(&earlier_table.xml_path, &table.xml_path) {
-                return Err(ConfigIssue::DuplicateTableXmlPath {
+            if paths_equal(earlier_table.path(), path) {
+                return Err(ConfigIssue::DuplicateTablePath {
                     table_a: earlier_table.name.clone(),
                     table_b: table.name.clone(),
-                    xml_path: table.xml_path.clone(),
+                    path: path.to_string(),
                 }
                 .into());
             }
@@ -548,11 +577,11 @@ impl Config {
                 }
                 .into());
             }
-            let row_path = resolve_row_path(&table.xml_path, row);
-            if !path_is_under(&row_path, &table.xml_path) {
+            let row_path = resolve_row_path(table.path(), row);
+            if !path_is_under(&row_path, table.path()) {
                 return Err(ConfigIssue::RowPathNotUnderTable {
                     table: table.name.clone(),
-                    table_path: table.xml_path.clone(),
+                    table_path: table.path().to_string(),
                     row: row.clone(),
                     row_path,
                 }
@@ -565,8 +594,7 @@ impl Config {
             // rejected loudly because *inference* handles this shape fine:
             // adding `row: "."` here would turn a working config into an
             // empty one.
-            if paths_equal(&row_path, &table.xml_path)
-                && path_segments(&table.xml_path).next().is_none()
+            if paths_equal(&row_path, table.path()) && path_segments(table.path()).next().is_none()
             {
                 return Err(ConfigIssue::RowIsRootTable {
                     table: table.name.clone(),
@@ -581,14 +609,14 @@ impl Config {
             // is popped before the row is finalized, so the row still
             // lands here.
             for other in &self.tables {
-                if path_is_strictly_under(&other.xml_path, &table.xml_path)
-                    && path_is_strictly_under(&row_path, &other.xml_path)
+                if path_is_strictly_under(other.path(), table.path())
+                    && path_is_strictly_under(&row_path, other.path())
                 {
                     return Err(ConfigIssue::RowPathCrossesTable {
                         table: table.name.clone(),
                         row_path,
                         nested_table: other.name.clone(),
-                        nested_table_path: other.xml_path.clone(),
+                        nested_table_path: other.path().to_string(),
                     }
                     .into());
                 }
@@ -777,7 +805,7 @@ impl Config {
                     .into());
                 }
                 (Some(p), None) | (None, Some(p)) if p.trim().is_empty() => {
-                    return Err(ConfigIssue::EmptyFieldXmlPath {
+                    return Err(ConfigIssue::EmptyFieldPath {
                         table: table.name.clone(),
                         field: field.name.clone(),
                     }
@@ -814,10 +842,10 @@ impl Config {
             // Field path must be under the table path, compared per
             // segment (the root table "/" has no segments and thus
             // accepts any field path).
-            if !path_is_under(&field_path, &table.xml_path) {
+            if !path_is_under(&field_path, table.path()) {
                 return Err(ConfigIssue::FieldPathNotUnderTable {
                     table: table.name.clone(),
-                    table_path: table.xml_path.clone(),
+                    table_path: table.path().to_string(),
                     field: field.name.clone(),
                     field_path: field_path.into_owned(),
                 }
@@ -977,6 +1005,11 @@ impl Config {
             }
         }));
         for table in &self.tables {
+            if table.xml_path.is_some() {
+                steps.push(MigrationStep::RenameTableXmlPath {
+                    table: table.name.clone(),
+                });
+            }
             if table.row.is_none() {
                 steps.push(MigrationStep::DeclareRow {
                     table: table.name.clone(),
@@ -1038,16 +1071,16 @@ impl Config {
     /// field's resolved path, or `None` when `table` receives them.
     ///
     /// A value is delivered to the fields of the innermost *open* table only,
-    /// and a table is open for as long as its `xml_path` element is. So when
-    /// another table's `xml_path` lies inside `table`'s and encloses the
+    /// and a table is open for as long as its element is. So when another
+    /// table's element lies inside `table`'s and encloses the
     /// field's location, that table is open whenever a value there arrives,
     /// and the field never receives one: its column is all null, `""`, or a
     /// `MissingRequiredField` error, however the document is written. The
     /// innermost such table is the one that captures the value, so it is the
     /// one named.
     ///
-    /// Compared by `xml_path` rather than by row element, because `xml_path`
-    /// is what opens and closes a table's scope. An attribute of the nested
+    /// Compared by the table's element rather than by its row element, because
+    /// that element is what opens and closes a table's scope. An attribute of the nested
     /// table's own element is inside it too: the table opens before its
     /// element's attributes are read.
     ///
@@ -1061,7 +1094,7 @@ impl Config {
         let mut nested = self
             .tables
             .iter()
-            .filter(|other| path_is_strictly_under(&other.xml_path, &table.xml_path))
+            .filter(|other| path_is_strictly_under(other.path(), table.path()))
             .peekable();
         nested.peek()?;
         let field_path = resolve_field_path(table, field)?;
@@ -1071,8 +1104,8 @@ impl Config {
             return None;
         }
         nested
-            .filter(|other| path_is_under(&field_path, &other.xml_path))
-            .max_by_key(|other| path_segments(&other.xml_path).count())
+            .filter(|other| path_is_under(&field_path, other.path()))
+            .max_by_key(|other| path_segments(other.path()).count())
             .map(|other| (field_path.into_owned(), other))
     }
 
@@ -1146,7 +1179,7 @@ impl Config {
     /// version: 2
     /// tables:
     ///   - name: items
-    ///     xml_path: /data
+    ///     scope: /data
     ///     row: item
     ///     fields:
     ///       - {name: value, path: value, data_type: Int32}
@@ -1310,11 +1343,15 @@ impl Config {
             .filter(|path| has_dot_segment(path))
             .map(|path| ("`parser_options.stop_at_paths`".to_string(), path.as_str()));
         let tables = self.tables.iter().flat_map(|table| {
-            let table_path = has_dot_segment(&table.xml_path).then(|| {
-                (
-                    format!("the xml_path of table '{}'", table.name),
-                    table.xml_path.as_str(),
-                )
+            let table_path = has_dot_segment(table.path()).then(|| {
+                // Named by the key the table actually sets, so the message
+                // points at the line the reader has to edit.
+                let key = if table.scope.is_some() {
+                    "scope"
+                } else {
+                    "xml_path"
+                };
+                (format!("the {key} of table '{}'", table.name), table.path())
             });
             let fields = table.fields.iter().filter_map(move |field| {
                 let xml_path = field.xml_path.as_deref()?;
@@ -1698,8 +1735,31 @@ pub enum RowId {
 pub struct TableConfig {
     /// The name of the table.
     pub name: String,
-    /// The XML path to the table elements. For example `/data/dataset/table`.
-    pub xml_path: String,
+    /// The absolute path of the element that scopes this table, and the
+    /// version 2 spelling of [`TableConfig::xml_path`].
+    ///
+    /// The element the path names does three things, which is why a table
+    /// states it rather than deriving it from [`TableConfig::row`]:
+    ///
+    /// - **It bounds the rows.** [`TableConfig::row`] resolves against it, and
+    ///   a row lies inside it.
+    /// - **It resets the counters.** An [`Link::index_of`] position restarts at
+    ///   every occurrence of this element, which is what makes a position
+    ///   local to a container rather than to the document.
+    /// - **It owns the values inside it.** A value is delivered to the
+    ///   innermost open table, so two tables may not name the same element.
+    ///
+    /// A table one level up therefore counts across a wider span, and a table
+    /// at its own row element counts nothing but itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// The version 1 spelling of [`TableConfig::scope`]. For example
+    /// `/data/dataset/table`.
+    ///
+    /// Version 2 replaces it with `scope`: renaming the key is a mechanical
+    /// change, because the value means the same under either name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xml_path: Option<String>,
     /// The element whose closing tag finalizes a row — **declared** instead of
     /// inferred. Version 2 only, where every table declares one.
     ///
@@ -1780,7 +1840,9 @@ impl TableConfig {
     /// than in one of its own: `Parser::new` validates, and its fixed cost is
     /// the whole parse for a small document.
     pub(crate) fn version_2_key(&self) -> Option<&'static str> {
-        if self.row.is_some() {
+        if self.scope.is_some() {
+            Some("scope")
+        } else if self.row.is_some() {
             Some("row")
         } else if self.links.is_some() {
             Some("links")
@@ -1798,11 +1860,15 @@ impl TableConfig {
     /// Leaves `row`, `links` and `row_id` unset, which is the pre-0.20
     /// behavior: row boundaries stay inferred and parent columns come from
     /// `levels`. Use [`TableConfig::builder`] to set any of them.
+    ///
+    /// The element is held as `xml_path`, the version 1 spelling;
+    /// [`ConfigBuilder::build`] moves it to `scope` for a version 2 config.
     #[must_use]
     pub fn new(name: &str, xml_path: &str, levels: Vec<String>, fields: Vec<FieldConfig>) -> Self {
         Self {
             name: name.to_string(),
-            xml_path: xml_path.to_string(),
+            scope: None,
+            xml_path: Some(xml_path.to_string()),
             levels,
             fields,
             row: None,
@@ -1810,6 +1876,17 @@ impl TableConfig {
             row_id: None,
             metadata: BTreeMap::new(),
         }
+    }
+
+    /// The element that scopes this table, whichever key spells it.
+    ///
+    /// Empty only for a config that sets neither, which validation rejects.
+    #[must_use]
+    pub(crate) fn path(&self) -> &str {
+        self.scope
+            .as_deref()
+            .or(self.xml_path.as_deref())
+            .unwrap_or_default()
     }
 
     /// Resolves [`TableConfig::row`] to an absolute path, or `None` when this
@@ -1821,7 +1898,7 @@ impl TableConfig {
     pub(crate) fn row_path(&self) -> Option<String> {
         self.row
             .as_deref()
-            .map(|row| resolve_row_path(&self.xml_path, row))
+            .map(|row| resolve_row_path(self.path(), row))
     }
 
     /// The path whose occurrences scope this table's rows: the declared row
@@ -1831,7 +1908,7 @@ impl TableConfig {
     /// ancestor of" means the same thing whether or not a table declares `row`.
     #[must_use]
     pub(crate) fn link_scope_path(&self) -> String {
-        self.row_path().unwrap_or_else(|| self.xml_path.clone())
+        self.row_path().unwrap_or_else(|| self.path().to_string())
     }
 
     /// Starts building a table configuration, adding levels and fields one at
@@ -1840,10 +1917,10 @@ impl TableConfig {
     /// Prefer this over [`TableConfig::new`] when the levels or fields are
     /// assembled incrementally; both are forward-compatible with future keys.
     #[must_use]
-    pub fn builder(name: &str, xml_path: &str) -> TableConfigBuilder {
+    pub fn builder(name: &str, path: &str) -> TableConfigBuilder {
         TableConfigBuilder {
             name: name.to_string(),
-            xml_path: xml_path.to_string(),
+            xml_path: path.to_string(),
             levels: Vec::new(),
             fields: Vec::new(),
             row: None,
@@ -1911,16 +1988,21 @@ impl ConfigBuilder {
     /// Returns [`Error::InvalidConfig`] (or [`Error::UnsupportedConversion`])
     /// for any violation listed on [`Config::validate`].
     ///
-    /// A field built with [`FieldConfigBuilder::new`] holds its location as
-    /// `xml_path`, the version 1 spelling. In a version 2 config, `build` moves
-    /// the location to `path`, the spelling that format has, so one builder
-    /// serves both, and a config written back out spells its fields as its
-    /// version does.
+    /// [`TableConfig::builder`] and [`FieldConfigBuilder::new`] hold an element
+    /// as `xml_path`, the version 1 spelling. In a version 2 config, `build`
+    /// moves a table's to `scope` and a field's to `path`, the spellings that
+    /// format has, so one builder serves both and a config written back out
+    /// spells its elements as its version does.
     pub fn build(mut self) -> Result<Config> {
         if self.version == Some(2) {
-            for field in self.tables.iter_mut().flat_map(|t| t.fields.iter_mut()) {
-                if field.path.is_none() {
-                    field.path = field.xml_path.take();
+            for table in &mut self.tables {
+                if table.scope.is_none() {
+                    table.scope = table.xml_path.take();
+                }
+                for field in &mut table.fields {
+                    if field.path.is_none() {
+                        field.path = field.xml_path.take();
+                    }
                 }
             }
         }
@@ -2021,7 +2103,8 @@ impl TableConfigBuilder {
     pub fn build(self) -> TableConfig {
         TableConfig {
             name: self.name,
-            xml_path: self.xml_path,
+            scope: None,
+            xml_path: Some(self.xml_path),
             levels: self.levels,
             fields: self.fields,
             row: self.row,
@@ -2497,7 +2580,7 @@ mod tests {
 version: 2
 tables:
   - name: items
-    xml_path: /data
+    scope: /data
     row: item
     fields:
       - {name: value, path: value, data_type: Int32}
@@ -2841,7 +2924,7 @@ tables:
     }
 
     #[test]
-    fn test_empty_table_xml_path_rejected() {
+    fn test_empty_table_path_rejected() {
         let config = Config {
             version: None,
             parser_options: Default::default(),
@@ -2851,7 +2934,7 @@ tables:
         };
         let err = config.validate().unwrap_err();
         assert!(matches!(err, Error::InvalidConfig { .. }));
-        assert!(err.to_string().contains("empty xml_path"));
+        assert!(err.to_string().contains("names no element"));
     }
 
     #[test]
@@ -2937,7 +3020,7 @@ tables:
     }
 
     #[test]
-    fn test_empty_field_xml_path_rejected() {
+    fn test_empty_field_path_rejected() {
         let config = Config {
             version: None,
             parser_options: Default::default(),
@@ -2956,7 +3039,7 @@ tables:
         };
         let err = config.validate().unwrap_err();
         assert!(matches!(err, Error::InvalidConfig { .. }));
-        assert!(err.to_string().contains("empty xml_path"));
+        assert!(err.to_string().contains("names no location"));
     }
 
     #[test]
@@ -2979,7 +3062,7 @@ tables:
         };
         let err = config.validate().unwrap_err();
         assert!(matches!(err, Error::InvalidConfig { .. }));
-        assert!(err.to_string().contains("not under table"));
+        assert!(err.to_string().contains("not inside table"));
     }
 
     /// The whole reason `path_is_strictly_under` exists as its own name: it
@@ -3033,7 +3116,7 @@ tables:
         };
         let err = config.validate().unwrap_err();
         assert!(matches!(err, Error::InvalidConfig { .. }));
-        assert!(err.to_string().contains("not under table"));
+        assert!(err.to_string().contains("not inside table"));
     }
 
     #[test]
@@ -3059,7 +3142,7 @@ tables:
     }
 
     #[test]
-    fn test_duplicate_table_xml_path_rejected() {
+    fn test_duplicate_table_path_rejected() {
         // The path registry stores one table per node; a duplicate path
         // would silently starve the earlier table of rows.
         let config = Config {
@@ -3074,13 +3157,13 @@ tables:
         };
         let err = config.validate().unwrap_err();
         assert!(matches!(err, Error::InvalidConfig { .. }));
-        assert!(err.to_string().contains("share the same xml_path"));
+        assert!(err.to_string().contains("name the same element"));
         assert!(err.to_string().contains("'a'"));
         assert!(err.to_string().contains("'b'"));
     }
 
     #[test]
-    fn test_duplicate_table_xml_path_detected_across_spellings() {
+    fn test_duplicate_table_path_detected_across_spellings() {
         // "/data", "data" and "/data/" all resolve to the same registry
         // node, so they must count as duplicates regardless of spelling.
         let config = Config {
@@ -3094,7 +3177,7 @@ tables:
             ],
         };
         let err = config.validate().unwrap_err();
-        assert!(err.to_string().contains("share the same xml_path"));
+        assert!(err.to_string().contains("name the same element"));
     }
 
     #[test]
@@ -3369,7 +3452,7 @@ tables:
               validate_attributes: false
             tables:
               - name: t
-                xml_path: /a
+                scope: /a
                 row: item
                 fields:
                   - {name: v, path: v, data_type: Float64, scale: 2.0}
@@ -3790,7 +3873,7 @@ tables:
             version: 2
             tables:
               - name: t
-                xml_path: /a
+                scope: /a
                 row: item
                 fields:
                   - {name: v, path: v, data_type: Int32}
@@ -4046,6 +4129,49 @@ tables:
                     }
                 })
             ));
+        }
+
+        /// Set after building, because `ConfigBuilder::build` moves a builder's
+        /// `xml_path` to `scope` for a version 2 config.
+        #[test]
+        fn a_table_spelled_xml_path_is_rejected() {
+            let mut config = Config::builder()
+                .version(2)
+                .table(migrated_root())
+                .build()
+                .unwrap();
+            let table = &mut config.tables[0];
+            table.scope = None;
+            table.xml_path = Some("/report/stations".into());
+            assert!(matches!(
+                config.validate(),
+                Err(Error::InvalidConfig {
+                    reason: ConfigIssue::ReplacedKey {
+                        key: "xml_path",
+                        replacement: "scope",
+                        ..
+                    }
+                })
+            ));
+        }
+
+        /// `scope` and `xml_path` are two spellings of one element, so a table
+        /// sets exactly one, as a field does for `path` and `xml_path`.
+        #[rstest]
+        #[case::both(Some("/r"), Some("/r"), "sets both")]
+        #[case::neither(None, None, "sets neither")]
+        fn a_table_must_name_its_element_exactly_once(
+            #[case] scope: Option<&str>,
+            #[case] xml_path: Option<&str>,
+            #[case] expected: &str,
+        ) {
+            let mut table = migrated_root();
+            table.scope = scope.map(String::from);
+            table.xml_path = xml_path.map(String::from);
+            let mut config = Config::builder().version(2).build().unwrap();
+            config.tables.push(table);
+            let err = config.validate().unwrap_err();
+            assert!(err.to_string().contains(expected), "{err}");
         }
 
         /// Set after building, because `ConfigBuilder::build` moves a builder's
@@ -4451,17 +4577,31 @@ tables:
             );
         }
 
-        /// A builder field is spelled `xml_path`, and a version 2 config
-        /// spells it `path`, so that a config built in code writes out in the
-        /// format it declares.
+        /// A builder holds an element as `xml_path`, and a version 2 config
+        /// spells a table's `scope` and a field's `path`, so that a config
+        /// built in code writes out in the format it declares.
         #[test]
-        fn building_a_version_2_config_moves_field_locations_to_path() {
+        fn building_a_version_2_config_moves_locations_to_the_version_2_keys() {
             let config = Config::builder()
                 .version(2)
-                .table(migrated_root())
+                .table(
+                    TableConfig::builder("stations", "/report/stations")
+                        .row("station")
+                        .field(
+                            FieldConfigBuilder::new("id", "@id", DType::Utf8)
+                                .build()
+                                .unwrap(),
+                        )
+                        .build(),
+                )
                 .build()
                 .unwrap();
-            let field = &config.tables[0].fields[0];
+            let table = &config.tables[0];
+            assert_eq!(
+                (table.scope.as_deref(), table.xml_path.as_deref()),
+                (Some("/report/stations"), None)
+            );
+            let field = &table.fields[0];
             assert_eq!(
                 (field.path.as_deref(), field.xml_path.as_deref()),
                 (Some("@id"), None)
@@ -4509,7 +4649,7 @@ tables:
 version: 2
 tables:
   - name: readings
-    xml_path: /report/readings
+    scope: /report/readings
     row: reading
     metadata: {source: station export, revision: 1.50}
     fields:
@@ -4571,7 +4711,7 @@ tables:
         #[case::a_mapping("owner: {team: data}")]
         fn a_value_that_is_not_a_scalar_is_rejected(#[case] entry: &str) {
             let yaml = format!(
-                "version: 2\ntables:\n  - name: t\n    xml_path: /r\n    row: i\n    metadata:\n      {entry}\n    fields: [{{name: v, path: v, data_type: Int32}}]\n"
+                "version: 2\ntables:\n  - name: t\n    scope: /r\n    row: i\n    metadata:\n      {entry}\n    fields: [{{name: v, path: v, data_type: Int32}}]\n"
             );
             let err = Config::from_yaml_str(&yaml).unwrap_err();
             assert!(matches!(err, Error::Yaml(_)), "{err:?}");
@@ -4892,6 +5032,7 @@ tables:
 
         #[rstest]
         #[case::defaults("defaults: {trim: true}\n", "", "}", "the top level", "defaults")]
+        #[case::scope("", "    scope: /r/s\n", "}", "table 't'", "scope")]
         #[case::row("", "    row: station\n", "}", "table 't'", "row")]
         #[case::links("", "    links: []\n", "}", "table 't'", "links")]
         #[case::row_id("", "    row_id: false\n", "}", "table 't'", "row_id")]
@@ -5092,7 +5233,7 @@ tables:
         #[test]
         fn a_whole_dot_and_names_with_dots_are_accepted() {
             let config = Config::from_yaml_str(
-                "version: 2\ntables:\n  - {name: t, xml_path: /r/s.t, row: \".\", fields: [{name: v, path: \".\", data_type: Utf8}, {name: w, path: a.b/c.., data_type: Utf8}]}\n",
+                "version: 2\ntables:\n  - {name: t, scope: /r/s.t, row: \".\", fields: [{name: v, path: \".\", data_type: Utf8}, {name: w, path: a.b/c.., data_type: Utf8}]}\n",
             );
             assert!(config.is_ok(), "{config:?}");
         }

@@ -51,14 +51,14 @@ A document with stations, each holding readings:
 version: 2
 tables:
   - name: stations
-    xml_path: /report/stations      # the element that contains the rows
+    scope: /report/stations         # the element that scopes the rows
     row: station                    # one row per <station>
     fields:
       - {name: id,   path: "@id", data_type: Utf8}
       - {name: name, path: name,  data_type: Utf8}
 
   - name: readings
-    xml_path: /report/stations/station/readings
+    scope: /report/stations/station/readings
     row: reading
     links:
       - parent: stations            # which station each reading belongs to
@@ -78,7 +78,7 @@ stations                     readings
                              +--------------+-------+-------+
 ```
 
-Each table says where its rows are (`xml_path` and `row`), each field says where
+Each table says where its rows are (`scope` and `row`), each field says where
 its value is (`path`, relative to the row), and a table inside another table
 says how the two relate (`links`). Here `readings._stations_id` joins to
 `stations._id`.
@@ -109,7 +109,7 @@ word. Write notes as YAML comments, and values that should reach the output as
 | Key | Required | Meaning |
 |---|---|---|
 | `name` | yes | The table's name in the output, and how links refer to it. |
-| `xml_path` | yes | The absolute path of the element that contains the rows. `/` is the document itself. |
+| `scope` | yes | The absolute path of the element that scopes the rows. `/` is the document itself. See [`scope`](#scope). |
 | `row` | yes | The element that makes one row. See [`row`](#row). |
 | `links` | when nested | How the table relates to the table it sits inside. See [Linking nested tables](#linking-nested-tables). |
 | `row_id` | no | This table's own key column. See [Column names](#column-names). |
@@ -118,6 +118,23 @@ word. Write notes as YAML comments, and values that should reach the output as
 
 A table with an empty `fields: []` list produces no output.
 
+### `scope`
+
+`scope` names the element the table lives in. It does three things, which is why
+a table states it rather than deriving it from `row`:
+
+- **It bounds the rows.** `row` resolves against it, and every field of a row
+  lies inside it.
+- **It resets the positions.** An [`index_of:`](#index_of) position restarts at
+  every occurrence of this element, so a position is local to a container rather
+  than to the document. The same rows scoped one level up count across a wider
+  span.
+- **It owns the values inside it.** A value goes to the innermost table whose
+  scope is open, so no two tables may name the same element, and a field may not
+  sit inside a nested table's scope.
+
+Version 1 calls this key `xml_path`. The value means the same under either name.
+
 ### `row`
 
 A row ends when its row element closes, and every field of the row takes its
@@ -125,9 +142,9 @@ value from inside that element.
 
 | `row:` | Resolves to | Typical use |
 |---|---|---|
-| `station` | `<xml_path>/station` | one row per repeating child element |
-| `group/station` | `<xml_path>/group/station` | a repeating element further down |
-| `"."` | the `xml_path` element itself | one row per occurrence of `xml_path`, such as a header section |
+| `station` | `<scope>/station` | one row per repeating child element |
+| `group/station` | `<scope>/group/station` | a repeating element further down |
+| `"."` | the `scope` element itself | one row per occurrence of `scope`, such as a header section |
 | `/report/stations/station` | as written | absolute |
 
 **A leading slash is what makes a path absolute.** `report/stations/station` is
@@ -135,10 +152,10 @@ relative. The same rule applies to a field's `path`.
 
 These are checked when the config is loaded:
 
-- `row` must resolve to `xml_path` or to an element below it.
-- No other table may sit between a table's `xml_path` and its row element. The
+- `row` must resolve to `scope` or to an element below it.
+- No other table may sit between a table's `scope` and its row element. The
   inner table would take the rows.
-- A table with `xml_path: /` cannot use `row: "."`, because the document itself
+- A table with `scope: /` cannot use `row: "."`, because the document itself
   never closes. Name the document element instead, as in `row: report`.
 - No path has a `.` or `..` segment, since no element can have that name. `"."`
   on its own, as above, is the one exception; write `row: station`, not
@@ -176,7 +193,7 @@ A path has no `.` or `..` segments, and one that does is rejected when the
 config is loaded: no element can have that name, so the path would match
 nothing. `"."` on its own is the row element, a value inside the row needs no
 `./`, and a value elsewhere is written absolutely. The same holds for
-`index_of:`, a table's `xml_path` and `stop_at_paths`.
+`index_of:`, a table's `scope` and `stop_at_paths`.
 
 A field must lie inside its row element. A field whose absolute path lies outside
 it is rejected when the config is loaded: its value would attach to whichever
@@ -185,26 +202,26 @@ rest empty. Give values from elsewhere in the document, such as a header, a
 table of their own, linked with `parent:` when it encloses the rows.
 
 That leaves one value with no version 2 spelling: an attribute or text of the
-`xml_path` element itself, such as `id` in `<data id="D">` around `<item>` rows.
+`scope` element itself, such as `id` in `<data id="D">` around `<item>` rows.
 It is outside every row of that table except with `row: "."`, and a table
 enclosing that table cannot read it either, as the next paragraph explains. When
 the rows sit in a wrapper of their own, as in `<data id="D"><items><item/>`, a
 table rowed at `<data>` can read `id`, and the table at `<items>` can link to
 it.
 
-A field cannot lie inside the `xml_path` of another table nested inside its own
-table. The nested table captures every value inside its `xml_path`, so the field
+A field cannot lie inside the `scope` of another table nested inside its own
+table. The nested table captures every value inside its scope, so the field
 would never receive one, and a config with such a field is rejected when it is
 loaded, with a message naming the nested table:
 
 ```yaml
   - name: stations
-    xml_path: /report/stations
+    scope: /report/stations
     row: station
     fields:
       - {name: value, path: readings/reading/value, data_type: Float64}  # rejected
   - name: readings
-    xml_path: /report/stations/station/readings    # captures every value inside it
+    scope: /report/stations/station/readings       # captures every value inside it
     row: reading
     links:
       - parent: stations
@@ -276,7 +293,7 @@ defaults:
   null_values: ["N/A"]
 tables:
   - name: readings
-    xml_path: /report/readings
+    scope: /report/readings
     row: reading
     fields:
       - {name: value,   path: value,   data_type: Float64, nullable: true}
@@ -336,7 +353,7 @@ The path must be the absolute path of a table's row element: an enclosing
 table's, as here, or the table's own, which gives each row its position among
 its siblings.
 
-The position restarts at 0 in every occurrence of that table's `xml_path`, so
+The position restarts at 0 in every occurrence of that table's `scope`, so
 **it is not a join key** when that element repeats:
 
 ```xml
@@ -393,7 +410,7 @@ a Parquet file written from the batches or a pyarrow table.
 
 ```yaml
   - name: readings
-    xml_path: /report/stations/station/readings
+    scope: /report/stations/station/readings
     row: reading
     metadata: {source: station export, revision: 3}
     fields:
@@ -463,8 +480,8 @@ parser_options:                     # optional
   validate_attributes: <bool>       # default true
 tables:
   - name: <string>
-    xml_path: <absolute path>       # the element that contains the rows
-    row: <path>                     # ".", relative to xml_path, or absolute
+    scope: <absolute path>          # the element that scopes the rows
+    row: <path>                     # ".", relative to scope, or absolute
     links:                          # required when nested; [] for no link
       - parent: <table name>        # UInt64 join key
         name: <column>              # default _<table>_id

@@ -24,6 +24,7 @@ Every config written for xml2arrow 0.19 or earlier is version 1.
 
 | | Version 1 | Version 2 |
 |---|---|---|
+| Where a table's rows live | `xml_path:` | `scope:`, the same value under a name that says what it does |
 | Where a row ends | inferred from the configured fields | declared with `row:` |
 | Where a field's value is | `xml_path:`, absolute | `path:`, relative to the row or absolute |
 | How nested tables relate | `levels:` position columns | `links:`, with join keys or positions |
@@ -115,7 +116,7 @@ step by step.
 | Key | Required | Meaning |
 |---|---|---|
 | `name` | yes | The table's name in the output. |
-| `xml_path` | yes | The absolute path of the element whose children are rows. `/` is the document itself. |
+| `xml_path` | yes | The absolute path of the element whose children are rows. `/` is the document itself. Version 2 calls this key `scope`. |
 | `levels` | no | Position columns. See [`levels`](#levels). Required before 0.20. |
 | `fields` | yes | The columns. See [Fields](#fields). |
 
@@ -212,8 +213,8 @@ value (`ImplicitEmptyString`).
 
 Version 1 is the format xml2arrow 0.19 read, and a config is version 1 or
 version 2 as a whole. A version 1 config that sets a key only version 2 has
-(`row`, `path`, `links`, `row_id`, `defaults`, `metadata` or a value policy) is
-rejected when it is loaded:
+(`scope`, `row`, `path`, `links`, `row_id`, `defaults`, `metadata` or a value
+policy) is rejected when it is loaded:
 
 ```text
 The key 'row:' in table 'header' is part of configuration format version 2; declare `version: 2` at the top of the config to use it
@@ -248,9 +249,10 @@ For the example config:
 
 ```text
 This config uses configuration format version 1, which is deprecated. Before
-it can declare `version: 2`: 3 tables must declare `row:` rather than infer
-their rows (header, stations, readings); 2 tables must replace `levels:` with
-`links:` (stations, readings); 6 fields must rename the `xml_path:` key to
+it can declare `version: 2`: 3 tables must rename the `xml_path:` key to
+`scope:` (header, stations, readings); 3 tables must declare `row:` rather than
+infer their rows (header, stations, readings); 2 tables must replace `levels:`
+with `links:` (stations, readings); 6 fields must rename the `xml_path:` key to
 `path:` (header.title, header.created, stations.id, …). Declaring `version: 2`
 also changes two defaults: `Utf8` values are trimmed, and a missing
 non-nullable `Utf8` value is an error rather than ""

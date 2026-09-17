@@ -12,13 +12,13 @@
 version: 2
 tables:
   - name: stations
-    xml_path: /report/stations
+    scope: /report/stations
     row: station
     fields:
       - {name: site, path: "@site", data_type: Utf8}
       - {name: note, path: note, data_type: Utf8, on_missing: empty}
   - name: measurements
-    xml_path: /report/stations/station/measurements
+    scope: /report/stations/station/measurements
     row: m
     links:
       - parent: stations

@@ -293,7 +293,8 @@ pub xml2arrow::config::TableConfig::metadata: alloc::collections::btree::map::BT
 pub xml2arrow::config::TableConfig::name: alloc::string::String
 pub xml2arrow::config::TableConfig::row: core::option::Option<alloc::string::String>
 pub xml2arrow::config::TableConfig::row_id: core::option::Option<xml2arrow::config::RowId>
-pub xml2arrow::config::TableConfig::xml_path: alloc::string::String
+pub xml2arrow::config::TableConfig::scope: core::option::Option<alloc::string::String>
+pub xml2arrow::config::TableConfig::xml_path: core::option::Option<alloc::string::String>
 impl xml2arrow::config::TableConfig
 pub fn xml2arrow::config::TableConfig::builder(&str, &str) -> xml2arrow::config::TableConfigBuilder
 pub fn xml2arrow::config::TableConfig::new(&str, &str, alloc::vec::Vec<alloc::string::String>, alloc::vec::Vec<xml2arrow::config::FieldConfig>) -> Self
@@ -372,20 +373,20 @@ pub xml2arrow::errors::ConfigIssue::DuplicateFieldName::field: alloc::string::St
 pub xml2arrow::errors::ConfigIssue::DuplicateFieldName::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::DuplicateTableName
 pub xml2arrow::errors::ConfigIssue::DuplicateTableName::name: alloc::string::String
-pub xml2arrow::errors::ConfigIssue::DuplicateTableXmlPath
-pub xml2arrow::errors::ConfigIssue::DuplicateTableXmlPath::table_a: alloc::string::String
-pub xml2arrow::errors::ConfigIssue::DuplicateTableXmlPath::table_b: alloc::string::String
-pub xml2arrow::errors::ConfigIssue::DuplicateTableXmlPath::xml_path: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::DuplicateTablePath
+pub xml2arrow::errors::ConfigIssue::DuplicateTablePath::path: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::DuplicateTablePath::table_a: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::DuplicateTablePath::table_b: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::EmptyFieldName
 pub xml2arrow::errors::ConfigIssue::EmptyFieldName::table: alloc::string::String
-pub xml2arrow::errors::ConfigIssue::EmptyFieldXmlPath
-pub xml2arrow::errors::ConfigIssue::EmptyFieldXmlPath::field: alloc::string::String
-pub xml2arrow::errors::ConfigIssue::EmptyFieldXmlPath::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::EmptyFieldPath
+pub xml2arrow::errors::ConfigIssue::EmptyFieldPath::field: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::EmptyFieldPath::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::EmptyRowPath
 pub xml2arrow::errors::ConfigIssue::EmptyRowPath::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::EmptyTableName
-pub xml2arrow::errors::ConfigIssue::EmptyTableXmlPath
-pub xml2arrow::errors::ConfigIssue::EmptyTableXmlPath::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::EmptyTablePath
+pub xml2arrow::errors::ConfigIssue::EmptyTablePath::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::FieldInsideNestedTable
 pub xml2arrow::errors::ConfigIssue::FieldInsideNestedTable::field: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::FieldInsideNestedTable::field_path: alloc::string::String
@@ -461,6 +462,10 @@ pub xml2arrow::errors::ConfigIssue::RowPathNotUnderTable::table: alloc::string::
 pub xml2arrow::errors::ConfigIssue::RowPathNotUnderTable::table_path: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::SingleTableRequired
 pub xml2arrow::errors::ConfigIssue::SingleTableRequired::output_tables: usize
+pub xml2arrow::errors::ConfigIssue::TablePathConflict
+pub xml2arrow::errors::ConfigIssue::TablePathConflict::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::TablePathMissing
+pub xml2arrow::errors::ConfigIssue::TablePathMissing::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::UnknownKey
 pub xml2arrow::errors::ConfigIssue::UnknownKey::key: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::UnknownKey::location: alloc::string::String
@@ -683,6 +688,8 @@ pub xml2arrow::lint::MigrationStep::RemoveUnknownKey::location: alloc::string::S
 pub xml2arrow::lint::MigrationStep::RenameFieldXmlPath
 pub xml2arrow::lint::MigrationStep::RenameFieldXmlPath::field: alloc::string::String
 pub xml2arrow::lint::MigrationStep::RenameFieldXmlPath::table: alloc::string::String
+pub xml2arrow::lint::MigrationStep::RenameTableXmlPath
+pub xml2arrow::lint::MigrationStep::RenameTableXmlPath::table: alloc::string::String
 pub xml2arrow::lint::MigrationStep::ReplaceLevels
 pub xml2arrow::lint::MigrationStep::ReplaceLevels::table: alloc::string::String
 impl core::clone::Clone for xml2arrow::lint::MigrationStep
@@ -1337,7 +1344,8 @@ pub xml2arrow::TableConfig::metadata: alloc::collections::btree::map::BTreeMap<a
 pub xml2arrow::TableConfig::name: alloc::string::String
 pub xml2arrow::TableConfig::row: core::option::Option<alloc::string::String>
 pub xml2arrow::TableConfig::row_id: core::option::Option<xml2arrow::config::RowId>
-pub xml2arrow::TableConfig::xml_path: alloc::string::String
+pub xml2arrow::TableConfig::scope: core::option::Option<alloc::string::String>
+pub xml2arrow::TableConfig::xml_path: core::option::Option<alloc::string::String>
 impl xml2arrow::config::TableConfig
 pub fn xml2arrow::config::TableConfig::builder(&str, &str) -> xml2arrow::config::TableConfigBuilder
 pub fn xml2arrow::config::TableConfig::new(&str, &str, alloc::vec::Vec<alloc::string::String>, alloc::vec::Vec<xml2arrow::config::FieldConfig>) -> Self

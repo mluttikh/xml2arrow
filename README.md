@@ -65,14 +65,14 @@ where each column's value is:
 version: 2
 tables:
   - name: stations
-    xml_path: /report/stations      # the element that contains the rows
+    scope: /report/stations         # the element the rows live in
     row: station                    # one row per <station>
     fields:
       - {name: id,   path: "@id", data_type: Utf8}
       - {name: name, path: name,  data_type: Utf8}
 
   - name: readings
-    xml_path: /report/stations/station/readings
+    scope: /report/stations/station/readings
     row: reading
     links:
       - parent: stations            # adds _stations_id, which joins to stations._id
@@ -81,8 +81,10 @@ tables:
       - {name: value, path: value,   data_type: Float64}
 ```
 
+- **`scope`** names the element the rows live in. It also bounds what the table
+  captures, and resets `index_of:` positions at every occurrence.
 - **`row`** names the element that makes one row: `station` for one row per
-  `<station>`, or `"."` for one row per `xml_path` element, such as a header.
+  `<station>`, or `"."` for one row per `scope` element, such as a header.
 - **`path`** is relative to the row element. A leading slash makes it absolute,
   and `@` marks an attribute.
 - **`links`** relates a table to the table it sits inside. `parent:` adds a join
@@ -416,7 +418,7 @@ three linked Arrow tables.
 version: 2
 tables:
   - name: report
-    xml_path: /
+    scope: /
     row: report
     fields:
       - {name: title,         path: header/title,         data_type: Utf8}
@@ -424,7 +426,7 @@ tables:
       - {name: creation_time, path: header/creation_time, data_type: Utf8}
 
   - name: stations
-    xml_path: /report/monitoring_stations
+    scope: /report/monitoring_stations
     row: monitoring_station
     links: []                   # inside report's row, but needs no link to it
     fields:
@@ -436,7 +438,7 @@ tables:
       - {name: install_date, path: metadata/install_date,    data_type: Utf8}
 
   - name: measurements
-    xml_path: /report/monitoring_stations/monitoring_station/measurements
+    scope: /report/monitoring_stations/monitoring_station/measurements
     row: measurement
     links:
       - parent: stations

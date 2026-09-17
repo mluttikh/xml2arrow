@@ -16,7 +16,7 @@ Everything here falls into five sections, and only the first is mandatory:
 
 If you construct configs with `TableConfig::new` / `FieldConfigBuilder` and
 parse with `Parser`, the required work is **nothing** unless you *read*
-`FieldConfig::xml_path` — skip to §2.
+`TableConfig::xml_path` or `FieldConfig::xml_path` — skip to §2.
 
 ---
 
@@ -62,14 +62,19 @@ let mut options = ParserOptions::default();
 options.trim_text = true;
 ```
 
-### FieldConfig::xml_path is now an Option
+### `xml_path` is now an Option on both config structs
 
-`FieldConfig` gained `path`, and the two are alternative spellings of one
-location, so `xml_path` became optional:
+`TableConfig` gained `scope` and `FieldConfig` gained `path`, each an
+alternative spelling of the same element, so `xml_path` became optional on both:
 
 ```rust
+// TableConfig
 pub xml_path: Option<String>,   // was String
-pub path:     Option<String>,   // new
+pub scope:    Option<String>,   // new, the version 2 key
+
+// FieldConfig
+pub xml_path: Option<String>,   // was String
+pub path:     Option<String>,   // new, the version 2 key
 ```
 
 **Nothing changes for YAML configs**, and nothing changes for code that builds
@@ -81,11 +86,14 @@ println!("{}", field.xml_path);
 
 // after — a version 1 config sets `xml_path`, a version 2 config sets `path`
 println!("{}", field.path.as_deref().or(field.xml_path.as_deref()).unwrap_or(""));
+// the same for a table, whose version 2 key is `scope`
+println!("{}", table.scope.as_deref().or(table.xml_path.as_deref()).unwrap_or(""));
 ```
 
-`FieldConfigBuilder::new(name, path, dtype)` still populates `xml_path`, so a
-version 1 config built in code is unchanged. When the config declares
-`version: 2`, `ConfigBuilder::build` moves each field's location to `path`.
+`TableConfig::new`, `TableConfig::builder` and `FieldConfigBuilder::new` still
+populate `xml_path`, so a version 1 config built in code is unchanged. When the
+config declares `version: 2`, `ConfigBuilder::build` moves each element to the
+version 2 key.
 
 ### DType
 
@@ -170,6 +178,7 @@ tables:
 |---|---|---|
 | rows inferred from the configured fields | `row:` | adding a field could change a table's row count |
 | `levels:` position columns | `links:`: `parent:` join keys, or `index_of:` positions | positions start again in every container, so a join on them goes wrong when a container repeats |
+| `xml_path:` on a table | `scope:`, the same value | the key names what the element does: it scopes the rows, the positions and the values |
 | `xml_path:` on a field, absolute | `path:`, relative to the row or absolute | the full path no longer has to be repeated on every field |
 | `Utf8` whitespace kept; a missing non-nullable `Utf8` value is `""` | trimmed; an error | both depended on the column's type rather than on the config |
 | no per-field control | `trim`, `on_missing`, `on_invalid`, `on_repeat`, `null_values`, and `defaults:` | |
@@ -177,8 +186,8 @@ tables:
 **An existing config needs no change.** A config without `version: 2` is
 version 1, and parses exactly as before; the one visible change is the
 deprecation notice described in §4. A config is version 1 or version 2 as a
-whole: `row:`, `path:`, `links:`, `row_id:`, `metadata:`, `defaults:` and the
-value policies are version 2 keys, and a version 1 config that sets one is
+whole: `scope:`, `row:`, `path:`, `links:`, `row_id:`, `metadata:`,
+`defaults:` and the value policies are version 2 keys, and a version 1 config that sets one is
 rejected when it is loaded, with a message naming the key. `levels:` is no
 longer required in version 1.
 
@@ -210,6 +219,7 @@ These all keep working until 1.0.
 | `parse_xml(reader, &config)` | `Parser::new(&config)?.parse(reader)` |
 | `parse_xml_slice(xml, &config)` | `Parser::new(&config)?.parse_slice(xml)` |
 | `parser.parse_streaming(reader, opts, sink)` | `for item in parser.parse_batches(reader, opts)` |
+| `xml_path:` on a **table** | `scope:` in version 2 — a key rename ([converting by hand](docs/migrating-to-version-2.md#converting-by-hand)) |
 | `xml_path:` on a **field** | `path:` in version 2 — a key rename for absolute values ([converting by hand](docs/migrating-to-version-2.md#converting-by-hand)) |
 
 **Every version 1 config now carries a deprecation notice** in `Config::lint()`
@@ -220,9 +230,10 @@ structured data for tooling (`Lint::ConfigVersion1 { steps }`, each a
 
 ```text
 This config uses configuration format version 1, which is deprecated. Before
-it can declare `version: 2`: 3 tables must declare `row:` rather than infer
-their rows (header, stations, readings); 2 tables must replace `levels:` with
-`links:` (stations, readings); 6 fields must rename the `xml_path:` key to
+it can declare `version: 2`: 3 tables must rename the `xml_path:` key to
+`scope:` (header, stations, readings); 3 tables must declare `row:` rather than
+infer their rows (header, stations, readings); 2 tables must replace `levels:`
+with `links:` (stations, readings); 6 fields must rename the `xml_path:` key to
 `path:` (header.title, header.created, stations.id, …). Declaring `version: 2`
 also changes two defaults: `Utf8` values are trimmed, and a missing
 non-nullable `Utf8` value is an error rather than ""

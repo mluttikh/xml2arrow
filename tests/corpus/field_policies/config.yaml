@@ -7,7 +7,7 @@ defaults:
   on_repeat: last
 tables:
   - name: items
-    xml_path: /report
+    scope: /report
     row: item
     fields:
       - name: n

@@ -15,7 +15,7 @@
 //! version: 2
 //! tables:
 //!   - name: measurements
-//!     xml_path: /report/measurements
+//!     scope: /report/measurements
 //!     row: measurement
 //!     fields:
 //!       - {name: id,    path: "@id",  data_type: UInt32}

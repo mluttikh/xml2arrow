@@ -14,7 +14,8 @@
 //!    declares `row:` naming that element: it is the element that already ended
 //!    every row. A table whose rows end at several child elements, or at none,
 //!    has no such spelling.
-//! 2. **Field paths.** `xml_path:` becomes `path:` with the same absolute value.
+//! 2. **Paths.** A table's `xml_path:` becomes `scope:`, and a field's becomes
+//!    `path:`, each with the same value.
 //! 3. **Levels.** Each `levels` entry becomes an `index_of:` link naming the row
 //!    element of the table whose rows it counts, with `name:` keeping the
 //!    `<level>` column name, so the column and its values are unchanged. A
@@ -38,8 +39,8 @@
 //! Two kinds of field are never moved, because version 2 rejects both and
 //! every way to satisfy it changes the output:
 //!
-//! - a field inside the `xml_path` of a table nested within its own. That
-//!   table captures every value there, so the field is never filled.
+//! - a field inside the element of a table nested within its own. That table
+//!   captures every value there, so the field is never filled.
 //! - a field outside its table's row element. Its value attaches to whichever
 //!   row ends next.
 //!
@@ -144,7 +145,7 @@ pub enum Unconverted {
         /// The table whose rows the level counts.
         counted_table: String,
     },
-    /// A field lies inside the `xml_path` of a table nested within its own,
+    /// A field lies inside the element of a table nested within its own,
     /// which captures every value there, so the field is never filled.
     ///
     /// Version 2 rejects the field, and both ways to satisfy it change the
@@ -315,7 +316,7 @@ impl Config {
             }
         }));
         declare_rows(self, &mut config, &mut unconverted);
-        rename_field_paths(&mut config);
+        rename_paths(&mut config);
         replace_levels(self, &mut config, &mut unconverted);
         link_nested_tables(&mut config);
         state_utf8_policies(&mut config);
@@ -343,21 +344,27 @@ fn declare_rows(original: &Config, config: &mut Config, unconverted: &mut Vec<Un
     for table in config.tables.iter_mut().filter(|t| t.row.is_none()) {
         // Read from the original: which children end a row depends on every
         // configured path as written, before any of them is rewritten.
-        let children = original.row_delimiting_children(&table.xml_path);
+        let children = original.row_delimiting_children(table.path());
         if let [only] = children.as_slice() {
             table.row = Some(only.clone());
         } else {
             unconverted.push(Unconverted::RowNotDeclarable {
                 table: table.name.clone(),
-                xml_path: table.xml_path.clone(),
+                xml_path: table.path().to_string(),
                 child_elements: children,
             });
         }
     }
 }
 
-/// Renames every field's `xml_path:` to `path:`.
-fn rename_field_paths(config: &mut Config) {
+/// Renames every table's `xml_path:` to `scope:`, and every field's to `path:`.
+fn rename_paths(config: &mut Config) {
+    for table in &mut config.tables {
+        // The value means the same under either key, so it is moved as it is.
+        if table.scope.is_none() {
+            table.scope = table.xml_path.take();
+        }
+    }
     for field in config.tables.iter_mut().flat_map(|t| t.fields.iter_mut()) {
         if let Some(xml_path) = field.xml_path.take() {
             // `xml_path` ignores a leading slash, but `path` reads it as the
@@ -473,22 +480,22 @@ fn report_misplaced_fields(config: &Config, unconverted: &mut Vec<Unconverted>) 
 // --- Helpers ----------------------------------------------------------------
 
 /// The tables whose row counters fill a table's `levels` columns, in column
-/// order: each table whose `xml_path` strictly encloses this table's, outermost
+/// order: each table whose element strictly encloses this table's, outermost
 /// first, then the table itself.
 ///
 /// This mirrors the parser, which reads one counter per open table when a row
-/// ends. A table at `xml_path: /` supplies none, as the document root is not a
+/// ends. A table at the document root supplies none, as the root is not a
 /// repeating scope.
 fn counted_tables(config: &Config, idx: usize) -> Vec<usize> {
     let is_root = |path: &str| path_segments(path).next().is_none();
-    let table_path = config.tables[idx].xml_path.as_str();
+    let table_path = config.tables[idx].path();
     let mut counted: Vec<usize> = (0..config.tables.len())
         .filter(|&other| {
-            let other_path = &config.tables[other].xml_path;
+            let other_path = config.tables[other].path();
             !is_root(other_path) && path_is_strictly_under(table_path, other_path)
         })
         .collect();
-    counted.sort_by_key(|&other| path_segments(&config.tables[other].xml_path).count());
+    counted.sort_by_key(|&other| path_segments(config.tables[other].path()).count());
     if !is_root(table_path) {
         counted.push(idx);
     }
@@ -637,6 +644,19 @@ mod tests {
                 .iter()
                 .flat_map(|t| &t.fields)
                 .all(|f| f.xml_path.is_none())
+        );
+        // Every table is spelled with the version 2 key, value unchanged.
+        assert_eq!(
+            converted
+                .tables
+                .iter()
+                .map(|t| (t.scope.as_deref(), t.xml_path.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                (Some("/report/header"), None),
+                (Some("/report/stations"), None),
+                (Some("/report/stations/station/readings"), None),
+            ]
         );
     }
 
@@ -1001,7 +1021,7 @@ mod tests {
             version: 2
             tables:
               - name: items
-                xml_path: /data
+                scope: /data
                 row: item
                 fields:
                   - {name: s, path: s, data_type: Utf8}

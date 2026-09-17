@@ -5,13 +5,13 @@
 version: 2
 tables:
   - name: stations
-    xml_path: /report/stations
+    scope: /report/stations
     row: station
     metadata: {source: station export, revision: 1.50}
     fields:
       - {name: id, path: "@id", data_type: Utf8, metadata: {description: Station code}}
   - name: readings
-    xml_path: /report/stations/station/readings
+    scope: /report/stations/station/readings
     row: reading
     links:
       - parent: stations

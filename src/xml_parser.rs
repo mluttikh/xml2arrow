@@ -2937,12 +2937,12 @@ impl TableMeta {
     fn from_config(tc: &TableConfig) -> Self {
         Self {
             name: tc.name.clone(),
-            xml_path: tc.xml_path.clone(),
+            xml_path: tc.path().to_string(),
             // `row == "."` is checked before resolving, so the common declared
             // form costs a string compare rather than a `format!` allocation,
             // and a table with no `row:` costs one discriminant read.
             row_is_table_element: tc.row.as_deref().is_some_and(|row| {
-                row == "." || paths_equal(&resolve_row_path(&tc.xml_path, row), &tc.xml_path)
+                row == "." || paths_equal(&resolve_row_path(tc.path(), row), tc.path())
             }),
         }
     }
@@ -8130,13 +8130,13 @@ mod tests {
                 version: 2
                 tables:
                   - name: stations
-                    xml_path: /r/stations
+                    scope: /r/stations
                     row: station
                     metadata: {source: station export}
                     fields:
                       - {name: id, path: "@id", data_type: Utf8, metadata: {description: Station code}}
                   - name: readings
-                    xml_path: /r/stations/station/readings
+                    scope: /r/stations/station/readings
                     row: reading
                     links: [{parent: stations}]
                     fields:
@@ -8673,7 +8673,7 @@ mod tests {
             version: 2
             tables:
               - name: header
-                xml_path: /report/header
+                scope: /report/header
                 row: "."
                 fields:
                   - {name: title, path: title, data_type: Utf8}
@@ -8701,7 +8701,7 @@ mod tests {
             version: 2
             tables:
               - name: header
-                xml_path: /report/header
+                scope: /report/header
                 row: "."
                 fields:
                   - {name: title, path: title, data_type: Utf8}
@@ -8728,7 +8728,7 @@ mod tests {
             version: 2
             tables:
               - name: items
-                xml_path: /report/data
+                scope: /report/data
                 row: items/item
                 fields:
                   - {name: v, path: /report/data/items/item/v, data_type: Int32}
@@ -8754,7 +8754,7 @@ mod tests {
                 version: 2
                 tables:
                   - name: items
-                    xml_path: /report/data
+                    scope: /report/data
                     {row}
                     fields:
                       - {{name: v, path: /report/data/item/v, data_type: Int32}}
@@ -8783,7 +8783,7 @@ mod tests {
             version: 2
             tables:
               - name: items
-                xml_path: /report/data
+                scope: /report/data
                 row: report/data/item
                 fields:
                   - {name: v, path: /report/data/item/v, data_type: Int32}
@@ -8812,7 +8812,7 @@ mod tests {
             version: 2
             tables:
               - name: items
-                xml_path: /report/data
+                scope: /report/data
                 row: item
                 fields:
                   - {name: v, path: v, data_type: Int32}
@@ -8841,11 +8841,11 @@ mod tests {
             version: 2
             tables:
               - name: stations
-                xml_path: /report
+                scope: /report
                 row: station
                 fields: []
               - name: meta
-                xml_path: /report/station/meta
+                scope: /report/station/meta
                 row: "."
                 links:
                   - index_of: /report/station
@@ -8898,7 +8898,7 @@ mod tests {
             version: 2
             tables:
               - name: items
-                xml_path: /report/data
+                scope: /report/data
                 row: item
                 fields: {fields}
             "#
@@ -8917,7 +8917,7 @@ mod tests {
             version: 2
             tables:
               - name: items
-                xml_path: /report/data
+                scope: /report/data
                 row: item
                 fields:
                   - {name: reading, path: sensor/reading, data_type: Int32}
@@ -8942,7 +8942,7 @@ mod tests {
             version: 2
             tables:
               - name: items
-                xml_path: /report/data
+                scope: /report/data
                 row: items/item
                 fields:
                   - {name: v, path: v, data_type: Int32}
@@ -8963,7 +8963,7 @@ mod tests {
             version: 2
             tables:
               - name: ms
-                xml_path: /report/ms
+                scope: /report/ms
                 row: m
                 fields:
                   - {name: value, path: ".", data_type: Int32}
@@ -8985,7 +8985,7 @@ mod tests {
             version: 2
             tables:
               - name: items
-                xml_path: /report/data
+                scope: /report/data
                 row: item
                 fields:
                   - {name: v, path: v, data_type: Int32}
@@ -9035,12 +9035,12 @@ mod tests {
             version: 2
             tables:
               - name: stations
-                xml_path: /report/group
+                scope: /report/group
                 row: station
                 fields:
                   - {name: id, path: id, data_type: Utf8}
               - name: measurements
-                xml_path: /report/group/station/ms
+                scope: /report/group/station/ms
                 row: m
                 links:
                   - parent: stations
@@ -9071,12 +9071,12 @@ mod tests {
             version: 2
             tables:
               - name: stations
-                xml_path: /report/group
+                scope: /report/group
                 row: station
                 fields:
                   - {name: id, path: id, data_type: Utf8}
               - name: measurements
-                xml_path: /report/group/station/ms
+                scope: /report/group/station/ms
                 row: m
                 links:
                   - index_of: /report/group/station
@@ -9119,11 +9119,11 @@ mod tests {
             version: 2
             tables:
               - name: stations
-                xml_path: /report
+                scope: /report
                 row: station
                 fields: []
               - name: measurements
-                xml_path: /report/station
+                scope: /report/station
                 row: m
                 links:
                   - index_of: /report/station
@@ -9171,7 +9171,7 @@ mod tests {
             version: 2
             tables:
               - name: stations
-                xml_path: /report/stations
+                scope: /report/stations
                 row: station
                 links:
                   - index_of: /report/stations/station
@@ -9179,7 +9179,7 @@ mod tests {
                 fields:
                   - {name: id, path: "@id", data_type: Utf8}
               - name: readings
-                xml_path: /report/stations/station/readings
+                scope: /report/stations/station/readings
                 row: reading
                 links:
                   - index_of: /report/stations/station
@@ -9211,7 +9211,7 @@ mod tests {
             version: 2
             tables:
               - name: stations
-                xml_path: /report
+                scope: /report
                 row: station
                 fields:
                   - {name: id, path: "@id", data_type: Utf8}
@@ -9232,13 +9232,13 @@ mod tests {
             version: 2
             tables:
               - name: stations
-                xml_path: /report/group
+                scope: /report/group
                 row: station
                 row_id: false
                 fields:
                   - {name: id, path: id, data_type: Utf8}
               - name: measurements
-                xml_path: /report/group/station/ms
+                scope: /report/group/station/ms
                 row: m
                 links:
                   - parent: stations
@@ -9278,12 +9278,12 @@ mod tests {
             version: 2
             tables:
               - name: /report/monitoring_stations/
-                xml_path: /report
+                scope: /report
                 row: station
                 fields:
                   - {name: id, path: "@id", data_type: Utf8}
               - name: measurements
-                xml_path: /report/station/ms
+                scope: /report/station/ms
                 row: m
                 links:
                   - parent: /report/monitoring_stations/
@@ -9323,13 +9323,13 @@ mod tests {
             version: 2
             tables:
               - name: stations
-                xml_path: /report
+                scope: /report
                 row: station
                 row_id: station_key
                 fields:
                   - {name: id, path: "@id", data_type: Utf8}
               - name: measurements
-                xml_path: /report/station/ms
+                scope: /report/station/ms
                 row: m
                 links:
                   - parent: stations
@@ -9435,7 +9435,7 @@ mod tests {
             version: 2
             tables:
               - name: t
-                xml_path: /r
+                scope: /r
                 row: item
                 fields:
                   - {name: s, path: s, data_type: Utf8, on_missing: empty}
@@ -9453,7 +9453,7 @@ mod tests {
             version: 2
             tables:
               - name: t
-                xml_path: /r
+                scope: /r
                 row: item
                 fields:
                   - {name: n, path: n, data_type: Int32, nullable: true, on_missing: error}
@@ -9478,7 +9478,7 @@ mod tests {
             version: 2
             tables:
               - name: t
-                xml_path: /r
+                scope: /r
                 row: item
                 fields:
                   - {name: n, path: n, data_type: Int32, nullable: true, on_invalid: null}
@@ -9501,7 +9501,7 @@ mod tests {
                 version: 2
                 tables:
                   - name: t
-                    xml_path: /r
+                    scope: /r
                     row: item
                     fields:
                       - {{name: v, path: v, data_type: Utf8, {policy}}}
@@ -9520,7 +9520,7 @@ mod tests {
             version: 2
             tables:
               - name: t
-                xml_path: /r
+                scope: /r
                 row: item
                 fields:
                   - {name: v, path: v, data_type: Utf8}
@@ -9551,7 +9551,7 @@ mod tests {
             version: 2
             tables:
               - name: t
-                xml_path: /r
+                scope: /r
                 row: item
                 fields:
                   - {name: v, path: v, data_type: Utf8, on_repeat: first}
@@ -9570,7 +9570,7 @@ mod tests {
                 version: 2
                 tables:
                   - name: t
-                    xml_path: /r
+                    scope: /r
                     row: item
                     fields:
                       - {{name: s, path: s, data_type: Utf8{policy}}}
@@ -9593,7 +9593,7 @@ mod tests {
             version: 2
             tables:
               - name: t
-                xml_path: /r
+                scope: /r
                 row: item
                 fields:
                   - name: n
@@ -9618,7 +9618,7 @@ mod tests {
             version: 2
             tables:
               - name: t
-                xml_path: /r
+                scope: /r
                 row: item
                 fields:
                   - {name: s, path: s, data_type: Utf8, nullable: true, null_values: [""]}
@@ -9649,7 +9649,7 @@ mod tests {
             version: 2
             tables:
               - name: t
-                xml_path: /r
+                scope: /r
                 row: item
                 fields:
                   - {name: s, path: s, data_type: Utf8, nullable: true, null_values: ["N/A"]}
@@ -9691,7 +9691,7 @@ mod tests {
               trim: false
             tables:
               - name: t
-                xml_path: /r
+                scope: /r
                 row: item
                 fields:
                   - {name: a, path: a, data_type: Utf8}
@@ -9719,7 +9719,7 @@ mod tests {
                 version: 2
                 tables:
                   - name: t
-                    xml_path: /r
+                    scope: /r
                     row: item
                     fields:
                       - {name: s, path: s, data_type: Utf8}
@@ -9762,7 +9762,7 @@ mod tests {
                 version: 2
                 tables:
                   - name: t
-                    xml_path: /r
+                    scope: /r
                     row: item
                     fields:
                       - {name: s, path: s, data_type: Utf8}
@@ -9788,7 +9788,7 @@ mod tests {
                 version: 2
                 tables:
                   - name: t
-                    xml_path: /r
+                    scope: /r
                     row: item
                     fields:
                       - {name: s, path: s, data_type: Utf8}
@@ -9801,7 +9801,7 @@ mod tests {
                 version: 2
                 tables:
                   - name: t
-                    xml_path: /r
+                    scope: /r
                     row: item
                     fields:
                       - {name: s, path: s, data_type: Utf8, null_values: [""]}
@@ -9825,7 +9825,7 @@ mod tests {
                 version: 2
                 tables:
                   - name: t
-                    xml_path: /r
+                    scope: /r
                     row: item
                     fields:
                       - {name: s, path: s, data_type: Utf8, trim: false}
@@ -9847,7 +9847,7 @@ mod tests {
                 version: 2
                 tables:
                   - name: t
-                    xml_path: /r
+                    scope: /r
                     row: item
                     fields:
                       - {name: s, path: s, data_type: Utf8, nullable: true}
