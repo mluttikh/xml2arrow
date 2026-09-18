@@ -9,6 +9,7 @@ tables:
   - name: stations
     scope: /report/group
     row: station
+    row_id: true
     fields:
       - {name: id, path: id, data_type: Utf8, nullable: true}
   - name: measurements

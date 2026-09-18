@@ -31,8 +31,8 @@ use quick_xml::events::{BytesRef, Event};
 
 use crate::Config;
 use crate::config::{
-    DType, FieldConfig, OnInvalid, OnMissing, OnRepeat, RowId, TableConfig, ValuePolicies,
-    paths_equal, resolve_field_path, resolve_row_path,
+    DType, FieldConfig, OnInvalid, OnMissing, OnRepeat, TableConfig, ValuePolicies, paths_equal,
+    resolve_field_path, resolve_row_path,
 };
 use crate::errors::ConfigIssue;
 use crate::errors::Error;
@@ -220,14 +220,6 @@ fn build_link_plans(config: &Config) -> Vec<TableLinkPlan> {
                     ancestor_table_idx: parent_idx,
                     column_name,
                 });
-                // A referenced table materializes its own key, so both sides
-                // of the join exist. Tables nobody references pay nothing,
-                // which is why this is driven by the links rather than
-                // switched on globally.
-                if plans[parent_idx].row_id_column.is_none() {
-                    plans[parent_idx].row_id_column =
-                        Some(default_row_id_name(&config.tables[parent_idx]));
-                }
             } else if let Some(index_of) = link.index_of.as_deref()
                 && let Some(ancestor_idx) =
                     config.table_counted_by_index_of(table_idx, &scope, index_of)
@@ -241,24 +233,12 @@ fn build_link_plans(config: &Config) -> Vec<TableLinkPlan> {
         }
     }
 
-    // `row_id: false` suppresses the column even when referenced; `row_id: true`
-    // or a name forces it on for a table nobody references.
+    // A table's key column is its own `row_id:`, and nothing else: a table
+    // another table links to has declared one, which validation checks.
     for (plan, table) in plans.iter_mut().zip(&config.tables) {
-        match table.row_id.as_ref() {
-            Some(RowId::Enabled(false)) => plan.row_id_column = None,
-            Some(RowId::Enabled(true)) => {
-                plan.row_id_column.get_or_insert_with(|| "_id".to_string());
-            }
-            Some(RowId::Named(name)) => plan.row_id_column = Some(name.clone()),
-            None => {}
-        }
+        plan.row_id_column = table.key_column_name();
     }
     plans
-}
-
-/// The default key-column name for a table: `_id`.
-fn default_row_id_name(_table: &TableConfig) -> String {
-    "_id".to_string()
 }
 
 /// Builds a table's output schema exactly as its batches are laid out: the
@@ -8119,6 +8099,7 @@ mod tests {
                   - name: stations
                     scope: /r/stations
                     row: station
+                    row_id: true
                     metadata: {source: station export}
                     fields:
                       - {name: id, path: "@id", data_type: Utf8, metadata: {description: Station code}}
@@ -9024,6 +9005,7 @@ mod tests {
               - name: stations
                 scope: /report/group
                 row: station
+                row_id: true
                 fields:
                   - {name: id, path: id, data_type: Utf8}
               - name: measurements
@@ -9036,7 +9018,7 @@ mod tests {
             "#,
         );
 
-        // `stations` is referenced, so it materializes its own key.
+        // `stations` declares its own key, which the link refers to.
         let stations = batches.get("stations").unwrap();
         assert_array_values!(stations, "_id", vec![0u64, 1], UInt64Array);
         assert_array_values!(stations, "id", &["A", "B"], StringArray);
@@ -9189,7 +9171,8 @@ mod tests {
         assert_array_values!(readings, "<reading>", vec![0u32, 1, 0], UInt32Array);
     }
 
-    /// A table nobody references pays nothing.
+    /// A table without `row_id:` has no key column, and a table nobody links
+    /// to needs none.
     #[test]
     fn unreferenced_tables_get_no_key_column() {
         let batches = parse(
@@ -9267,6 +9250,7 @@ mod tests {
               - name: /report/monitoring_stations/
                 scope: /report
                 row: station
+                row_id: true
                 fields:
                   - {name: id, path: "@id", data_type: Utf8}
               - name: measurements
