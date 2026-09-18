@@ -136,9 +136,9 @@ pub enum Error {
         location: Box<ErrorLocation>,
     },
     /// A table's per-scope row counter passed `u32::MAX`, the largest value a
-    /// `<level>` index column can hold. Continuing would silently wrap the
-    /// foreign keys of every subsequent child row, so the parse fails
-    /// instead. Only reachable on enormous inputs (more than 2^32 rows in a
+    /// `UInt32` position column can hold: a `<level>` column in version 1, or
+    /// an `index_of:` link column in version 2. Continuing would silently wrap
+    /// the positions of every later row, so the parse fails instead. Only reachable on enormous inputs (more than 2^32 rows in a
     /// single table scope), which the streaming entry points make possible.
     RowIndexOverflow {
         /// The table whose row counter passed `u32::MAX`.
@@ -763,7 +763,7 @@ impl fmt::Display for Error {
             }
             Error::RowIndexOverflow { table } => write!(
                 f,
-                "Table '{table}' exceeded {} rows in a single scope; UInt32 <level> index columns cannot link further child rows",
+                "Table '{table}' exceeded {} rows in a single scope; UInt32 position columns cannot count further rows",
                 u32::MAX
             ),
             Error::TruncatedInput { open_elements } => write!(
