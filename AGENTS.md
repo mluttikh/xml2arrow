@@ -87,8 +87,11 @@ Inside `process_xml_events`, `process_xml_events_slice`, `handle_event`,
   parses to `42` and `<v> true </v>` to `true`, while a `Utf8` field keeps
   `" hi "`. Booleans additionally accept
   `true/false/1/0/yes/no/on/off/t/f/y/n` case-insensitively.
-- Tables with an empty `fields` list are structural only and excluded from
-  the output map; index columns are named `<level>` (angle brackets included).
+- A table with no column is structural only and excluded from the output
+  map. In version 1 that is any table with an empty `fields` list. In version 2
+  a table without fields is still output when it declares a key (`row_id:`) or
+  a link, since those are columns. Version 1 index columns are named `<level>`
+  (angle brackets included).
 
 ## Public API & Compatibility
 

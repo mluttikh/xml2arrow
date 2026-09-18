@@ -307,11 +307,14 @@ pub enum Lint {
         /// Its `xml_path`, which has no configured child element.
         xml_path: String,
     },
-    /// A table declares no fields. It is excluded from the output entirely and
-    /// exists only to feed its row counter to descendant tables' `levels`
-    /// columns and `index_of:` links.
+    /// A table has no column: no fields, no key and no link. It is excluded
+    /// from the output entirely and exists only to feed its row counter to
+    /// descendant tables' `levels` columns and `index_of:` links.
+    ///
+    /// A table without fields that declares a key or a link has a column, so
+    /// it is output and not reported.
     StructuralTable {
-        /// The table that declares no fields.
+        /// The table without columns.
         table: String,
     },
     /// A table declares more `levels` than it has enclosing table scopes (its
@@ -429,8 +432,8 @@ impl fmt::Display for Lint {
             ),
             Lint::StructuralTable { table } => write!(
                 f,
-                "Table '{table}' declares no fields: it is excluded from the output and exists \
-                 only to count its rows for nested tables' position columns"
+                "Table '{table}' has no fields, key or link, so it is excluded from the output; \
+                 it exists only to count its rows for nested tables' position columns"
             ),
             Lint::ImplicitEmptyString { table, fields } => write!(
                 f,
@@ -642,11 +645,17 @@ impl Config {
         );
         for table in &self.tables {
             if table.fields.is_empty() {
-                // A structural table's row counter is all that matters, so the
-                // row-boundary lints below would be noise for it.
-                lints.push(Lint::StructuralTable {
-                    table: table.name.clone(),
-                });
+                // Only a table with no column at all is left out of the output:
+                // a key or a link column puts it in. Either way, the
+                // row-boundary lints below would be noise for a table without
+                // fields.
+                if table.key_column_name().is_none()
+                    && table.links.as_ref().is_none_or(Vec::is_empty)
+                {
+                    lints.push(Lint::StructuralTable {
+                        table: table.name.clone(),
+                    });
+                }
                 continue;
             }
 
@@ -1293,6 +1302,26 @@ tables:
                 table: "scope".to_string()
             }]
         );
+    }
+
+    /// A table without fields that declares a key has a column, so it is
+    /// output, and there is nothing structural to report.
+    #[test]
+    fn a_table_without_fields_but_with_a_key_is_not_structural() {
+        let config = config_from_yaml!(
+            r#"
+version: 2
+tables:
+  - {name: stations, scope: /r/ss, row: s, row_id: true, fields: []}
+  - name: readings
+    scope: /r/ss/s/rs
+    row: r
+    links: [{parent: stations}]
+    fields:
+      - {name: v, path: v, data_type: Int32}
+"#
+        );
+        assert_eq!(config.lint(), vec![]);
     }
 
     #[test]

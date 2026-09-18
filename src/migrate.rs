@@ -20,7 +20,9 @@
 //!    element of the table whose rows it counts, with `name:` keeping the
 //!    `<level>` column name, so the column and its values are unchanged. A
 //!    table's levels stay as they are while a table they count has no `row:`,
-//!    because the links name the row element the author chooses.
+//!    because the links name the row element the author chooses. A table
+//!    without fields, which version 1 never output, gets no links for its
+//!    levels, since in version 2 a link column would put it in the output.
 //! 4. **Links.** A nested table that had no `levels` declares `links: []`.
 //! 5. **Value policies.** Version 2 trims `Utf8` values and makes a missing
 //!    non-nullable `Utf8` value an error. Each `Utf8` field states the version 1
@@ -389,6 +391,14 @@ fn replace_levels(original: &Config, config: &mut Config, unconverted: &mut Vec<
         if table.levels.is_empty() {
             continue;
         }
+        // Version 1 never output a table without fields, so its `levels`
+        // columns never appeared. In version 2 a link column would make it
+        // appear, so it gets none; it still counts its rows for the links of
+        // other tables, which name its row element.
+        if table.fields.is_empty() {
+            config.tables[idx].levels.clear();
+            continue;
+        }
         // Levels counting a table whose row could not be declared stay as they
         // are: the links that replace them name the row element the author
         // chooses, and reporting them now would describe a problem that choice
@@ -747,6 +757,61 @@ mod tests {
                 (None, None),
             ]
         );
+    }
+
+    /// Version 1 never output a table without fields, so its `levels` columns
+    /// never appeared. Version 2 outputs a table that has a column, so turning
+    /// those levels into links would add a table to the output; they are
+    /// dropped instead, and the table still counts its rows for other tables.
+    #[test]
+    fn a_table_without_fields_gets_no_links_for_its_levels() {
+        let config = config_from_yaml!(
+            r#"
+            tables:
+              - name: groups
+                xml_path: /data
+                levels: [group]
+                fields: []
+              - name: items
+                xml_path: /data/group/items
+                levels: [group, item]
+                fields:
+                  - {name: v, xml_path: /data/group/items/item/v, data_type: Int32}
+            "#
+        );
+        let conversion = config.to_version_2().unwrap();
+        assert!(
+            conversion.unconverted.is_empty(),
+            "{:?}",
+            conversion.unconverted
+        );
+        let [groups, items] = conversion.config.tables.as_slice() else {
+            panic!("expected two tables");
+        };
+        assert!(groups.levels.is_empty());
+        assert_eq!(groups.links, None);
+        assert_eq!(
+            items.links,
+            Some(vec![
+                index_of("/data/group", "<group>"),
+                index_of("/data/group/items/item", "<item>"),
+            ])
+        );
+
+        let xml = br#"<data>
+            <group><items><item><v>1</v></item><item><v>2</v></item></items></group>
+            <group><items><item><v>3</v></item></items></group>
+        </data>"#;
+        let before = crate::Parser::new(&config)
+            .unwrap()
+            .parse_slice(xml)
+            .unwrap();
+        let after = crate::Parser::new(&conversion.config)
+            .unwrap()
+            .parse_slice(xml)
+            .unwrap();
+        assert_eq!(before, after);
+        assert!(!after.contains_key("groups"));
     }
 
     #[test]

@@ -1196,6 +1196,67 @@ fn test_a_tables_schema_follows_from_its_own_config() {
 }
 
 #[test]
+fn test_a_table_without_fields_keeps_the_columns_it_declares() {
+    // Regression: a table with `fields: []` was left out of the output even
+    // when it declared a key or a link. With groups, stations and readings,
+    // a `stations` table without fields held the only record of which group
+    // each station belongs to, so dropping it left no way to join readings to
+    // groups, and the `_id` its `row_id: true` declared appeared nowhere. A
+    // table is now output when it has a column: a field, a key or a link.
+    let yaml = r#"
+version: 2
+tables:
+  - name: groups
+    scope: /r
+    row: g
+    row_id: true
+    fields:
+      - {name: name, path: "@name", data_type: Utf8}
+  - name: stations
+    scope: /r/g/ss
+    row: s
+    row_id: true
+    links: [{parent: groups}]
+    fields: []
+  - name: readings
+    scope: /r/g/ss/s/rs
+    row: r
+    links: [{parent: stations}]
+    fields:
+      - {name: v, path: v, data_type: Int32}
+"#;
+    let xml = br#"<r>
+        <g name="north"><ss><s><rs><r><v>1</v></r></rs></s><s><rs><r><v>2</v></r></rs></s></ss></g>
+        <g name="south"><ss><s><rs><r><v>3</v></r></rs></s></ss></g>
+    </r>"#;
+    let parser = Parser::new(&Config::from_yaml_str(yaml).unwrap()).unwrap();
+    let batches = parser.parse_slice(xml).unwrap();
+
+    // Each reading joins to a station, and each station to a group.
+    let station_of_reading = batches
+        .get("readings")
+        .unwrap()
+        .column_by_name("_stations_id")
+        .unwrap()
+        .clone();
+    let stations = batches.get("stations").unwrap();
+    let group_of_station = stations.column_by_name("_groups_id").unwrap().clone();
+    let as_u64 = |a: &dyn Array| {
+        a.as_any()
+            .downcast_ref::<arrow::array::UInt64Array>()
+            .unwrap()
+            .values()
+            .to_vec()
+    };
+    let group_of_reading: Vec<u64> = as_u64(station_of_reading.as_ref())
+        .into_iter()
+        .map(|station| as_u64(group_of_station.as_ref())[usize::try_from(station).unwrap()])
+        .collect();
+    assert_eq!(group_of_reading, vec![0, 0, 1]);
+    assert!(parser.schema("stations").is_some());
+}
+
+#[test]
 fn test_version_1_rejects_a_version_2_key() {
     // Regression: a config without `version: 2` could set `links:`, `row:` or
     // any other key version 2 added, and was parsed as a mix of both formats,

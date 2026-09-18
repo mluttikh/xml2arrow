@@ -1,0 +1,10 @@
+# frozen snapshot — see tests/frozen_corpus.rs
+table: stations
+rows: 3
+columns:
+  1. _id: UInt64 (not null)
+  2. _groups_id: UInt64 (not null)
+data:
+  "0" | "0"
+  "1" | "0"
+  "2" | "1"

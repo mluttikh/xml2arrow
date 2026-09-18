@@ -117,7 +117,12 @@ word. Write notes as YAML comments, and values that should reach the output as
 | `metadata` | no | Your own key-value pairs, copied into the table's Arrow schema. See [Metadata](#metadata). |
 | `fields` | yes | The columns. See [Fields](#fields). |
 
-A table with an empty `fields: []` list produces no output.
+A table appears in the output when it has a column: a field, a link column or
+its key from `row_id:`. A table with none, `fields: []` and no key or link,
+produces no output and only counts its rows, for other tables' `index_of:`
+links. A table without fields that declares a key or a link is output with just
+those columns, which is how a table relates the tables around it without
+holding any values of its own.
 
 ### `scope`
 
@@ -520,7 +525,7 @@ change how a document is parsed. For a version 2 config they report:
 
 | Lint | When |
 |---|---|
-| `StructuralTable` | a table has no fields, so it is left out of the output |
+| `StructuralTable` | a table has no fields, key or link, so it is left out of the output |
 
 Version 1 configs get more lints, described in
 [Configuration format version 1](configuration-v1.md#checking-a-version-1-config).
