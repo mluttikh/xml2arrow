@@ -440,6 +440,20 @@ pub enum ConfigIssue {
         /// The path it named.
         index_of: String,
     },
+    /// An `index_of:` link counts a table whose row element is its own scope
+    /// element, as with `row: "."`. Each occurrence of that element holds one
+    /// row, and the count restarts at every occurrence, so every position the
+    /// link would produce is 0.
+    IndexOfAlwaysZero {
+        /// The table declaring the link.
+        table: String,
+        /// The path it named.
+        index_of: String,
+        /// The table whose rows it counts.
+        counted_table: String,
+        /// That table's scope, which is also its row element.
+        scope: String,
+    },
     /// A link column's name collides with a field or another link column.
     LinkColumnCollision {
         /// The table where the names collided.
@@ -854,6 +868,35 @@ impl fmt::Display for ConfigIssue {
                 f,
                 "Table '{table}' has index_of '{index_of}', which is neither its own row element nor that of an enclosing table. Counting an arbitrary path is not supported: the ordinal is read from that table's existing row counter, which is what makes it free and what makes it identical to the legacy '<level>' value"
             ),
+            ConfigIssue::IndexOfAlwaysZero {
+                table,
+                index_of,
+                counted_table,
+                scope,
+            } => {
+                write!(
+                    f,
+                    "Table '{table}' has index_of '{index_of}', which counts the rows of table \
+                     '{counted_table}'. That table's row is its own scope element, '{scope}', so \
+                     each occurrence holds one row and every position would be 0"
+                )?;
+                // The fix is to scope the counted table one level up, so its
+                // rows are counted within the element around them. Not offered
+                // for the document element: the document holds it once, so a
+                // position there is 0 as well.
+                let segments: Vec<&str> = scope.split('/').filter(|s| !s.is_empty()).collect();
+                if let [parents @ .., row] = segments.as_slice()
+                    && !parents.is_empty()
+                {
+                    write!(
+                        f,
+                        "; to count its rows within the element around them, scope \
+                         '{counted_table}' one level up: scope: /{}, row: {row}",
+                        parents.join("/")
+                    )?;
+                }
+                Ok(())
+            }
             ConfigIssue::LinkColumnCollision { table, column } => write!(
                 f,
                 "Table '{table}' would produce two columns named '{column}'; set 'name:' on the link to disambiguate"
