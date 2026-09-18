@@ -7,6 +7,7 @@ tables:
   - name: stations
     scope: /report/stations
     row: station
+    row_id: true
     metadata: {source: station export, revision: 1.50}
     fields:
       - {name: id, path: "@id", data_type: Utf8, metadata: {description: Station code}}

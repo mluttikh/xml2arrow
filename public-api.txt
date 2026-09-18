@@ -365,6 +365,9 @@ impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::ValuePolicie
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::ValuePolicies
 pub mod xml2arrow::errors
 #[non_exhaustive] pub enum xml2arrow::errors::ConfigIssue
+pub xml2arrow::errors::ConfigIssue::ColumnNameCollision
+pub xml2arrow::errors::ConfigIssue::ColumnNameCollision::column: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::ColumnNameCollision::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::DotSegmentInPath
 pub xml2arrow::errors::ConfigIssue::DotSegmentInPath::location: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::DotSegmentInPath::path: alloc::string::String
@@ -377,6 +380,8 @@ pub xml2arrow::errors::ConfigIssue::DuplicateTablePath
 pub xml2arrow::errors::ConfigIssue::DuplicateTablePath::path: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::DuplicateTablePath::table_a: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::DuplicateTablePath::table_b: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::EmptyColumnName
+pub xml2arrow::errors::ConfigIssue::EmptyColumnName::location: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::EmptyFieldName
 pub xml2arrow::errors::ConfigIssue::EmptyFieldName::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::EmptyFieldPath
@@ -424,9 +429,6 @@ pub xml2arrow::errors::ConfigIssue::IndexOfNotAncestorTable::table: alloc::strin
 pub xml2arrow::errors::ConfigIssue::KeyRequiresVersion2
 pub xml2arrow::errors::ConfigIssue::KeyRequiresVersion2::key: &'static str
 pub xml2arrow::errors::ConfigIssue::KeyRequiresVersion2::location: alloc::string::String
-pub xml2arrow::errors::ConfigIssue::LinkColumnCollision
-pub xml2arrow::errors::ConfigIssue::LinkColumnCollision::column: alloc::string::String
-pub xml2arrow::errors::ConfigIssue::LinkColumnCollision::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::LinkKindAmbiguous
 pub xml2arrow::errors::ConfigIssue::LinkKindAmbiguous::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::LinksAndLevels
@@ -441,6 +443,9 @@ pub xml2arrow::errors::ConfigIssue::ParentNotAncestor::parent: alloc::string::St
 pub xml2arrow::errors::ConfigIssue::ParentNotAncestor::parent_path: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::ParentNotAncestor::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::ParentNotAncestor::table_path: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::ParentWithoutRowId
+pub xml2arrow::errors::ConfigIssue::ParentWithoutRowId::parent: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::ParentWithoutRowId::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::RelativeFieldPathWithoutRow
 pub xml2arrow::errors::ConfigIssue::RelativeFieldPathWithoutRow::field: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::RelativeFieldPathWithoutRow::path: alloc::string::String

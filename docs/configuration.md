@@ -53,6 +53,7 @@ tables:
   - name: stations
     scope: /report/stations         # the element that scopes the rows
     row: station                    # one row per <station>
+    row_id: true                    # adds _id, which readings links to
     fields:
       - {name: id,   path: "@id", data_type: Utf8}
       - {name: name, path: name,  data_type: Utf8}
@@ -218,6 +219,7 @@ loaded, with a message naming the nested table:
   - name: stations
     scope: /report/stations
     row: station
+    row_id: true
     fields:
       - {name: value, path: readings/reading/value, data_type: Float64}  # rejected
   - name: readings
@@ -313,7 +315,7 @@ them. A table that is not nested needs no `links:`.
 
 | Link | Adds | Use it for |
 |---|---|---|
-| `parent: <table>` | a `UInt64` key column, and `_id` on the parent | joining rows to their parent rows |
+| `parent: <table>` | a `UInt64` key column that joins to the parent's `row_id:` column | joining rows to their parent rows |
 | `index_of: <path>` | a `UInt32` position column | a row's position within its scope: its own, or that of the row around it |
 
 A table may declare several links. `links: []` declares that a nested table
@@ -326,9 +328,15 @@ deliberately has none.
       - parent: stations
 ```
 
-`parent:` adds a column `_stations_id` to this table, and a column `_id` to
-`stations`. `readings._stations_id == stations._id` joins each reading to its
-station.
+`parent:` adds a column `_stations_id` to this table. The table it names must
+declare its own key column with `row_id:`, here `row_id: true` on `stations`,
+which adds `_id`. `readings._stations_id == stations._id` joins each reading to
+its station.
+
+The key is declared on the parent, rather than added because a link names it, so
+that a table's columns follow from its own config: adding or removing a child
+table never changes the parent's schema. A parent without `row_id:` is rejected
+when the config is loaded, with a message naming the line to add.
 
 The values are **global** row numbers: a parent row's 0-based position among all
 of that table's rows in the document. The join is correct however often the
@@ -396,7 +404,7 @@ element as its row:
 |---|---|---|
 | a `parent:` link | `_<table>_id` | `name:` on the link |
 | an `index_of:` link | `<element>_idx` | `name:` on the link |
-| the key of a table that a `parent:` link refers to | `_id` | `row_id:` on that table |
+| a table's own key | `_id`, with `row_id: true` | `row_id: <name>` |
 
 ```yaml
   - name: stations
@@ -408,8 +416,16 @@ element as its row:
         name: station_id      # instead of _stations_id
 ```
 
-`row_id:` also accepts `true`, to add `_id` to a table that nothing refers to,
-and `false`, to leave the key out even when something does.
+The two names are independent: renaming the key does not rename the link
+column, because each table's columns follow from its own config. Naming them
+alike, as above, lets a join use one column name on both sides.
+
+`row_id:` is required on a table a `parent:` link names, and allowed on any
+other. `row_id: false` leaves the key out while keeping the link column in the
+child.
+
+No two of a table's columns may share a name, whether they come from fields,
+links or `row_id:`, and none may have an empty name.
 
 The default names contain the table's `name` exactly as written, so a table
 whose name is not a plain identifier produces a column name that is not one

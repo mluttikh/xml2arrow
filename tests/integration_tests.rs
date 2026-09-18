@@ -890,6 +890,7 @@ tables:
   - name: outer
     scope: /r
     row: a
+    row_id: true
     fields:
       - {name: count, path: bs/@count, data_type: Int32, nullable: true}
   - name: inner
@@ -1107,6 +1108,94 @@ tables:
 }
 
 #[test]
+fn test_a_key_column_cannot_share_a_name_with_another_column() {
+    // Regression: a table's own key column was left out of the column-name
+    // checks, so a field named `_id` on a table a `parent:` link names gave
+    // the table two columns called `_id`, with no error. Column names now
+    // collide the same way whether they come from fields, links or `row_id:`.
+    let err = Config::from_yaml_str(
+        r#"
+version: 2
+tables:
+  - name: stations
+    scope: /r/ss
+    row: s
+    row_id: true
+    fields:
+      - {name: _id, path: "@id", data_type: Utf8}
+  - name: readings
+    scope: /r/ss/s/rs
+    row: r
+    links: [{parent: stations}]
+    fields:
+      - {name: v, path: v, data_type: Int32}
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            xml2arrow::Error::InvalidConfig {
+                reason: xml2arrow::errors::ConfigIssue::ColumnNameCollision { table, column }
+            } if table == "stations" && column == "_id"
+        ),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn test_a_tables_schema_follows_from_its_own_config() {
+    // Regression: a table gained an `_id` column when another table declared a
+    // `parent:` link to it, so adding a child table changed the parent's schema,
+    // and a writer set up from `Parser::schema` broke. The parent now declares
+    // its key with `row_id:`, and its schema is the same with or without the
+    // child.
+    let stations = r#"
+  - name: stations
+    scope: /r/ss
+    row: s
+    row_id: true
+    fields:
+      - {name: name, path: "@name", data_type: Utf8}"#;
+    let readings = r#"
+  - name: readings
+    scope: /r/ss/s/rs
+    row: r
+    links: [{parent: stations}]
+    fields:
+      - {name: v, path: v, data_type: Int32}"#;
+    let columns = |yaml: &str| {
+        let parser = Parser::new(&Config::from_yaml_str(yaml).unwrap()).unwrap();
+        parser
+            .schema("stations")
+            .unwrap()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect::<Vec<_>>()
+    };
+    let alone = columns(&format!("version: 2\ntables:{stations}\n"));
+    let with_child = columns(&format!("version: 2\ntables:{stations}{readings}\n"));
+    assert_eq!(alone, ["_id", "name"]);
+    assert_eq!(alone, with_child);
+
+    // Without the declaration, the link is rejected rather than adding the
+    // column behind the parent's back.
+    let undeclared = stations.replace("    row_id: true\n", "");
+    let err =
+        Config::from_yaml_str(&format!("version: 2\ntables:{undeclared}{readings}\n")).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            xml2arrow::Error::InvalidConfig {
+                reason: xml2arrow::errors::ConfigIssue::ParentWithoutRowId { .. }
+            }
+        ),
+        "{err:?}"
+    );
+}
+
+#[test]
 fn test_version_1_rejects_a_version_2_key() {
     // Regression: a config without `version: 2` could set `links:`, `row:` or
     // any other key version 2 added, and was parsed as a mix of both formats,
@@ -1317,7 +1406,7 @@ fn test_truncated_file_is_rejected_rather_than_silently_short() {
 
 #[test]
 fn builders_produce_the_same_config_as_yaml() {
-    use xml2arrow::config::{DType, FieldConfigBuilder, Link, TableConfig};
+    use xml2arrow::config::{DType, FieldConfigBuilder, Link, RowId, TableConfig};
 
     let built = Config::builder()
         .table(
@@ -1379,6 +1468,7 @@ tables:
         .table(
             TableConfig::builder("stations", "/report/stations")
                 .row("station")
+                .row_id(RowId::Enabled(true))
                 .field(
                     FieldConfigBuilder::new("id", "@id", DType::Int32)
                         .build()
@@ -1407,6 +1497,7 @@ tables:
   - name: stations
     scope: /report/stations
     row: station
+    row_id: true
     fields:
       - {name: id, path: "@id", data_type: Int32}
   - name: measurements

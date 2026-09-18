@@ -454,12 +454,28 @@ pub enum ConfigIssue {
         /// That table's scope, which is also its row element.
         scope: String,
     },
-    /// A link column's name collides with a field or another link column.
-    LinkColumnCollision {
+    /// Two of a table's columns would have the same name: a field, a link
+    /// column, or the table's own key column.
+    ColumnNameCollision {
         /// The table where the names collided.
         table: String,
         /// The name claimed twice.
         column: String,
+    },
+    /// A key or link column is named with an empty string.
+    EmptyColumnName {
+        /// Where the name is set: `` `row_id:` of table 'stations' ``, `` `name:`
+        /// of link 1 of table 'readings' ``.
+        location: String,
+    },
+    /// A table links to another with `parent:`, and that table does not
+    /// declare `row_id:`, so its own config would not say that it has a key
+    /// column. The column exists because of the link, so the table states it.
+    ParentWithoutRowId {
+        /// The table declaring the link.
+        table: String,
+        /// The table it links to.
+        parent: String,
     },
     /// A field set both `path` and `xml_path`. They are two spellings of the
     /// same thing; picking a winner silently would hide a real mistake.
@@ -897,9 +913,20 @@ impl fmt::Display for ConfigIssue {
                 }
                 Ok(())
             }
-            ConfigIssue::LinkColumnCollision { table, column } => write!(
+            ConfigIssue::ColumnNameCollision { table, column } => write!(
                 f,
-                "Table '{table}' would produce two columns named '{column}'; set 'name:' on the link to disambiguate"
+                "Table '{table}' would produce two columns named '{column}'; rename one of them, \
+                 with the field's `name:`, the link's `name:` or the table's `row_id:`"
+            ),
+            ConfigIssue::EmptyColumnName { location } => write!(
+                f,
+                "The column name set by {location} is empty; a column needs a name"
+            ),
+            ConfigIssue::ParentWithoutRowId { table, parent } => write!(
+                f,
+                "Table '{table}' links to '{parent}' with `parent:`, so '{parent}' needs a key \
+                 column; declare it on '{parent}' with `row_id: true` for a column named `_id`, \
+                 `row_id: <name>` to name it, or `row_id: false` to leave it out"
             ),
             ConfigIssue::FieldPathConflict { table, field } => write!(
                 f,

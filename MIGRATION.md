@@ -160,13 +160,14 @@ usually the more actionable of the two coordinates.
 version: 2
 tables:
   - name: stations
-    xml_path: /report/stations
+    scope: /report/stations
     row: station                    # declared, not inferred
+    row_id: true                    # a key column, _id, that readings links to
     fields:
       - {name: id, path: "@id", data_type: Utf8}   # relative to the row
 
   - name: readings
-    xml_path: /report/stations/station/readings
+    scope: /report/stations/station/readings
     row: reading
     links:
       - parent: stations            # a join key, instead of levels

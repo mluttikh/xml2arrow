@@ -263,12 +263,14 @@ The other parts the converter can leave:
 The converted links keep the version 1 position columns, and their weakness:
 positions start again in every `<stations>` element, so once that element
 repeats, a join on `<station>` pairs readings with the wrong station. A
-`parent:` link gives a key instead:
+`parent:` link gives a key instead, and the table it names declares the key
+column the link joins to:
 
 ```yaml
   - name: stations
     scope: /report/stations
     row: station
+    row_id: true        # adds _id; required on a table a parent: link names
 
   - name: readings
     scope: /report/stations/station/readings
@@ -292,7 +294,8 @@ Configs differ on this document.
 Join on `readings._stations_id = stations._id`. This join stays correct when
 `<stations>` repeats; see [`index_of:`](configuration.md#index_of). The keys
 are `UInt64`. To keep the column names from version 1, set
-`row_id: "<station>"` on `stations` and `name: "<station>"` on the link.
+`row_id: "<station>"` on `stations` instead of `true`, and `name: "<station>"`
+on the link.
 
 With `row:` declared, fields can also use paths relative to the row element,
 such as `path: "@id"` instead of `path: /report/stations/station/@id`. That does
@@ -353,6 +356,7 @@ tables:
   - name: stations
     scope: /report/stations
     row: station
+    row_id: true
     fields:
       - {name: id,   path: "@id", data_type: Utf8}
       - {name: name, path: name,  data_type: Utf8}
