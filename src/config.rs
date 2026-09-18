@@ -445,6 +445,7 @@ impl Config {
             }
             self.validate_table_path(table, table_idx)?;
             self.validate_declared_row(table)?;
+            Self::validate_key_column(table)?;
             self.validate_declared_links(table, table_idx)?;
             self.validate_table_fields(table)?;
         }
@@ -625,6 +626,29 @@ impl Config {
         Ok(())
     }
 
+    /// Checks a table's own key column, from `row_id:`: that it has a name, and
+    /// that no field has the same one. Link columns are checked against it in
+    /// `validate_declared_links`, which only runs for a table with links.
+    fn validate_key_column(table: &TableConfig) -> Result<()> {
+        let Some(key) = table.key_column_name() else {
+            return Ok(());
+        };
+        if key.is_empty() {
+            return Err(ConfigIssue::EmptyColumnName {
+                location: format!("`row_id:` of table '{}'", table.name),
+            }
+            .into());
+        }
+        if table.fields.iter().any(|field| field.name == key) {
+            return Err(ConfigIssue::ColumnNameCollision {
+                table: table.name.clone(),
+                column: key,
+            }
+            .into());
+        }
+        Ok(())
+    }
+
     /// Checks declared `links:` — that each names exactly one kind, refers to
     /// a table that genuinely encloses this one, and contributes a column name
     /// nothing else has claimed.
@@ -640,12 +664,14 @@ impl Config {
         }
 
         let scope = table.link_scope_path();
-        // Seeded with the field names so a link column that shadowed a field
-        // is caught by the same check as one that shadows another link.
+        // Seeded with the field names and the key column, so a link column
+        // that shadowed either is caught by the same check as one that shadows
+        // another link.
         let mut column_names: HashSet<String> = table
             .fields
             .iter()
             .map(|field| field.name.clone())
+            .chain(table.key_column_name())
             .collect();
 
         for (link_idx, link) in links.iter().enumerate() {
@@ -675,22 +701,32 @@ impl Config {
             }
 
             // A link column that shadowed a field would be a silently wrong
-            // column, so collisions are rejected.
-            if let Some(column) = link.column_name()
-                && !column_names.insert(column.clone())
-            {
-                return Err(ConfigIssue::LinkColumnCollision {
-                    table: table.name.clone(),
-                    column,
+            // column, so collisions are rejected, as is a column without a name.
+            if let Some(column) = link.column_name() {
+                if column.is_empty() {
+                    return Err(ConfigIssue::EmptyColumnName {
+                        location: format!(
+                            "`name:` of link {} of table '{}'",
+                            link_idx + 1,
+                            table.name
+                        ),
+                    }
+                    .into());
                 }
-                .into());
+                if !column_names.insert(column.clone()) {
+                    return Err(ConfigIssue::ColumnNameCollision {
+                        table: table.name.clone(),
+                        column,
+                    }
+                    .into());
+                }
             }
         }
         Ok(())
     }
 
-    /// Checks a `parent:` link — that the named table exists and genuinely
-    /// encloses this one.
+    /// Checks a `parent:` link — that the named table exists, genuinely
+    /// encloses this one, and declares its key column with `row_id:`.
     ///
     /// Checking it *by name* is the whole advantage over `levels`, which took
     /// its values from whatever happened to enclose the table and so could
@@ -715,6 +751,16 @@ impl Config {
                 table_path: scope.to_string(),
                 parent: parent_name.to_string(),
                 parent_path: parent_scope,
+            }
+            .into());
+        }
+        // The parent gains a key column because of this link. Stated on the
+        // parent, so a table's columns follow from its own config: adding or
+        // removing a child table must not change another table's schema.
+        if parent.row_id.is_none() {
+            return Err(ConfigIssue::ParentWithoutRowId {
+                table: table.name.clone(),
+                parent: parent_name.to_string(),
             }
             .into());
         }
@@ -1747,16 +1793,17 @@ impl Link {
 
 /// Whether and how a table materializes its own key column.
 ///
-/// A table referenced by a `parent:` link materializes one automatically, so
-/// both sides of every join exist; tables nobody references pay nothing.
+/// A table that another table names with a `parent:` link must declare one,
+/// so that its columns follow from its own config. Any other table may.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
 #[non_exhaustive]
 pub enum RowId {
-    /// `row_id: false` suppresses the column even when something references
-    /// this table; `row_id: true` forces it on.
+    /// `row_id: true` adds the column, named `_id`; `row_id: false` leaves it
+    /// out, including on a table that a `parent:` link names, whose link
+    /// column is still written.
     Enabled(bool),
-    /// `row_id: my_key` renames it.
+    /// `row_id: my_key` adds the column under that name.
     Named(String),
 }
 
@@ -1841,9 +1888,12 @@ pub struct TableConfig {
     /// Whether this table materializes its own key column, and under what name.
     /// Version 2 only.
     ///
-    /// Defaults to materializing `_id` (`UInt64`, non-null) exactly when some
-    /// other table declares a `parent:` link to this one, so both sides of a
-    /// join always exist and unreferenced tables carry no extra column.
+    /// The column is `UInt64` and non-null, and holds the row's ordinal across
+    /// the whole parse, which is what a `parent:` link column in another table
+    /// holds. Absent means no column. A table that another table names with a
+    /// `parent:` link must declare the key, so that adding or removing a child
+    /// table never changes this table's schema: `row_id: false` is how it says
+    /// it wants the link without the column.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub row_id: Option<RowId>,
     /// The levels of nesting for this table. This is used to create the indices for nested tables.
@@ -1915,6 +1965,19 @@ impl TableConfig {
             links: None,
             row_id: None,
             metadata: BTreeMap::new(),
+        }
+    }
+
+    /// The name of this table's own key column, or `None` when it has none.
+    ///
+    /// Decided by `row_id:` alone: `true` is `_id`, a string names it, and
+    /// `false` or an absent key means no column.
+    #[must_use]
+    pub(crate) fn key_column_name(&self) -> Option<String> {
+        match self.row_id.as_ref()? {
+            RowId::Enabled(true) => Some("_id".to_string()),
+            RowId::Enabled(false) => None,
+            RowId::Named(name) => Some(name.clone()),
         }
     }
 
@@ -3707,6 +3770,7 @@ tables:
     fn linked(links: Vec<Link>, levels: Vec<String>) -> Result<Config> {
         let outer = TableConfig::builder("outer", "/a")
             .row("station")
+            .row_id(RowId::Enabled(true))
             .field(
                 FieldConfigBuilder::new("id", "id", DType::Utf8)
                     .build()
@@ -3740,6 +3804,74 @@ tables:
     #[test]
     fn a_valid_parent_link_is_accepted() {
         assert!(linked(vec![parent_link("outer")], vec![]).is_ok());
+    }
+
+    /// The table a `parent:` link names gains a key column because of the
+    /// link, so it has to say so itself: otherwise adding a child table would
+    /// change the parent's schema.
+    #[test]
+    fn a_parent_without_row_id_is_rejected() {
+        let mut config = linked(vec![parent_link("outer")], vec![]).unwrap();
+        config.tables[0].row_id = None;
+        let err = config.validate().unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                Error::InvalidConfig {
+                    reason: ConfigIssue::ParentWithoutRowId { table, parent }
+                } if table == "inner" && parent == "outer"
+            ),
+            "{err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "Table 'inner' links to 'outer' with `parent:`, so 'outer' needs a key column; \
+             declare it on 'outer' with `row_id: true` for a column named `_id`, \
+             `row_id: <name>` to name it, or `row_id: false` to leave it out"
+        );
+    }
+
+    /// Every spelling of the declaration satisfies the rule, including the one
+    /// that asks for no key column at all.
+    #[rstest]
+    #[case::default_name(RowId::Enabled(true))]
+    #[case::a_name(RowId::Named("station_key".into()))]
+    #[case::no_column(RowId::Enabled(false))]
+    fn any_row_id_on_the_parent_is_accepted(#[case] row_id: RowId) {
+        let mut config = linked(vec![parent_link("outer")], vec![]).unwrap();
+        config.tables[0].row_id = Some(row_id);
+        assert!(config.validate().is_ok());
+    }
+
+    /// No two of a table's columns may share a name, whichever key produced
+    /// them, and none may be nameless.
+    #[rstest]
+    #[case::key_and_field(Some(RowId::Named("v".into())), None, "two columns named 'v'")]
+    #[case::key_and_link(Some(RowId::Enabled(true)), Some("_id"), "two columns named '_id'")]
+    #[case::empty_key(
+        Some(RowId::Named(String::new())),
+        None,
+        "The column name set by `row_id:` of table 'inner' is empty"
+    )]
+    #[case::empty_link_name(
+        None,
+        Some(""),
+        "The column name set by `name:` of link 1 of table 'inner' is empty"
+    )]
+    fn column_names_are_unique_and_non_empty(
+        #[case] inner_row_id: Option<RowId>,
+        #[case] link_name: Option<&str>,
+        #[case] expected: &str,
+    ) {
+        let mut config = linked(vec![parent_link("outer")], vec![]).unwrap();
+        config.tables[1].links = Some(vec![Link {
+            parent: Some("outer".to_string()),
+            name: link_name.map(String::from),
+            ..Default::default()
+        }]);
+        config.tables[1].row_id = inner_row_id;
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains(expected), "{err}");
     }
 
     #[test]
@@ -3943,10 +4075,10 @@ tables:
         };
         let config = linked(vec![link], vec![]);
         let Err(Error::InvalidConfig {
-            reason: ConfigIssue::LinkColumnCollision { column, .. },
+            reason: ConfigIssue::ColumnNameCollision { column, .. },
         }) = config
         else {
-            panic!("expected LinkColumnCollision, got {config:?}");
+            panic!("expected ColumnNameCollision, got {config:?}");
         };
         assert_eq!(column, "v");
     }
@@ -4929,7 +5061,7 @@ tables:
         /// keys are `field_extra`.
         fn version_2(top: &str, table: &str, link: &str, field_extra: &str) -> String {
             format!(
-                "version: 2\n{top}tables:\n  - name: stations\n    xml_path: /r/stations\n    row: station\n{table}    fields: [{{name: id, path: \"@id\", data_type: Utf8}}]\n  - name: readings\n    xml_path: /r/stations/station/readings\n    row: reading\n    links: [{{parent: stations{link}}}]\n    fields:\n      - {{name: v, path: v, data_type: Float64, nullable: true{field_extra}}}\n"
+                "version: 2\n{top}tables:\n  - name: stations\n    scope: /r/stations\n    row: station\n    row_id: true\n{table}    fields: [{{name: id, path: \"@id\", data_type: Utf8}}]\n  - name: readings\n    scope: /r/stations/station/readings\n    row: reading\n    links: [{{parent: stations{link}}}]\n    fields:\n      - {{name: v, path: v, data_type: Float64, nullable: true{field_extra}}}\n"
             )
         }
 
