@@ -430,7 +430,7 @@ impl fmt::Display for Lint {
             Lint::StructuralTable { table } => write!(
                 f,
                 "Table '{table}' declares no fields: it is excluded from the output and exists \
-                 only to supply index values to nested tables' `levels` columns"
+                 only to count its rows for nested tables' position columns"
             ),
             Lint::ImplicitEmptyString { table, fields } => write!(
                 f,

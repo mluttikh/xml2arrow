@@ -281,6 +281,11 @@ Every value goes through the same steps:
 - `on_missing: null` can be written without quotes.
 - `null_values` are compared after trimming, and are case-sensitive. For
   `Utf8`, `null_values: [""]` makes blank text missing.
+- `parser_options.trim_text` trims as the document is read, before these steps,
+  and there text that is only whitespace becomes no text at all, so it is
+  **missing**. Per-field `trim` makes the same text the empty string. For a
+  `Utf8` field, `<v>   </v>` is therefore `""` under `trim` and missing under
+  `trim_text`, which for a non-nullable field is an error.
 - `on_repeat: first` keeps the whole first value, even when its text arrives in
   pieces; `last` keeps the final occurrence. An occurrence without a value, such
   as the `<v/>` in `<v/><v>2</v>`, does not count as a repeat.
@@ -347,6 +352,10 @@ surrounding elements repeat, and however the output was split into batches.
 - When streaming with `parse_batches`, a parent row is complete only after its
   children, so a batch of children can refer to a parent row that arrives in a
   later batch. The keys are still correct; join once both sides are collected.
+- A `stop_at_paths` path inside a child table ends the parse before the parent
+  row around it closes. The child rows read so far are returned, and their key
+  refers to a parent row that never is, so the join leaves them unmatched. Stop
+  after the parent's row element instead to keep both sides.
 
 ### `index_of:`
 
