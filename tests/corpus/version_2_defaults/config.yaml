@@ -14,6 +14,7 @@ tables:
   - name: stations
     scope: /report/stations
     row: station
+    row_id: true
     fields:
       - {name: site, path: "@site", data_type: Utf8}
       - {name: note, path: note, data_type: Utf8, on_missing: empty}

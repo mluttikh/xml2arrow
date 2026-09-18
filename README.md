@@ -67,6 +67,7 @@ tables:
   - name: stations
     scope: /report/stations         # the element the rows live in
     row: station                    # one row per <station>
+    row_id: true                    # adds _id, which readings links to
     fields:
       - {name: id,   path: "@id", data_type: Utf8}
       - {name: name, path: name,  data_type: Utf8}
@@ -428,6 +429,7 @@ tables:
   - name: stations
     scope: /report/monitoring_stations
     row: monitoring_station
+    row_id: true
     links: []                   # inside report's row, but needs no link to it
     fields:
       - {name: id,           path: "@id",                    data_type: Utf8}
@@ -487,8 +489,8 @@ tables:
 ```
 
 The `_stations_id` column in the `measurements` table is each measurement's
-parent station, and `_id` on `stations` is the key it refers to — both
-materialized by the `links: - parent: stations` line in the config. The values
+parent station, added by its `links: - parent: stations` line, and `_id` on
+`stations` is the key it refers to, added by that table's `row_id: true`. The values
 are global row ordinals rather than per-scope counters, so
 `measurements._stations_id == stations._id` stays a correct join however often
 `<monitoring_stations>` repeats.
