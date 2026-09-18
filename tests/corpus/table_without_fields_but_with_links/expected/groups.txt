@@ -1,0 +1,9 @@
+# frozen snapshot — see tests/frozen_corpus.rs
+table: groups
+rows: 2
+columns:
+  1. _id: UInt64 (not null)
+  2. name: Utf8 (not null)
+data:
+  "0" | "north"
+  "1" | "south"

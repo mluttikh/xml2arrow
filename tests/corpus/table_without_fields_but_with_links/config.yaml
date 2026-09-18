@@ -1,0 +1,33 @@
+# A version 2 table without fields is output when it has a column. `stations`
+# declares no fields, but its key and its link to `groups` are columns, so it
+# appears, and it is the table that relates each reading to its group. `counter`
+# has no column at all: it only counts rows for the `index_of:` link, and stays
+# out of the output, as a table without fields always did in version 1.
+version: 2
+tables:
+  - name: groups
+    scope: /r
+    row: g
+    row_id: true
+    fields:
+      - {name: name, path: "@name", data_type: Utf8}
+  - name: stations
+    scope: /r/g/ss
+    row: s
+    row_id: true
+    links: [{parent: groups}]
+    fields: []
+  - name: counter
+    scope: /r/g/ss/s/rs
+    row: r
+    links: []
+    fields: []
+  - name: readings
+    scope: /r/g/ss/s/rs/r
+    row: x
+    links:
+      - parent: stations
+      - index_of: /r/g/ss/s/rs/r
+        name: reading_pos
+    fields:
+      - {name: v, path: "@v", data_type: Int32}

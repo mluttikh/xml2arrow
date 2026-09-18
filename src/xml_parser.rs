@@ -241,6 +241,17 @@ fn build_link_plans(config: &Config) -> Vec<TableLinkPlan> {
     plans
 }
 
+/// Whether a table appears in the output: it does when it has a column, which
+/// is a field, a declared link, or its own key. A table with none exists only
+/// to count its rows for other tables' position columns.
+///
+/// Version 1 can declare neither links nor a key, so there this is "has
+/// fields", exactly as it always was; a version 1 table's `levels` columns do
+/// not count, which keeps its structural tables out of the output as before.
+fn emits_output(table: &TableConfig, plan: &TableLinkPlan) -> bool {
+    !table.fields.is_empty() || plan.row_id_column.is_some() || !plan.links.is_empty()
+}
+
 /// Builds a table's output schema exactly as its batches are laid out: the
 /// table's own key column when it has one, then one index column per `levels`
 /// entry (named `<level>`, `UInt32`) or per declared link (`UInt64` for a
@@ -400,7 +411,10 @@ impl Parser {
             .config
             .tables
             .iter()
-            .position(|tc| tc.name == table && !tc.fields.is_empty())
+            .enumerate()
+            .position(|(idx, tc)| {
+                tc.name == table && emits_output(tc, link_plan(&self.inner.link_plans, idx))
+            })
             .map(|idx| self.inner.table_schemas[idx].clone())
     }
 
@@ -701,7 +715,7 @@ impl Parser {
             .tables
             .iter()
             .enumerate()
-            .filter(|(_, tc)| !tc.fields.is_empty())
+            .filter(|&(idx, tc)| emits_output(tc, link_plan(&self.inner.link_plans, idx)))
             .map(|(idx, _)| idx);
         let first = output_tables.next();
         match (first, output_tables.next()) {
@@ -1130,10 +1144,10 @@ impl<'p, S: EventSource> BatchStream<'p, S> {
         };
         for table_idx in next_table..self.converter.table_builders.len() {
             let table = &self.converter.table_builders[table_idx];
-            // Structural tables never emit; tables whose rows all went out
-            // in threshold flushes have nothing left. Skipping them keeps
+            // A table without columns never emits; tables whose rows all went
+            // out in threshold flushes have nothing left. Skipping them keeps
             // the "a yielded batch always has ≥ 1 row" contract.
-            if table.field_builders.is_empty() || table.rows_in_batch == 0 {
+            if !table.emits() || table.rows_in_batch == 0 {
                 continue;
             }
             self.state = StreamState::Draining {
@@ -2252,7 +2266,7 @@ impl XmlToArrowConverter {
         }
         let mut record_batches = IndexMap::new();
         for table_builder in &mut self.table_builders {
-            if !table_builder.field_builders.is_empty() {
+            if table_builder.emits() {
                 let record_batch = table_builder.flush(false)?;
                 record_batches.insert(table_builder.meta.name.clone(), record_batch);
             }
@@ -2960,7 +2974,7 @@ struct TableBuilder {
     /// often container elements repeat and however the output was batched.
     global_row_index: u64,
     /// Rows finalized into the array builders since the last `flush()`.
-    /// Always 0 for structural tables (empty `fields`), which never emit.
+    /// Always 0 for a table without columns, which never emits.
     rows_in_batch: usize,
     /// Raw field-value bytes accumulated since the last `flush()`, summed
     /// across all of a table's fields (one add per field per row). This is a
@@ -3014,6 +3028,12 @@ impl TableBuilder {
         }
     }
 
+    /// Whether this table appears in the output: it has a field, or a key or
+    /// link column. The same rule as [`emits_output`], read from the builder.
+    fn emits(&self) -> bool {
+        !self.field_builders.is_empty() || self.has_link_columns
+    }
+
     /// Appends this table's key and declared-link columns for the row about to
     /// be saved.
     ///
@@ -3026,9 +3046,9 @@ impl TableBuilder {
     /// written here is the ordinal this very row receives, and the same number
     /// its children have already stored as their foreign key.
     fn append_link_columns(&mut self, link_values: &[u64]) {
-        if self.field_builders.is_empty() {
-            return;
-        }
+        // A table with a key or link column has a column, so it emits: there
+        // is no table without columns to skip here.
+        debug_assert!(self.emits());
         if let Some(id_builder) = &mut self.id_builder {
             id_builder.append_value(self.global_row_index);
         }
@@ -3063,13 +3083,17 @@ impl TableBuilder {
     }
 
     fn save_row(&mut self, indices: &[u32]) -> Result<()> {
-        // Structural tables (empty `fields`) exist only to feed their
-        // `row_index` counter to child tables; they are skipped by every
-        // emission path. Appending their index values would grow builders
-        // nobody ever reads — under streaming, where all *output* tables
-        // flush periodically, that would be the one unbounded allocation.
-        // Only the `row_index` advance below is observable for them.
-        if !self.field_builders.is_empty() {
+        // A table without columns exists only to feed its `row_index` counter
+        // to other tables; it is skipped by every emission path. Appending its
+        // index values would grow builders nobody ever reads — under
+        // streaming, where all *output* tables flush periodically, that would
+        // be the one unbounded allocation. Only the counter advance below is
+        // observable for it.
+        //
+        // Written as the two tests rather than through `emits()` so that a
+        // table with fields, which is every table on the benchmarked path,
+        // takes the one test it took before tables without fields could emit.
+        if !self.field_builders.is_empty() || self.has_link_columns {
             // 1. Write the parent foreign keys.
             // The `indices` slice contains the row_index of each ancestor table,
             // in order of hierarchy. These align 1:1 with the `levels` defined
@@ -7750,6 +7774,36 @@ mod tests {
             }
         }
 
+        /// A table without fields but with a key streams like any other
+        /// output table, flushing its key column on the same thresholds.
+        #[test]
+        fn a_table_without_fields_but_with_a_key_streams_like_a_full_parse() {
+            let xml = r#"<r><g><ss>
+                <s><rs><r><v>1</v></r><r><v>2</v></r></rs></s>
+                <s><rs><r><v>3</v></r></rs></s>
+              </ss></g></r>"#;
+            let yaml = r#"
+                version: 2
+                tables:
+                  - name: stations
+                    scope: /r/g/ss
+                    row: s
+                    row_id: true
+                    fields: []
+                  - name: readings
+                    scope: /r/g/ss/s/rs
+                    row: r
+                    links: [{parent: stations}]
+                    fields:
+                      - {name: v, path: v, data_type: Int32}
+                "#;
+            assert_stream_equals_full_parse(
+                xml,
+                yaml,
+                BatchOptions::default().with_max_rows_per_batch(1),
+            );
+        }
+
         #[test]
         fn structural_table_feeds_fks_but_never_emits() {
             // A fields-less table exists only to feed its row counter to
@@ -9169,6 +9223,129 @@ mod tests {
         let readings = linked.get("readings").unwrap();
         assert_array_values!(readings, "<station>", vec![0u32, 0, 1], UInt32Array);
         assert_array_values!(readings, "<reading>", vec![0u32, 1, 0], UInt32Array);
+    }
+
+    /// Groups of stations of readings, where `stations` has no fields of its
+    /// own: it exists to relate readings to groups.
+    const GROUPED_STATIONS_XML: &str = r#"<r>
+        <g name="north">
+          <ss>
+            <s><rs><r><v>1</v></r><r><v>2</v></r></rs></s>
+            <s><rs><r><v>3</v></r></rs></s>
+          </ss>
+        </g>
+        <g name="south">
+          <ss><s><rs><r><v>4</v></r></rs></s></ss>
+        </g>
+      </r>"#;
+
+    /// A table appears in the output when it has a column. Without fields, the
+    /// key `row_id:` declares is still a column, so the table is output with
+    /// it: the key the child's link refers to exists on the other side of the
+    /// join, including for a parent without children.
+    #[test]
+    fn a_table_without_fields_but_with_a_key_is_output() {
+        let batches = parse(
+            GROUPED_STATIONS_XML,
+            r#"
+            version: 2
+            tables:
+              - name: stations
+                scope: /r/g/ss
+                row: s
+                row_id: true
+                fields: []
+              - name: readings
+                scope: /r/g/ss/s/rs
+                row: r
+                links: [{parent: stations}]
+                fields:
+                  - {name: v, path: v, data_type: Int32}
+            "#,
+        );
+        let stations = batches.get("stations").unwrap();
+        assert_eq!(stations.num_columns(), 1);
+        assert_array_values!(stations, "_id", vec![0u64, 1, 2], UInt64Array);
+        assert_array_values!(
+            batches.get("readings").unwrap(),
+            "_stations_id",
+            vec![0u64, 0, 1, 2],
+            UInt64Array
+        );
+    }
+
+    /// A table without fields in the middle of a chain holds the only record of
+    /// how its rows relate to the table around them. Leaving it out, as it
+    /// used to be, dropped that relation: readings could no longer be joined
+    /// to groups, although the config declared how.
+    #[test]
+    fn a_table_without_fields_keeps_the_links_it_declares() {
+        let batches = parse(
+            GROUPED_STATIONS_XML,
+            r#"
+            version: 2
+            tables:
+              - name: groups
+                scope: /r
+                row: g
+                row_id: true
+                fields:
+                  - {name: name, path: "@name", data_type: Utf8}
+              - name: stations
+                scope: /r/g/ss
+                row: s
+                row_id: true
+                links: [{parent: groups}]
+                fields: []
+              - name: readings
+                scope: /r/g/ss/s/rs
+                row: r
+                links: [{parent: stations}]
+                fields:
+                  - {name: v, path: v, data_type: Int32}
+            "#,
+        );
+        let stations = batches.get("stations").unwrap();
+        assert_array_values!(stations, "_id", vec![0u64, 1, 2], UInt64Array);
+        assert_array_values!(stations, "_groups_id", vec![0u64, 0, 1], UInt64Array);
+        assert_array_values!(
+            batches.get("readings").unwrap(),
+            "_stations_id",
+            vec![0u64, 0, 1, 2],
+            UInt64Array
+        );
+    }
+
+    /// A table with no column at all, no fields, key or link, only counts its
+    /// rows for other tables, and stays out of the output as it always has.
+    #[test]
+    fn a_table_without_columns_stays_out_of_the_output() {
+        let config = config_from_yaml!(
+            r#"
+            version: 2
+            tables:
+              - name: stations
+                scope: /r/g/ss
+                row: s
+                fields: []
+              - name: readings
+                scope: /r/g/ss/s/rs
+                row: r
+                links: [{index_of: /r/g/ss/s, name: station}]
+                fields:
+                  - {name: v, path: v, data_type: Int32}
+            "#
+        );
+        let parser = Parser::new(&config).unwrap();
+        assert!(parser.schema("stations").is_none());
+        let batches = parser.parse_slice(GROUPED_STATIONS_XML.as_bytes()).unwrap();
+        assert!(!batches.contains_key("stations"));
+        assert_array_values!(
+            batches.get("readings").unwrap(),
+            "station",
+            vec![0u32, 0, 1, 0],
+            UInt32Array
+        );
     }
 
     /// A table without `row_id:` has no key column, and a table nobody links

@@ -1,0 +1,11 @@
+<r>
+  <g name="north">
+    <ss>
+      <s><rs><r><x v="1"/><x v="2"/></r><r><x v="3"/></r></rs></s>
+      <s><rs><r><x v="4"/></r></rs></s>
+    </ss>
+  </g>
+  <g name="south">
+    <ss><s><rs><r><x v="5"/></r></rs></s></ss>
+  </g>
+</r>
