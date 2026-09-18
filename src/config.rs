@@ -119,10 +119,17 @@ pub struct ParserOptions {
     /// data looks wrong. With this enabled, every offending field is reported
     /// at once as [`Error::UnmatchedFields`](crate::errors::Error).
     ///
-    /// Off by default because a field that legitimately appears in only *some*
-    /// documents is a normal configuration, and enabling it would change the
-    /// outcome of parses that work today. A future release makes strictness
-    /// the default and moves the opt-out to the field.
+    /// Off by default, in both configuration versions, because it also fails
+    /// documents that are correct: one with no rows, where no field matches,
+    /// and one that lacks an optional element, which is what `nullable` often
+    /// means. Version 2 already fails a non-nullable field at its first row
+    /// without a value, so what this adds there is the nullable field whose
+    /// misspelled path would otherwise be a column of nulls. Turn it on when
+    /// every field has to appear in every document and no document is empty.
+    ///
+    /// With the streaming entry points, the error arrives after the last
+    /// batch. The batches already returned stay valid: the error says the
+    /// config did not match the document, not that the rows are wrong.
     ///
     /// **Interaction with [`stop_at_paths`](Self::stop_at_paths):** stopping
     /// early guarantees that every field below the stop path captures nothing,
