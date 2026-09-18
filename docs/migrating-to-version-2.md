@@ -183,7 +183,9 @@ edit, and check the output once they are all made:
    rows of one enclosing table; when there is one entry more than there are
    enclosing tables, the last one counts the table's own rows. (The full rule is
    under [`levels`](configuration-v1.md#levels).) A nested table always needs
-   `links:`, so give one that had no `levels:` `links: []`.
+   `links:`, so give one that had no `levels:` `links: []`. A table that an
+   entry counts must row at an element below its `scope`, not at `row: "."`,
+   or every position would be 0; see [`index_of:`](configuration.md#index_of).
 5. On every `Utf8` field, set `trim: false`, and on every non-nullable one,
    `on_missing: empty`.
 

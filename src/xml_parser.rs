@@ -203,20 +203,6 @@ fn build_link_plans(config: &Config) -> Vec<TableLinkPlan> {
         return Vec::new();
     }
 
-    // An `index_of` path names the table whose rows it counts: the table's own
-    // row element counts its own rows, and an enclosing table's row element
-    // counts that table's. Another table sharing this table's scope encloses
-    // nothing, so it is never the answer.
-    let index_of_table = |table_idx: usize, path: &str, scope: &str| {
-        if paths_equal(path, scope) {
-            return Some(table_idx);
-        }
-        config.tables.iter().position(|t| {
-            let other = t.link_scope_path();
-            paths_equal(&other, path) && !paths_equal(&other, scope)
-        })
-    };
-
     let mut plans: Vec<TableLinkPlan> = vec![TableLinkPlan::default(); config.tables.len()];
 
     for (table_idx, table) in config.tables.iter().enumerate() {
@@ -243,7 +229,8 @@ fn build_link_plans(config: &Config) -> Vec<TableLinkPlan> {
                         Some(default_row_id_name(&config.tables[parent_idx]));
                 }
             } else if let Some(index_of) = link.index_of.as_deref()
-                && let Some(ancestor_idx) = index_of_table(table_idx, index_of, &scope)
+                && let Some(ancestor_idx) =
+                    config.table_counted_by_index_of(table_idx, &scope, index_of)
             {
                 plans[table_idx].links.push(LinkSpec {
                     kind: LinkKind::IndexOf,

@@ -445,7 +445,7 @@ impl Config {
             }
             self.validate_table_path(table, table_idx)?;
             self.validate_declared_row(table)?;
-            self.validate_declared_links(table)?;
+            self.validate_declared_links(table, table_idx)?;
             self.validate_table_fields(table)?;
         }
 
@@ -628,7 +628,7 @@ impl Config {
     /// Checks declared `links:` — that each names exactly one kind, refers to
     /// a table that genuinely encloses this one, and contributes a column name
     /// nothing else has claimed.
-    fn validate_declared_links(&self, table: &TableConfig) -> Result<()> {
+    fn validate_declared_links(&self, table: &TableConfig, table_idx: usize) -> Result<()> {
         let Some(links) = &table.links else {
             return Ok(());
         };
@@ -661,7 +661,9 @@ impl Config {
             }
             match (link.parent.as_deref(), link.index_of.as_deref()) {
                 (Some(parent), None) => self.validate_parent_link(table, &scope, parent)?,
-                (None, Some(index_of)) => self.validate_index_of_link(table, &scope, index_of)?,
+                (None, Some(index_of)) => {
+                    self.validate_index_of_link(table, table_idx, &scope, index_of)?;
+                }
                 // Neither or both. They produce different column types with
                 // different guarantees, so picking one would be a guess.
                 _ => {
@@ -727,25 +729,63 @@ impl Config {
     /// the ordinal costs nothing at parse time and is identical to the legacy
     /// `<level>` value for that table. An arbitrary path would need a per-node
     /// occurrence counter maintained on every element open.
+    ///
+    /// The table it names must also be able to count past 0. A table whose
+    /// row element is its own scope element, as with `row: "."`, holds one row
+    /// per occurrence of that element, and its count restarts at every
+    /// occurrence, so a link counting it is a column of zeros.
     fn validate_index_of_link(
         &self,
         table: &TableConfig,
+        table_idx: usize,
         scope: &str,
         index_of: &str,
     ) -> Result<()> {
-        let counts_a_table = paths_equal(scope, index_of)
-            || self.tables.iter().any(|t| {
-                let other = t.link_scope_path();
-                paths_equal(&other, index_of) && path_is_strictly_under(scope, &other)
-            });
-        if !counts_a_table {
+        let Some(counted_idx) = self.table_counted_by_index_of(table_idx, scope, index_of) else {
             return Err(ConfigIssue::IndexOfNotAncestorTable {
                 table: table.name.clone(),
                 index_of: index_of.to_string(),
             }
             .into());
+        };
+        let counted = &self.tables[counted_idx];
+        // Only a declared row: a table without one is rejected for that, and
+        // its row element is not yet known.
+        if let Some(row_path) = counted.row_path()
+            && paths_equal(&row_path, counted.path())
+        {
+            return Err(ConfigIssue::IndexOfAlwaysZero {
+                table: table.name.clone(),
+                index_of: index_of.to_string(),
+                counted_table: counted.name.clone(),
+                scope: counted.path().to_string(),
+            }
+            .into());
         }
         Ok(())
+    }
+
+    /// The table an `index_of:` link on the table at `table_idx` counts, or
+    /// `None` when the path names no such table.
+    ///
+    /// The path names a table by its row element: the table's own, whose
+    /// `scope` is passed in so it is resolved once per table, or the first
+    /// table in the config whose row element encloses this table's. Shared by
+    /// validation and by the parser's link plans, so the table a link is
+    /// checked against is the table it reads.
+    pub(crate) fn table_counted_by_index_of(
+        &self,
+        table_idx: usize,
+        scope: &str,
+        index_of: &str,
+    ) -> Option<usize> {
+        if paths_equal(scope, index_of) {
+            return Some(table_idx);
+        }
+        self.tables.iter().position(|t| {
+            let other = t.link_scope_path();
+            paths_equal(&other, index_of) && path_is_strictly_under(scope, &other)
+        })
     }
 
     /// Checks one table's fields: nameable, addressable by exactly one of
@@ -3818,6 +3858,80 @@ tables:
             ..Default::default()
         };
         assert!(linked(vec![link], vec![]).is_ok());
+    }
+
+    /// A table whose row is its own scope element holds one row per
+    /// occurrence of it, and its count restarts at every occurrence, so a link
+    /// counting it is a column of zeros. Rejected whether the link counts the
+    /// table's own rows or an enclosing table's.
+    #[rstest]
+    #[case::its_own_rows(".", "/a/station/ms", "inner")]
+    #[case::an_enclosing_tables_rows("m", "/a/station", "stations")]
+    fn an_index_of_counting_a_row_dot_table_is_rejected(
+        #[case] inner_row: &str,
+        #[case] index_of: &str,
+        #[case] expected_counted: &str,
+    ) {
+        // `stations` rows at its own scope element, as `inner` does in the
+        // first case.
+        let stations = TableConfig::builder("stations", "/a/station")
+            .row(".")
+            .build();
+        let inner = TableConfig::builder("inner", "/a/station/ms")
+            .row(inner_row)
+            .links(vec![Link {
+                index_of: Some(index_of.to_string()),
+                ..Default::default()
+            }])
+            .field(
+                FieldConfigBuilder::new("v", "v", DType::Int32)
+                    .build()
+                    .unwrap(),
+            )
+            .build();
+        let config = Config::builder()
+            .version(2)
+            .table(stations)
+            .table(inner)
+            .build();
+        let Err(Error::InvalidConfig {
+            reason: ConfigIssue::IndexOfAlwaysZero { counted_table, .. },
+        }) = &config
+        else {
+            panic!("expected IndexOfAlwaysZero, got {config:?}");
+        };
+        assert_eq!(counted_table, expected_counted);
+    }
+
+    /// The message names the fix: the same rows, scoped one level up, are
+    /// counted within the element around them.
+    #[test]
+    fn the_always_zero_message_says_how_to_count_the_rows() {
+        let err = ConfigIssue::IndexOfAlwaysZero {
+            table: "readings".into(),
+            index_of: "/r/g/h".into(),
+            counted_table: "h".into(),
+            scope: "/r/g/h".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Table 'readings' has index_of '/r/g/h', which counts the rows of table 'h'. That \
+             table's row is its own scope element, '/r/g/h', so each occurrence holds one row \
+             and every position would be 0; to count its rows within the element around them, \
+             scope 'h' one level up: scope: /r/g, row: h"
+        );
+        // The document element has no level up worth suggesting: the document
+        // holds it once.
+        let top = ConfigIssue::IndexOfAlwaysZero {
+            table: "t".into(),
+            index_of: "/r".into(),
+            counted_table: "t".into(),
+            scope: "/r".into(),
+        };
+        assert!(
+            top.to_string().ends_with("every position would be 0"),
+            "{top}"
+        );
     }
 
     #[test]

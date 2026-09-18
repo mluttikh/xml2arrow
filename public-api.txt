@@ -413,6 +413,11 @@ pub xml2arrow::errors::ConfigIssue::InapplicablePolicy::field: alloc::string::St
 pub xml2arrow::errors::ConfigIssue::InapplicablePolicy::policy: &'static str
 pub xml2arrow::errors::ConfigIssue::InapplicablePolicy::reason: &'static str
 pub xml2arrow::errors::ConfigIssue::InapplicablePolicy::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::IndexOfAlwaysZero
+pub xml2arrow::errors::ConfigIssue::IndexOfAlwaysZero::counted_table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::IndexOfAlwaysZero::index_of: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::IndexOfAlwaysZero::scope: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::IndexOfAlwaysZero::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::IndexOfNotAncestorTable
 pub xml2arrow::errors::ConfigIssue::IndexOfNotAncestorTable::index_of: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::IndexOfNotAncestorTable::table: alloc::string::String

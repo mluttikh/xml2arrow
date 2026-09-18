@@ -373,6 +373,23 @@ Both stations are the first in their `<group>`, so a join on the `index_of:`
 column assigns B's measurement to A. Use `index_of:` when the position itself is
 what you need, and `parent:` for joins.
 
+For the same reason, `index_of:` may not count a table whose row is its own
+`scope` element, as with `row: "."`. Each occurrence of that element holds one
+row, so every position would be 0, and the config is rejected. To count those
+rows within the element around them, scope the table one level up and name the
+element as its row:
+
+```yaml
+  # rejected: every position is 0
+  - name: h
+    scope: /r/g/h
+    row: "."
+  # counts each <h> within its <g>
+  - name: h
+    scope: /r/g
+    row: h
+```
+
 ### Column names
 
 | Column | Default name | Set it with |

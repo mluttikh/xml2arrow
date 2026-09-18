@@ -1049,6 +1049,64 @@ tables:
 }
 
 #[test]
+fn test_an_index_of_counting_a_row_dot_table_is_rejected() {
+    // Regression: an `index_of:` link naming a table whose row is its own
+    // scope element, as with `row: "."`, loaded and produced a column of
+    // zeros. Each occurrence of that element holds one row, and the count
+    // restarts at every occurrence, so the position could never be anything
+    // else. It is now rejected at load, and the message names the fix: scope
+    // the counted table one level up, which counts its rows within the element
+    // around them.
+    let xml = br#"<r><g><h><v>1</v></h><h><v>2</v></h></g><g><h><v>3</v></h></g></r>"#;
+    let err = Config::from_yaml_str(
+        r#"
+version: 2
+tables:
+  - name: h
+    scope: /r/g/h
+    row: "."
+    links: [{index_of: /r/g/h, name: pos}]
+    fields:
+      - {name: v, path: v, data_type: Int32}
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            xml2arrow::Error::InvalidConfig {
+                reason: xml2arrow::errors::ConfigIssue::IndexOfAlwaysZero { .. }
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(
+        err.to_string()
+            .ends_with("scope 'h' one level up: scope: /r/g, row: h"),
+        "{err}"
+    );
+
+    // The fix the message names: positions within each <g>.
+    let fixed = Config::from_yaml_str(
+        r#"
+version: 2
+tables:
+  - name: h
+    scope: /r/g
+    row: h
+    links: [{index_of: /r/g/h, name: pos}]
+    fields:
+      - {name: v, path: v, data_type: Int32}
+"#,
+    )
+    .unwrap();
+    let batches = Parser::new(&fixed).unwrap().parse_slice(xml).unwrap();
+    let h = batches.get("h").unwrap();
+    assert_array_values!(h, "pos", &[0, 1, 0], UInt32Array);
+    assert_array_values!(h, "v", &[1, 2, 3], Int32Array);
+}
+
+#[test]
 fn test_version_1_rejects_a_version_2_key() {
     // Regression: a config without `version: 2` could set `links:`, `row:` or
     // any other key version 2 added, and was parsed as a mix of both formats,
