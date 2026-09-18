@@ -470,10 +470,34 @@ a Parquet file written from the batches or a pyarrow table.
 | `stop_at_paths` | `[]` | Stop reading after the closing tag of any of these paths, for example to read only the header of a large file. |
 | `strip_namespaces` | `true` | Ignore namespace prefixes when matching paths. Set `false` to match names as written, which is about 4–7% faster; paths must then include any prefixes. |
 | `allow_truncated_input` | `false` | Accept a document that ends while elements are still open. By default that is an error, not a silently short result. Meant for recovery tools. |
-| `error_on_unmatched_fields` | `false` | Fail when a field matched nothing in the document, which usually means a misspelled path. Fields below a `stop_at_paths` path never match, so the two options conflict. |
+| `error_on_unmatched_fields` | `false` | Fail when a field matched nothing in the document, which usually means a misspelled path. See [Catching a misspelled path](#catching-a-misspelled-path). |
 | `max_value_bytes` | no limit | The most bytes a single value may accumulate. A larger value is an error. |
 | `validate_closing_tags` | `true` | Reject a closing tag that does not match its opening tag. Setting `false` is about 2–6% faster, but malformed input can then produce wrong rows. Only for trusted input. |
 | `validate_attributes` | `true` | Reject an element that repeats an attribute name. Setting `false` is faster on attribute-heavy documents, but a repeated attribute's values are then concatenated. Only for trusted input. |
+
+### Catching a misspelled path
+
+A misspelled path matches nothing, and what that looks like depends on the
+field. A non-nullable field fails at the first row without a value, because a
+missing value is an error by default; see
+[Values](#values-missing-invalid-and-repeated). A nullable field fills its
+column with nulls instead, which looks like data that is simply absent.
+
+`error_on_unmatched_fields: true` catches that second case: after the document,
+it fails when any field matched nothing anywhere in it, and names every such
+field at once. It is off by default because it also fails documents that are
+correct:
+
+- a document with no rows, such as an empty export, where no field matches;
+- a document that lacks an optional element, which is what `nullable` often
+  means;
+- fields below a `stop_at_paths` path, which the parse never reaches.
+
+With `parse_batches`, the error comes after the last batch. The batches already
+returned are correct; the error says the config did not match the document.
+
+Turn it on when every field has to appear in every document and no document is
+empty.
 
 ## Checking a config
 
