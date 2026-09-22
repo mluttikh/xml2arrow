@@ -361,13 +361,14 @@ pub enum ConfigIssue {
         /// The field's resolved path.
         field_path: String,
     },
-    /// An operation that requires exactly one output table (a table with a
-    /// non-empty `fields` list) — e.g. `Parser::parse_single_table`, which
-    /// exposes the parse as a single-schema `RecordBatchReader` — was invoked
-    /// on a config with a different number of them. Structural tables (empty
-    /// `fields`) don't count: they never produce output.
+    /// An operation that requires exactly one output table — e.g.
+    /// `Parser::parse_single_table`, which exposes the parse as a
+    /// single-schema `RecordBatchReader` — was invoked on a config with a
+    /// different number of them. An output table is one with a column: a
+    /// field, a key or a link. A table with none never produces output, so it
+    /// does not count.
     SingleTableRequired {
-        /// How many tables with fields the config actually has.
+        /// How many output tables the config actually has.
         output_tables: usize,
     },
     /// A table declared `row:` as an empty (or whitespace-only) string. Use
@@ -835,7 +836,7 @@ impl fmt::Display for ConfigIssue {
             ),
             ConfigIssue::SingleTableRequired { output_tables } => write!(
                 f,
-                "This operation requires a config with exactly one table with fields, but found {output_tables}"
+                "This operation requires a config with exactly one table that produces output, one with a field, a key or a link, but found {output_tables}"
             ),
             ConfigIssue::EmptyRowPath { table } => write!(
                 f,

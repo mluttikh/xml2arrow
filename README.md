@@ -285,7 +285,7 @@ version for in-memory or memory-mapped input, and
 `parser.parse_streaming(reader, options, |table, batch| { ... })` is a
 callback-style wrapper.
 
-When the config defines exactly one table with fields — the common shape for
+When the config defines exactly one output table — the common shape for
 huge documents — `parser.parse_single_table(reader, options)` exposes the
 parse as a standard `arrow::array::RecordBatchReader`, pluggable directly
 into `parquet::arrow::ArrowWriter` or DataFusion:
