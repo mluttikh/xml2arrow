@@ -429,7 +429,7 @@ impl Parser {
     /// # Errors
     ///
     /// Returns [`Error::InvalidConfig`] when the config does not have exactly
-    /// one table with fields, exactly like [`Parser::parse_single_table`].
+    /// one output table, exactly like [`Parser::parse_single_table`].
     pub fn single_table_schema(&self) -> Result<SchemaRef> {
         Ok(self.inner.table_schemas[self.single_output_table_index()?].clone())
     }
@@ -622,7 +622,7 @@ impl Parser {
     /// # Errors
     ///
     /// Returns [`Error::InvalidConfig`] when the config does not have exactly
-    /// one table with fields, exactly like [`Parser::parse_single_table`].
+    /// one output table, exactly like [`Parser::parse_single_table`].
     pub fn into_single_table<R: BufRead>(
         self,
         reader: R,
@@ -665,7 +665,7 @@ impl Parser {
     /// [`arrow::array::RecordBatchReader`].
     ///
     /// Many configs — and virtually all "huge document" ones — define exactly
-    /// one table with fields. For those, this adapter exposes the parse as
+    /// one output table. For those, this adapter exposes the parse as
     /// the Arrow ecosystem's standard reader abstraction, directly consumable
     /// by `parquet::arrow::ArrowWriter`, DataFusion, or (through the C stream
     /// interface) pyarrow.
@@ -673,8 +673,9 @@ impl Parser {
     /// # Errors
     ///
     /// Returns [`Error::InvalidConfig`] when the config does not have exactly
-    /// one table with fields (structural tables don't count — they produce no
-    /// output). Use [`Parser::parse_batches`] for multi-table configs.
+    /// one output table: one with a field, a key or a link. A table with no
+    /// column produces no output, so it does not count. Use
+    /// [`Parser::parse_batches`] for multi-table configs.
     pub fn parse_single_table<R: BufRead>(
         &self,
         reader: R,
@@ -693,7 +694,7 @@ impl Parser {
     /// # Errors
     ///
     /// Returns [`Error::InvalidConfig`] when the config does not have exactly
-    /// one table with fields, exactly like [`Parser::parse_single_table`].
+    /// one output table, exactly like [`Parser::parse_single_table`].
     pub fn parse_single_table_slice<'a>(
         &'a self,
         xml: &'a [u8],
@@ -8084,6 +8085,45 @@ mod tests {
             let concatenated = concat_batches(&schema, &zero_copy_batches).unwrap();
             let full = parser.parse_slice(xml.as_bytes()).unwrap();
             assert_eq!(&concatenated, full.get("t").unwrap());
+        }
+
+        /// A table without fields that declares a key has a column, so it is
+        /// an output table, and a config with it beside another table has two.
+        #[test]
+        fn a_table_without_fields_but_with_a_key_counts_as_an_output_table() {
+            let config = config_from_yaml!(
+                r#"
+                version: 2
+                tables:
+                  - name: stations
+                    scope: /r/ss
+                    row: s
+                    row_id: true
+                    fields: []
+                  - name: readings
+                    scope: /r/ss/s/rs
+                    row: r
+                    links: [{parent: stations}]
+                    fields:
+                      - {name: v, path: v, data_type: Int32}
+                "#
+            );
+            let parser = Parser::new(&config).unwrap();
+            let err = parser.single_table_schema().unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    Error::InvalidConfig {
+                        reason: ConfigIssue::SingleTableRequired { output_tables: 2 }
+                    }
+                ),
+                "{err:?}"
+            );
+            assert_eq!(
+                err.to_string(),
+                "This operation requires a config with exactly one table that produces output, \
+                 one with a field, a key or a link, but found 2"
+            );
         }
 
         #[test]
