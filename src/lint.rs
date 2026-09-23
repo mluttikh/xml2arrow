@@ -32,194 +32,6 @@ use crate::config::{
 };
 use crate::errors::ConfigIssue;
 
-/// One change a configuration still needs before it can declare `version: 2`.
-///
-/// Reported, all together, by [`Lint::ConfigVersion1`]. The same list drives
-/// `Config::validate` for a config that *does* declare `version: 2` — the first
-/// entry is the error — so what the lint says is left and what validation
-/// rejects cannot disagree. Version 2 has rules that no step names, because
-/// only a version 2 config can break them: a field outside its table's
-/// `row:`, for one.
-///
-/// `#[non_exhaustive]`: configuration format version 2 may tighten further
-/// before 1.0, and each new requirement arrives as a variant.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum MigrationStep {
-    /// The document sets a key the configuration does not define, which
-    /// version 1 ignores. It must be corrected or removed.
-    ///
-    /// Listed first: a misspelled key is the likeliest reason for the steps
-    /// after it. See [`Lint::UnknownKey`].
-    RemoveUnknownKey {
-        /// Where the key is, as a reader would look for it.
-        location: String,
-        /// The unknown key, as written.
-        key: String,
-    },
-    /// A table's `xml_path`, a field's `xml_path`, or a `stop_at_paths` entry
-    /// has a `.` or `..` segment, which no element can match. It must be
-    /// written without one. See [`Lint::DotSegmentInPath`].
-    RemoveDotSegment {
-        /// Where the path is.
-        location: String,
-        /// The path, as written.
-        path: String,
-    },
-    /// The table's element is spelled with `xml_path:`; the key must be
-    /// renamed to `scope:`. The value needs no change.
-    RenameTableXmlPath {
-        /// The table using `xml_path:`.
-        table: String,
-    },
-    /// The table leaves its row boundaries inferred; it must declare `row:`.
-    DeclareRow {
-        /// The table without a `row:`.
-        table: String,
-    },
-    /// The table uses `levels:`; it must declare `links:` instead.
-    ///
-    /// Every `levels` column has an `index_of:` equivalent with the same
-    /// values: a link naming the row element of the table the column counts,
-    /// whether that is an enclosing table or this table itself.
-    ReplaceLevels {
-        /// The table using `levels:`.
-        table: String,
-    },
-    /// The field is spelled with `xml_path:`; the key must be renamed to
-    /// `path:`. The value needs no change.
-    RenameFieldXmlPath {
-        /// The field's table.
-        table: String,
-        /// The field using `xml_path:`.
-        field: String,
-    },
-    /// A table nested inside another omits `links:`, so nothing in the config
-    /// says whether its rows relate to the enclosing table's. It must declare
-    /// the key — `links: []` if the table deliberately has no link.
-    LinkNestedTable {
-        /// The nested table.
-        table: String,
-        /// The nearest table enclosing it.
-        enclosing_table: String,
-    },
-    /// The field lies inside the `xml_path` of a table nested within its own,
-    /// which captures every value there, so the field never receives one. It
-    /// must move to that table, or go.
-    ///
-    /// Unlike the other steps, this one describes a column that is already
-    /// empty under version 1; see [`Lint::FieldInsideNestedTable`].
-    MoveFieldToNestedTable {
-        /// The table the field is declared on.
-        table: String,
-        /// The field that never receives a value.
-        field: String,
-        /// The field's resolved path.
-        field_path: String,
-        /// The nested table that captures values there.
-        nested_table: String,
-    },
-}
-
-impl MigrationStep {
-    /// The validation error for a config that declares `version: 2` while this
-    /// step is still outstanding.
-    pub(crate) fn into_config_issue(self) -> ConfigIssue {
-        match self {
-            MigrationStep::RemoveUnknownKey { location, key } => {
-                ConfigIssue::UnknownKey { location, key }
-            }
-            MigrationStep::RemoveDotSegment { location, path } => {
-                ConfigIssue::DotSegmentInPath { location, path }
-            }
-            MigrationStep::RenameTableXmlPath { table } => ConfigIssue::ReplacedKey {
-                location: format!("table '{table}'"),
-                key: "xml_path",
-                replacement: "scope",
-            },
-            MigrationStep::DeclareRow { table } => ConfigIssue::MissingRow { table },
-            MigrationStep::ReplaceLevels { table } => ConfigIssue::ReplacedKey {
-                location: format!("table '{table}'"),
-                key: "levels",
-                replacement: "links",
-            },
-            MigrationStep::RenameFieldXmlPath { table, field } => ConfigIssue::ReplacedKey {
-                location: format!("field '{field}' of table '{table}'"),
-                key: "xml_path",
-                replacement: "path",
-            },
-            MigrationStep::LinkNestedTable {
-                table,
-                enclosing_table,
-            } => ConfigIssue::NestedTableWithoutLinks {
-                table,
-                enclosing_table,
-            },
-            MigrationStep::MoveFieldToNestedTable {
-                table,
-                field,
-                field_path,
-                nested_table,
-            } => ConfigIssue::FieldInsideNestedTable {
-                table,
-                field,
-                field_path,
-                nested_table,
-            },
-        }
-    }
-}
-
-impl fmt::Display for MigrationStep {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            MigrationStep::RemoveUnknownKey { location, key } => write!(
-                f,
-                "{location}: '{key}' is not a configuration key; correct its spelling, or remove it"
-            ),
-            MigrationStep::RemoveDotSegment { location, path } => write!(
-                f,
-                "{location}: the path '{path}' has a '.' or '..' segment, which no element can \
-                 match; write it without one"
-            ),
-            MigrationStep::RenameTableXmlPath { table } => write!(
-                f,
-                "table '{table}': rename the `xml_path:` key to `scope:`; the value is unchanged"
-            ),
-            MigrationStep::DeclareRow { table } => {
-                write!(f, "table '{table}': declare `row:`; its rows are inferred")
-            }
-            MigrationStep::ReplaceLevels { table } => {
-                write!(f, "table '{table}': replace `levels:` with `links:`")
-            }
-            MigrationStep::RenameFieldXmlPath { table, field } => write!(
-                f,
-                "field '{field}' of table '{table}': rename the `xml_path:` key to `path:`; \
-                 the value is unchanged"
-            ),
-            MigrationStep::LinkNestedTable {
-                table,
-                enclosing_table,
-            } => write!(
-                f,
-                "table '{table}': declare `links:` relating it to '{enclosing_table}', which \
-                 encloses it — or `links: []` if it deliberately has no link"
-            ),
-            MigrationStep::MoveFieldToNestedTable {
-                table,
-                field,
-                field_path,
-                nested_table,
-            } => write!(
-                f,
-                "field '{field}' of table '{table}': its path {field_path} is inside table \
-                 '{nested_table}', which captures every value there, so it never receives one; \
-                 declare it on '{nested_table}', or remove it"
-            ),
-        }
-    }
-}
-
 /// An advisory finding about a configuration.
 ///
 /// `#[non_exhaustive]`: new lints are added in minor releases, and matches must
@@ -356,16 +168,22 @@ pub enum Lint {
     /// Version 1 keeps working, and this lint changes nothing about how a
     /// document parses. Its job is to be the one place a version 1 user hears
     /// about the deprecation without rereading the documentation, and to say
-    /// exactly what is left: `steps` is everything `version: 2` would still
-    /// reject, in the order it appears in the YAML.
+    /// what is left: `issues` holds the errors declaring `version: 2` would
+    /// raise, in the order they appear in the YAML.
     ///
-    /// Every table of a version 1 config has at least one step, since none can
-    /// declare `row:`, so `steps` is empty only for a config without tables.
+    /// Three kinds are left out, because each has its own lint that says what
+    /// it does to the output today, and reporting them twice would be noise:
+    /// [`Lint::UnknownKey`], [`Lint::DotSegmentInPath`] and
+    /// [`Lint::FieldInsideNestedTable`]. Version 2 rejects those as well.
+    ///
+    /// Every table of a version 1 config has at least one issue, since none can
+    /// declare `row:`, so `issues` is empty only for a config without tables.
     /// The notice also says that declaring `version: 2` switches two defaults
     /// (see [`Config::version`](crate::Config::version)).
     ConfigVersion1 {
-        /// What must change before the config can declare `version: 2`.
-        steps: Vec<MigrationStep>,
+        /// The errors declaring `version: 2` would raise, apart from the kinds
+        /// reported as lints of their own.
+        issues: Vec<ConfigIssue>,
     },
 }
 
@@ -443,7 +261,7 @@ impl fmt::Display for Lint {
                 fields.len(),
                 fields.join(", "),
             ),
-            Lint::ConfigVersion1 { steps } => write_config_version_1(f, steps),
+            Lint::ConfigVersion1 { issues } => write_config_version_1(f, issues),
         }
     }
 }
@@ -454,11 +272,10 @@ impl fmt::Display for Lint {
 /// Grouped rather than listed because the configs most likely to be far from
 /// version 2 are the largest ones — a config generated from a schema can have
 /// hundreds of fields, every one spelled `xml_path:`, and one line per field
-/// would bury the other kinds of step under a wall of identical ones. The full
-/// list is in `steps` for anything that wants to act on it.
-fn write_config_version_1(f: &mut fmt::Formatter<'_>, steps: &[MigrationStep]) -> fmt::Result {
-    let (mut unknown, mut dotted, mut scopes, mut rows, mut levels, mut fields, mut links) = (
-        Vec::new(),
+/// would bury the other kinds of change under a wall of identical ones. The
+/// full list is in `issues` for anything that wants to act on it.
+fn write_config_version_1(f: &mut fmt::Formatter<'_>, issues: &[ConfigIssue]) -> fmt::Result {
+    let (mut scopes, mut rows, mut levels, mut fields, mut links, mut other) = (
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -466,49 +283,35 @@ fn write_config_version_1(f: &mut fmt::Formatter<'_>, steps: &[MigrationStep]) -
         Vec::new(),
         Vec::new(),
     );
-    let mut captured = Vec::new();
-    for step in steps {
-        match step {
-            MigrationStep::RemoveUnknownKey { location, key } => {
-                unknown.push(format!("'{key}' in {location}"))
-            }
-            MigrationStep::RemoveDotSegment { location, path } => {
-                dotted.push(format!("'{path}' in {location}"))
-            }
-            MigrationStep::RenameTableXmlPath { table } => scopes.push(table.clone()),
-            MigrationStep::DeclareRow { table } => rows.push(table.clone()),
-            MigrationStep::ReplaceLevels { table } => levels.push(table.clone()),
-            MigrationStep::RenameFieldXmlPath { table, field } => {
-                fields.push(format!("{table}.{field}"))
-            }
-            MigrationStep::LinkNestedTable {
+    for issue in issues {
+        match issue {
+            ConfigIssue::ReplacedKey {
+                table,
+                field: None,
+                key: "xml_path",
+                ..
+            } => scopes.push(table.clone()),
+            ConfigIssue::MissingRow { table } => rows.push(table.clone()),
+            ConfigIssue::ReplacedKey {
+                table,
+                key: "levels",
+                ..
+            } => levels.push(table.clone()),
+            ConfigIssue::ReplacedKey {
+                table,
+                field: Some(field),
+                ..
+            } => fields.push(format!("{table}.{field}")),
+            ConfigIssue::NestedTableWithoutLinks {
                 table,
                 enclosing_table,
             } => links.push(format!("{table} inside {enclosing_table}")),
-            MigrationStep::MoveFieldToNestedTable {
-                table,
-                field,
-                nested_table,
-                ..
-            } => captured.push(format!("{table}.{field} inside {nested_table}")),
+            // Anything else is stated as the error itself.
+            other_issue => other.push(other_issue.to_string()),
         }
     }
 
     let mut left = Vec::new();
-    if !unknown.is_empty() {
-        left.push(format!(
-            "{} must be corrected or removed ({})",
-            counted(unknown.len(), "unknown key", "unknown keys"),
-            first_few(&unknown),
-        ));
-    }
-    if !dotted.is_empty() {
-        left.push(format!(
-            "{} with a '.' or '..' segment must be written without one ({})",
-            counted(dotted.len(), "path", "paths"),
-            first_few(&dotted),
-        ));
-    }
     if !scopes.is_empty() {
         left.push(format!(
             "{} must rename the `xml_path:` key to `scope:` ({})",
@@ -545,18 +348,8 @@ fn write_config_version_1(f: &mut fmt::Formatter<'_>, steps: &[MigrationStep]) -
             first_few(&links),
         ));
     }
-    if !captured.is_empty() {
-        left.push(format!(
-            "{} inside a nested table never {} a value, and must move to that table or go ({})",
-            counted(captured.len(), "field", "fields"),
-            if captured.len() == 1 {
-                "receives"
-            } else {
-                "receive"
-            },
-            first_few(&captured),
-        ));
-    }
+    left.extend(other);
+
     write!(
         f,
         "This config uses configuration format version 1, which is deprecated. "
@@ -586,7 +379,7 @@ fn counted(n: usize, singular: &str, plural: &str) -> String {
 }
 
 /// Up to three names, then an ellipsis — enough to find the first ones, short
-/// enough that one kind of step cannot crowd out the others.
+/// enough that one kind of change cannot crowd out the others.
 fn first_few(names: &[String]) -> String {
     const SHOWN: usize = 3;
     let mut out = names
@@ -721,9 +514,22 @@ impl Config {
         // does *today*, which is more urgent than a deprecation. Any version
         // other than 1 or 2 is a validation error, not a version 1 config.
         if self.is_version_1() {
-            lints.push(Lint::ConfigVersion1 {
-                steps: self.version_2_steps(),
-            });
+            // Without the kinds that have a lint of their own, above: each of
+            // those says what the problem does to the output today, which
+            // matters more than that version 2 rejects it too.
+            let issues = self
+                .version_2_issues()
+                .into_iter()
+                .filter(|issue| {
+                    !matches!(
+                        issue,
+                        ConfigIssue::UnknownKey { .. }
+                            | ConfigIssue::DotSegmentInPath { .. }
+                            | ConfigIssue::FieldInsideNestedTable { .. }
+                    )
+                })
+                .collect();
+            lints.push(Lint::ConfigVersion1 { issues });
         }
         lints
     }
@@ -829,14 +635,48 @@ mod tests {
         use super::*;
         use crate::errors::Error;
 
-        fn steps(config: &Config) -> Option<Vec<MigrationStep>> {
+        fn issues(config: &Config) -> Option<Vec<ConfigIssue>> {
             config.lint().into_iter().find_map(|lint| match lint {
-                Lint::ConfigVersion1 { steps } => Some(steps),
+                Lint::ConfigVersion1 { issues } => Some(issues),
                 _ => None,
             })
         }
 
-        /// A version 1 config with one of every step, in the order they appear.
+        fn notice(config: &Config) -> String {
+            config
+                .lint()
+                .into_iter()
+                .find(|l| matches!(l, Lint::ConfigVersion1 { .. }))
+                .unwrap()
+                .to_string()
+        }
+
+        fn table_key(table: &str, key: &'static str, replacement: &'static str) -> ConfigIssue {
+            ConfigIssue::ReplacedKey {
+                table: table.into(),
+                field: None,
+                key,
+                replacement,
+            }
+        }
+
+        fn field_key(table: &str, field: &str) -> ConfigIssue {
+            ConfigIssue::ReplacedKey {
+                table: table.into(),
+                field: Some(field.into()),
+                key: "xml_path",
+                replacement: "path",
+            }
+        }
+
+        fn missing_row(table: &str) -> ConfigIssue {
+            ConfigIssue::MissingRow {
+                table: table.into(),
+            }
+        }
+
+        /// A version 1 config with one of every kind of change, in the order
+        /// they appear.
         fn legacy() -> Config {
             config_from_yaml!(
                 r#"
@@ -862,42 +702,19 @@ tables:
         #[test]
         fn a_version_1_config_is_told_everything_that_is_left_in_order() {
             assert_eq!(
-                steps(&legacy()).unwrap(),
+                issues(&legacy()).unwrap(),
                 vec![
-                    MigrationStep::RenameTableXmlPath {
-                        table: "stations".into()
-                    },
-                    MigrationStep::DeclareRow {
-                        table: "stations".into()
-                    },
-                    MigrationStep::RenameFieldXmlPath {
-                        table: "stations".into(),
-                        field: "id".into(),
-                    },
-                    MigrationStep::RenameTableXmlPath {
-                        table: "measurements".into()
-                    },
-                    MigrationStep::DeclareRow {
-                        table: "measurements".into()
-                    },
-                    MigrationStep::ReplaceLevels {
-                        table: "measurements".into()
-                    },
-                    MigrationStep::RenameFieldXmlPath {
-                        table: "measurements".into(),
-                        field: "v".into(),
-                    },
-                    MigrationStep::RenameTableXmlPath {
-                        table: "notes".into()
-                    },
-                    MigrationStep::DeclareRow {
-                        table: "notes".into()
-                    },
-                    MigrationStep::RenameFieldXmlPath {
-                        table: "notes".into(),
-                        field: "text".into(),
-                    },
-                    MigrationStep::LinkNestedTable {
+                    table_key("stations", "xml_path", "scope"),
+                    missing_row("stations"),
+                    field_key("stations", "id"),
+                    table_key("measurements", "xml_path", "scope"),
+                    missing_row("measurements"),
+                    table_key("measurements", "levels", "links"),
+                    field_key("measurements", "v"),
+                    table_key("notes", "xml_path", "scope"),
+                    missing_row("notes"),
+                    field_key("notes", "text"),
+                    ConfigIssue::NestedTableWithoutLinks {
                         table: "notes".into(),
                         enclosing_table: "stations".into(),
                     },
@@ -910,10 +727,10 @@ tables:
         /// reporting both would count one change twice.
         #[test]
         fn a_table_with_levels_is_not_also_told_to_add_links() {
-            let steps = steps(&legacy()).unwrap();
-            assert!(!steps.iter().any(|s| matches!(
-                s,
-                MigrationStep::LinkNestedTable { table, .. } if table == "measurements"
+            let issues = issues(&legacy()).unwrap();
+            assert!(!issues.iter().any(|issue| matches!(
+                issue,
+                ConfigIssue::NestedTableWithoutLinks { table, .. } if table == "measurements"
             )));
         }
 
@@ -926,14 +743,11 @@ tables:
             );
             let config = Config::from_yaml_str(&yaml).unwrap();
             assert_eq!(
-                steps(&config),
+                issues(&config),
                 Some(vec![
-                    MigrationStep::RenameTableXmlPath { table: "t".into() },
-                    MigrationStep::DeclareRow { table: "t".into() },
-                    MigrationStep::RenameFieldXmlPath {
-                        table: "t".into(),
-                        field: "v".into(),
-                    },
+                    table_key("t", "xml_path", "scope"),
+                    missing_row("t"),
+                    field_key("t", "v"),
                 ])
             );
         }
@@ -947,21 +761,16 @@ tables:
   - {name: t, scope: /r, row: i, fields: [{name: v, path: v, data_type: Int32}]}
 "#
             );
-            assert_eq!(steps(&config), None);
+            assert_eq!(issues(&config), None);
         }
 
-        /// Only a config without tables has no step left, and the `version: 2`
+        /// Only a config without tables has nothing left, and the `version: 2`
         /// line can still change values, so the message says so.
         #[test]
         fn a_config_with_nothing_left_is_told_the_line_changes_defaults() {
             let config = config_from_yaml!("tables: []\n");
-            assert_eq!(steps(&config), Some(vec![]));
-            let message = config
-                .lint()
-                .into_iter()
-                .find(|l| matches!(l, Lint::ConfigVersion1 { .. }))
-                .unwrap()
-                .to_string();
+            assert_eq!(issues(&config), Some(vec![]));
+            let message = notice(&config);
             assert!(
                 message.contains("Nothing in it needs to change"),
                 "{message}"
@@ -979,46 +788,6 @@ tables:
             )
         }
 
-        /// Declaring `version: 2` rejects the key, so the notice lists it, and
-        /// first: a misspelling is the likeliest reason for what comes after.
-        #[test]
-        fn an_unknown_key_is_the_first_step() {
-            let config = config_from_yaml!(
-                r#"
-tables:
-  - {name: t, xml_path: /r, rows: i, fields: [{name: v, xml_path: /r/i/v, data_type: Utf8}]}
-"#
-            );
-            assert_eq!(
-                steps(&config).unwrap(),
-                vec![
-                    MigrationStep::RemoveUnknownKey {
-                        location: "table 't'".into(),
-                        key: "rows".into(),
-                    },
-                    MigrationStep::RenameTableXmlPath { table: "t".into() },
-                    MigrationStep::DeclareRow { table: "t".into() },
-                    MigrationStep::RenameFieldXmlPath {
-                        table: "t".into(),
-                        field: "v".into(),
-                    },
-                ]
-            );
-            let message = config
-                .lint()
-                .into_iter()
-                .find(|l| matches!(l, Lint::ConfigVersion1 { .. }))
-                .unwrap()
-                .to_string();
-            assert!(
-                message.contains(
-                    "1 unknown key must be corrected or removed ('rows' in table 't'); 1 table \
-                     must rename the `xml_path:` key to `scope:` (t); 1 table must declare `row:`"
-                ),
-                "{message}"
-            );
-        }
-
         /// `outer.count` lies inside `inner`, which captures its value.
         fn field_inside_nested_table() -> Config {
             config_from_yaml!(
@@ -1028,36 +797,6 @@ tables:
   - {name: inner, xml_path: /r/a/bs, fields: [{name: v, xml_path: /r/a/bs/b/v, data_type: Int32}]}
 "#
             )
-        }
-
-        /// Version 2 rejects the field, and no rename fixes it, so it is a step
-        /// of its own.
-        #[test]
-        fn a_field_inside_a_nested_table_is_a_step() {
-            let config = field_inside_nested_table();
-            let steps = steps(&config).unwrap();
-            assert!(
-                steps.contains(&MigrationStep::MoveFieldToNestedTable {
-                    table: "outer".into(),
-                    field: "count".into(),
-                    field_path: "/r/a/bs/@count".into(),
-                    nested_table: "inner".into(),
-                }),
-                "{steps:?}"
-            );
-            let message = config
-                .lint()
-                .into_iter()
-                .find(|l| matches!(l, Lint::ConfigVersion1 { .. }))
-                .unwrap()
-                .to_string();
-            assert!(
-                message.contains(
-                    "1 field inside a nested table never receives a value, and must move to \
-                     that table or go (outer.count inside inner)"
-                ),
-                "{message}"
-            );
         }
 
         /// The stop path has a `.` segment.
@@ -1071,33 +810,46 @@ tables:
             )
         }
 
-        /// Listed before the tables' steps, like an unknown key: a path that
-        /// matches nothing explains what follows.
-        #[test]
-        fn a_path_with_a_dot_segment_is_a_step() {
-            assert_eq!(
-                steps(&dot_segment()).unwrap().first(),
-                Some(&MigrationStep::RemoveDotSegment {
-                    location: "`parser_options.stop_at_paths`".into(),
-                    path: "/r/./end".into(),
+        /// Version 2 rejects an unknown key, a dot-segment path and a field a
+        /// nested table captures, but each already has a lint that says what
+        /// it does to the output today. It is reported there once, and not
+        /// again in the notice.
+        #[rstest::rstest]
+        #[case::unknown_key(unknown_key())]
+        #[case::dot_segment(dot_segment())]
+        #[case::field_inside_nested_table(field_inside_nested_table())]
+        fn a_problem_with_its_own_lint_is_reported_once(#[case] config: Config) {
+            let lints = config.lint();
+            let own_lints = lints
+                .iter()
+                .filter(|lint| {
+                    matches!(
+                        lint,
+                        Lint::UnknownKey { .. }
+                            | Lint::DotSegmentInPath { .. }
+                            | Lint::FieldInsideNestedTable { .. }
+                    )
                 })
+                .count();
+            assert_eq!(own_lints, 1, "{lints:?}");
+            assert!(
+                !issues(&config).unwrap().iter().any(|issue| matches!(
+                    issue,
+                    ConfigIssue::UnknownKey { .. }
+                        | ConfigIssue::DotSegmentInPath { .. }
+                        | ConfigIssue::FieldInsideNestedTable { .. }
+                )),
+                "{lints:?}"
             );
         }
 
-        /// The property `version_2_steps` exists to guarantee: the lint lists
-        /// nothing exactly when declaring `version: 2` would validate, and
-        /// otherwise the validation error is the lint's first step. A second
-        /// copy of the rules for either side could drift; one copy cannot.
-        ///
-        /// Only a config without tables has nothing left, since no version 1
-        /// table declares a row.
+        /// The property one list of issues exists to guarantee: declaring
+        /// `version: 2` fails with exactly the first issue the list names, and
+        /// every issue on it reaches the user, in the notice or as a lint of
+        /// its own. A second copy of the rules for either side could drift;
+        /// one copy cannot.
         #[test]
         fn the_notice_and_version_2_validation_agree() {
-            let with_version = |config: &Config| {
-                let mut v2 = config.clone();
-                v2.version = Some(2);
-                v2
-            };
             let configs = [
                 legacy(),
                 config_from_yaml!("tables: []\n"),
@@ -1113,17 +865,35 @@ tables:
                 dot_segment(),
             ];
             for config in configs {
-                let steps = steps(&config).expect("every case is version 1");
-                match with_version(&config).validate() {
-                    Ok(()) => assert!(steps.is_empty(), "validates, yet the lint lists {steps:?}"),
+                let all = config.version_2_issues();
+                let mut v2 = config.clone();
+                v2.version = Some(2);
+                match v2.validate() {
+                    Ok(()) => assert!(all.is_empty(), "validates, yet {all:?} are left"),
                     Err(Error::InvalidConfig { reason }) => {
-                        let first = steps.first().expect("rejected, yet the lint lists nothing");
-                        assert_eq!(
-                            format!("{reason}"),
-                            format!("{}", first.clone().into_config_issue())
-                        );
+                        assert_eq!(Some(&reason), all.first(), "{all:?}");
                     }
                     Err(other) => panic!("unexpected error: {other}"),
+                }
+                let in_notice = issues(&config).expect("every case is version 1");
+                let lints = config.lint();
+                for issue in &all {
+                    let reported = in_notice.contains(issue)
+                        || lints.iter().any(|lint| {
+                            matches!(
+                                (issue, lint),
+                                (ConfigIssue::UnknownKey { .. }, Lint::UnknownKey { .. })
+                                    | (
+                                        ConfigIssue::DotSegmentInPath { .. },
+                                        Lint::DotSegmentInPath { .. }
+                                    )
+                                    | (
+                                        ConfigIssue::FieldInsideNestedTable { .. },
+                                        Lint::FieldInsideNestedTable { .. }
+                                    )
+                            )
+                        });
+                    assert!(reported, "{issue:?} reaches the user nowhere: {lints:?}");
                 }
             }
         }
@@ -1132,18 +902,12 @@ tables:
         /// generated from a schema — hundreds of `xml_path:` fields — gets a
         /// paragraph rather than a page, and the other kinds stay visible.
         #[test]
-        fn the_message_groups_steps_and_shows_a_few_names() {
+        fn the_message_groups_changes_and_shows_a_few_names() {
             let fields: String = (0..40)
                 .map(|i| format!("      - {{name: f{i}, xml_path: /r/i/f{i}, data_type: Int32}}\n"))
                 .collect();
             let yaml = format!("tables:\n  - name: t\n    xml_path: /r\n    fields:\n{fields}");
-            let config = Config::from_yaml_str(&yaml).unwrap();
-            let message = config
-                .lint()
-                .into_iter()
-                .find(|l| matches!(l, Lint::ConfigVersion1 { .. }))
-                .unwrap()
-                .to_string();
+            let message = notice(&Config::from_yaml_str(&yaml).unwrap());
             assert!(message.contains("40 fields must rename"), "{message}");
             assert!(message.contains("t.f0, t.f1, t.f2, …"), "{message}");
             assert!(!message.contains("t.f3"), "{message}");
@@ -1157,12 +921,7 @@ tables:
   - {name: t, xml_path: /r, fields: [{name: v, xml_path: /r/i/v, data_type: Int32}]}
 "#
             );
-            let message = config
-                .lint()
-                .into_iter()
-                .find(|l| matches!(l, Lint::ConfigVersion1 { .. }))
-                .unwrap()
-                .to_string();
+            let message = notice(&config);
             assert!(
                 message.contains(
                     "1 table must declare `row:` rather than infer its rows (t); 1 field must \

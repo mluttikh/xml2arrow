@@ -235,8 +235,8 @@ These all keep working until 1.0.
 **Every version 1 config now carries a deprecation notice** in `Config::lint()`
 / `Parser::warnings()`. The config parses exactly as before; the notice is the
 only change. It lists what `version: 2` would reject, grouped by kind, and is
-structured data for tooling (`Lint::ConfigVersion1 { steps }`, each a
-`MigrationStep`):
+structured data for tooling (`Lint::ConfigVersion1 { issues }`, each the
+`ConfigIssue` that `version: 2` would raise):
 
 ```text
 This config uses configuration format version 1, which is deprecated. Before

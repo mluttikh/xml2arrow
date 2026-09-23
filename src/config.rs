@@ -31,7 +31,6 @@ use std::{
 };
 
 use crate::errors::{ConfigIssue, ConversionKind, Error, Result};
-use crate::lint::MigrationStep;
 use arrow::datatypes::DataType;
 use serde::{Deserialize, Serialize};
 
@@ -1002,17 +1001,13 @@ impl Config {
         Ok(())
     }
 
-    /// Enforces what [`Config::version`] asserts.
+    /// Enforces what [`Config::version`] declares.
     ///
-    /// Every check here is a *migration* check, not a correctness one: each of
-    /// these configs parses perfectly well without the `version:` line. What
-    /// they cannot do is parse under 1.0 semantics, which is the single thing
-    /// declaring `2` claims. Rejecting is therefore the whole feature — a
-    /// `version: 2` that quietly tolerated `levels` would assert nothing.
-    ///
-    /// Reported one at a time rather than collected. The fixes are mechanical
-    /// and usually repetitive, so the first one tells you what the rest of the
-    /// pass looks like, and the migrator applies them in bulk anyway.
+    /// Each of these configs would parse without the `version:` line; what
+    /// they cannot do is parse as version 2, which is what the line declares.
+    /// Reported one at a time: the fixes are usually repetitive, so the first
+    /// one shows what the rest look like, and `Config::to_version_2` applies
+    /// them in bulk.
     fn validate_declared_version(&self) -> Result<()> {
         let Some(version) = self.version else {
             return Ok(());
@@ -1025,12 +1020,12 @@ impl Config {
             }
         }
 
-        // The same list the deprecation lint reports for a version 1 config,
-        // so what the lint says is left and what this rejects cannot disagree.
-        // The first entry is the error: the first problem in the order a
-        // reader meets them in the YAML.
-        if let Some(step) = self.version_2_steps().into_iter().next() {
-            return Err(step.into_config_issue().into());
+        // The same list the deprecation notice reports for a version 1 config,
+        // so what the notice says is left and what this rejects cannot
+        // disagree. The first entry is the error: the first problem in the
+        // order a reader meets them in the YAML.
+        if let Some(issue) = self.version_2_issues().into_iter().next() {
+            return Err(issue.into());
         }
         self.validate_fields_inside_rows()
     }
@@ -1038,9 +1033,9 @@ impl Config {
     /// Rejects a field that lies outside its table's row element, whose value
     /// would attach to whichever row ends next.
     ///
-    /// Not a migration step, because only version 2 declares rows: a version 1
-    /// config has no row element for a field to lie outside. Checked after the
-    /// steps, so a table without `row:` has already been rejected for that, and
+    /// Not in `version_2_issues`, because only version 2 declares rows: a
+    /// version 1 config has no row element for a field to lie outside. Checked
+    /// after those, so a table without `row:` has already been rejected for that, and
     /// a field a nested table captures has been rejected for the capture. Such
     /// a field never receives a value at all, and moving it to that table is
     /// the fix; telling it to move into its row as well would send the author
@@ -1071,60 +1066,69 @@ impl Config {
         Ok(())
     }
 
-    /// Every change this configuration still needs before it can declare
-    /// `version: 2`, in the order a reader meets them in the YAML.
+    /// Every error version 2 raises for this configuration, in the order a
+    /// reader meets them in the YAML: what the config still has to change
+    /// before it can declare `version: 2`.
     ///
-    /// Empty for a config that satisfies version 2 — whether or not it says
-    /// so. Shared by `validate` (which rejects on the first entry) and
-    /// `Config::lint` (which reports all of them as the deprecation notice).
-    pub(crate) fn version_2_steps(&self) -> Vec<MigrationStep> {
+    /// Empty for a config that satisfies version 2, whether or not it says so.
+    /// Shared by `validate`, which rejects on the first entry, and
+    /// `Config::lint`, whose deprecation notice lists them.
+    pub(crate) fn version_2_issues(&self) -> Vec<ConfigIssue> {
         // Unknown keys first. A misspelled key is the likeliest explanation for
-        // the steps after it: `rows:` for `row:` is why a table is told to
+        // the issues after it: `rows:` for `row:` is why a table is told to
         // declare a row. Collecting an empty iterator allocates nothing.
-        let mut steps: Vec<MigrationStep> = self
+        let mut issues: Vec<ConfigIssue> = self
             .unknown_keys()
-            .map(|(location, key)| MigrationStep::RemoveUnknownKey {
+            .map(|(location, key)| ConfigIssue::UnknownKey {
                 location,
                 key: key.to_string(),
             })
             .collect();
-        // Then paths with a `.` or `..` segment in the keys older than this
-        // release. Like a misspelled key, such a path explains what follows:
-        // a table on one never has a row to declare.
-        steps.extend(self.dot_segment_paths().map(|(location, path)| {
-            MigrationStep::RemoveDotSegment {
+        // Then paths with a `.` or `..` segment in the keys version 1 has. Like
+        // a misspelled key, such a path explains what follows: a table on one
+        // never has a row to declare.
+        issues.extend(self.dot_segment_paths().map(|(location, path)| {
+            ConfigIssue::DotSegmentInPath {
                 location,
                 path: path.to_string(),
             }
         }));
         for table in &self.tables {
             if table.xml_path.is_some() {
-                steps.push(MigrationStep::RenameTableXmlPath {
+                issues.push(ConfigIssue::ReplacedKey {
                     table: table.name.clone(),
+                    field: None,
+                    key: "xml_path",
+                    replacement: "scope",
                 });
             }
             if table.row.is_none() {
-                steps.push(MigrationStep::DeclareRow {
+                issues.push(ConfigIssue::MissingRow {
                     table: table.name.clone(),
                 });
             }
             if !table.levels.is_empty() {
-                steps.push(MigrationStep::ReplaceLevels {
+                issues.push(ConfigIssue::ReplacedKey {
                     table: table.name.clone(),
+                    field: None,
+                    key: "levels",
+                    replacement: "links",
                 });
             }
             for field in &table.fields {
                 if field.xml_path.is_some() {
-                    steps.push(MigrationStep::RenameFieldXmlPath {
+                    issues.push(ConfigIssue::ReplacedKey {
                         table: table.name.clone(),
-                        field: field.name.clone(),
+                        field: Some(field.name.clone()),
+                        key: "xml_path",
+                        replacement: "path",
                     });
                 }
                 // Version 1 cannot reject this: the config loads today, and the
                 // column is merely empty. Version 2 has no such config to
                 // protect.
                 if let Some((field_path, nested)) = self.nested_table_capturing(table, field) {
-                    steps.push(MigrationStep::MoveFieldToNestedTable {
+                    issues.push(ConfigIssue::FieldInsideNestedTable {
                         table: table.name.clone(),
                         field: field.name.clone(),
                         field_path,
@@ -1145,19 +1149,19 @@ impl Config {
             // output gaining a column.
             //
             // Not reported for a table still using `levels:`: replacing those
-            // with `links:` is the step, and listing "add links" beside
+            // with `links:` is the fix, and listing "add links" beside
             // "replace levels" would be one change counted twice.
             if table.levels.is_empty()
                 && table.links.is_none()
                 && let Some(enclosing) = self.enclosing_table_of(table)
             {
-                steps.push(MigrationStep::LinkNestedTable {
+                issues.push(ConfigIssue::NestedTableWithoutLinks {
                     table: table.name.clone(),
                     enclosing_table: enclosing.name.clone(),
                 });
             }
         }
-        steps
+        issues
     }
 
     /// The table that captures `field`'s values instead of `table`, with the
