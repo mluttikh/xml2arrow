@@ -16,7 +16,8 @@ Everything here falls into five sections, and only the first is mandatory:
 
 If you construct configs with `TableConfig::new` / `FieldConfigBuilder` and
 parse with `Parser`, the required work is **nothing** unless you *read*
-`TableConfig::xml_path` or `FieldConfig::xml_path` — skip to §2.
+`TableConfig::xml_path` or `FieldConfig::xml_path` — skip to §2. `TableConfig::new`
+is deprecated, but keeps working until 1.0; see §4.
 
 ---
 
@@ -44,10 +45,17 @@ let config = Config::builder().tables(tables).build()?;   // build() also valida
 // before
 let table = TableConfig { name, xml_path, levels, fields };
 
-// after — `new` is unchanged and still the shortest form
-let table = TableConfig::new("items", "/data", vec![], fields);
+// after
 let table = TableConfig::builder("items", "/data").fields(fields).build();
+
+// a version 1 table with levels sets them directly
+let mut table = TableConfig::builder("items", "/data").fields(fields).build();
+table.levels = levels;
 ```
+
+`TableConfig::new(name, xml_path, levels, fields)` still compiles, unchanged,
+but is deprecated: it takes `levels`, which 1.0 removes with configuration
+format version 1. The builder has no method for `levels` for the same reason.
 
 ### ParserOptions
 
@@ -220,6 +228,7 @@ These all keep working until 1.0.
 | `parse_xml(reader, &config)` | `Parser::new(&config)?.parse(reader)` |
 | `parse_xml_slice(xml, &config)` | `Parser::new(&config)?.parse_slice(xml)` |
 | `parser.parse_streaming(reader, opts, sink)` | `for item in parser.parse_batches(reader, opts)` |
+| `TableConfig::new(name, xml_path, levels, fields)` | `TableConfig::builder(name, path)`; in version 2, `links` instead of `levels` |
 | `xml_path:` on a **table** | `scope:` in version 2 — a key rename ([converting by hand](docs/migrating-to-version-2.md#converting-by-hand)) |
 | `xml_path:` on a **field** | `path:` in version 2 — a key rename for absolute values ([converting by hand](docs/migrating-to-version-2.md#converting-by-hand)) |
 

@@ -1462,12 +1462,50 @@ fn test_truncated_file_is_rejected_rather_than_silently_short() {
 // file — an external crate, like any user's — can only build them through the
 // builders or YAML. These tests pin that the builders cover every shape the
 // struct literals did, that the deprecated entry points still behave
-// identically until 1.0 removes them, and that lints report what the
-// transition plan says they report.
+// identically until 1.0 removes them, and that lints report what they
+// document.
+
+/// `TableConfig::new` is deprecated with configuration format version 1, and
+/// keeps working until 1.0: it builds exactly the table the builder does, with
+/// `levels` set directly.
+#[test]
+#[allow(deprecated)]
+fn the_deprecated_table_constructor_matches_the_builder() {
+    use xml2arrow::config::{DType, FieldConfigBuilder, TableConfig};
+
+    let field = FieldConfigBuilder::new("v", "/data/item/v", DType::Int32)
+        .build()
+        .unwrap();
+    let from_new = TableConfig::new(
+        "items",
+        "/data",
+        vec!["item".to_string()],
+        vec![field.clone()],
+    );
+    let mut from_builder = TableConfig::builder("items", "/data").field(field).build();
+    from_builder.levels = vec!["item".to_string()];
+    assert_eq!(from_new, from_builder);
+}
 
 #[test]
 fn builders_produce_the_same_config_as_yaml() {
     use xml2arrow::config::{DType, FieldConfigBuilder, Link, RowId, TableConfig};
+
+    // A version 1 table sets `levels` directly: the builder has no method for
+    // a key that 1.0 removes along with the format.
+    let mut measurements =
+        TableConfig::builder("measurements", "/report/stations/station/measurements")
+            .fields([FieldConfigBuilder::new(
+                "value",
+                "/report/stations/station/measurements/measurement/value",
+                DType::Float64,
+            )
+            .nullable(true)
+            .scale(0.001)
+            .build()
+            .unwrap()])
+            .build();
+    measurements.levels = vec!["stations".to_string()];
 
     let built = Config::builder()
         .table(
@@ -1479,20 +1517,7 @@ fn builders_produce_the_same_config_as_yaml() {
                 )
                 .build(),
         )
-        .table(
-            TableConfig::builder("measurements", "/report/stations/station/measurements")
-                .level("stations")
-                .fields([FieldConfigBuilder::new(
-                    "value",
-                    "/report/stations/station/measurements/measurement/value",
-                    DType::Float64,
-                )
-                .nullable(true)
-                .scale(0.001)
-                .build()
-                .unwrap()])
-                .build(),
-        )
+        .table(measurements)
         .build()
         .unwrap();
 

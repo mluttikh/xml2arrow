@@ -321,8 +321,6 @@ impl xml2arrow::config::TableConfigBuilder
 pub fn xml2arrow::config::TableConfigBuilder::build(self) -> xml2arrow::config::TableConfig
 pub fn xml2arrow::config::TableConfigBuilder::field(self, xml2arrow::config::FieldConfig) -> Self
 pub fn xml2arrow::config::TableConfigBuilder::fields(self, impl core::iter::traits::collect::IntoIterator<Item = xml2arrow::config::FieldConfig>) -> Self
-pub fn xml2arrow::config::TableConfigBuilder::level(self, impl core::convert::Into<alloc::string::String>) -> Self
-pub fn xml2arrow::config::TableConfigBuilder::levels(self, impl core::iter::traits::collect::IntoIterator<Item = impl core::convert::Into<alloc::string::String>>) -> Self
 pub fn xml2arrow::config::TableConfigBuilder::links(self, impl core::iter::traits::collect::IntoIterator<Item = xml2arrow::config::Link>) -> Self
 pub fn xml2arrow::config::TableConfigBuilder::metadata(self, impl core::iter::traits::collect::IntoIterator<Item = (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>)>) -> Self
 pub fn xml2arrow::config::TableConfigBuilder::row(self, impl core::convert::Into<alloc::string::String>) -> Self
@@ -1382,8 +1380,6 @@ impl xml2arrow::config::TableConfigBuilder
 pub fn xml2arrow::config::TableConfigBuilder::build(self) -> xml2arrow::config::TableConfig
 pub fn xml2arrow::config::TableConfigBuilder::field(self, xml2arrow::config::FieldConfig) -> Self
 pub fn xml2arrow::config::TableConfigBuilder::fields(self, impl core::iter::traits::collect::IntoIterator<Item = xml2arrow::config::FieldConfig>) -> Self
-pub fn xml2arrow::config::TableConfigBuilder::level(self, impl core::convert::Into<alloc::string::String>) -> Self
-pub fn xml2arrow::config::TableConfigBuilder::levels(self, impl core::iter::traits::collect::IntoIterator<Item = impl core::convert::Into<alloc::string::String>>) -> Self
 pub fn xml2arrow::config::TableConfigBuilder::links(self, impl core::iter::traits::collect::IntoIterator<Item = xml2arrow::config::Link>) -> Self
 pub fn xml2arrow::config::TableConfigBuilder::metadata(self, impl core::iter::traits::collect::IntoIterator<Item = (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>)>) -> Self
 pub fn xml2arrow::config::TableConfigBuilder::row(self, impl core::convert::Into<alloc::string::String>) -> Self
