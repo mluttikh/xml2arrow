@@ -401,8 +401,8 @@ A config built in code is version 1 or version 2 as a whole too:
 | `path:` | `FieldConfigBuilder::new(name, path, data_type)`, which `ConfigBuilder::build` spells `path` in a version 2 config |
 | value policies | `FieldConfigBuilder::policies` and `ConfigBuilder::defaults` |
 
-`TableConfig::new` takes `levels`; build version 2 tables with
-`TableConfig::builder` instead.
+`TableConfig::new` takes `levels`, and is deprecated along with version 1;
+build tables with `TableConfig::builder` instead.
 
 ```rust
 use xml2arrow::{Config, DType, FieldConfigBuilder, Link, TableConfig};

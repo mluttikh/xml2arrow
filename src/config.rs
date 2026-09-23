@@ -1821,9 +1821,8 @@ pub enum RowId {
 /// index columns linking nested tables (`levels`), and the configuration of
 /// the fields (columns) within the table.
 ///
-/// Marked `#[non_exhaustive]`: build one with [`TableConfig::builder`] or
-/// [`TableConfig::new`], so that adding a key in a future release stays a
-/// non-breaking change.
+/// Marked `#[non_exhaustive]`: build one with [`TableConfig::builder`], so
+/// that adding a key in a future release stays a non-breaking change.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[non_exhaustive]
 pub struct TableConfig {
@@ -1952,14 +1951,20 @@ impl TableConfig {
         }
     }
 
-    /// Builds a table from the four keys every config has always had.
+    /// Builds a table from the four keys every config had before 0.20: a
+    /// version 1 table, whose rows are inferred and whose parent columns come
+    /// from `levels`.
     ///
-    /// Leaves `row`, `links` and `row_id` unset, which is the pre-0.20
-    /// behavior: row boundaries stay inferred and parent columns come from
-    /// `levels`. Use [`TableConfig::builder`] to set any of them.
-    ///
-    /// The element is held as `xml_path`, the version 1 spelling;
-    /// [`ConfigBuilder::build`] moves it to `scope` for a version 2 config.
+    /// Deprecated with configuration format version 1, which 1.0 removes along
+    /// with `levels`, so this signature cannot survive it. Use
+    /// [`TableConfig::builder`], and relate nested tables with
+    /// [`TableConfigBuilder::links`] in a version 2 config. Until then, a
+    /// version 1 table built with the builder sets [`TableConfig::levels`]
+    /// directly.
+    #[deprecated(
+        since = "0.20.0",
+        note = "configuration format version 1 is deprecated; use `TableConfig::builder`, and `links` in a version 2 config instead of `levels`"
+    )]
     #[must_use]
     pub fn new(name: &str, xml_path: &str, levels: Vec<String>, fields: Vec<FieldConfig>) -> Self {
         Self {
@@ -2021,17 +2026,16 @@ impl TableConfig {
         self.row_path().unwrap_or_else(|| self.path().to_string())
     }
 
-    /// Starts building a table configuration, adding levels and fields one at
+    /// Starts building a table configuration, adding keys and fields one at
     /// a time.
     ///
-    /// Prefer this over [`TableConfig::new`] when the levels or fields are
-    /// assembled incrementally; both are forward-compatible with future keys.
+    /// The element is held as `xml_path`, the version 1 spelling;
+    /// [`ConfigBuilder::build`] moves it to `scope` for a version 2 config.
     #[must_use]
     pub fn builder(name: &str, path: &str) -> TableConfigBuilder {
         TableConfigBuilder {
             name: name.to_string(),
             xml_path: path.to_string(),
-            levels: Vec::new(),
             fields: Vec::new(),
             row: None,
             links: None,
@@ -2133,7 +2137,6 @@ impl ConfigBuilder {
 pub struct TableConfigBuilder {
     name: String,
     xml_path: String,
-    levels: Vec<String>,
     fields: Vec<FieldConfig>,
     row: Option<String>,
     links: Option<Vec<Link>>,
@@ -2142,20 +2145,6 @@ pub struct TableConfigBuilder {
 }
 
 impl TableConfigBuilder {
-    /// Appends one parent-link level. See [`TableConfig::levels`].
-    #[must_use]
-    pub fn level(mut self, level: impl Into<String>) -> Self {
-        self.levels.push(level.into());
-        self
-    }
-
-    /// Appends several parent-link levels.
-    #[must_use]
-    pub fn levels(mut self, levels: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.levels.extend(levels.into_iter().map(Into::into));
-        self
-    }
-
     /// Declares the element whose closing tag finalizes a row. See
     /// [`TableConfig::row`] for the accepted spellings.
     #[must_use]
@@ -2215,7 +2204,7 @@ impl TableConfigBuilder {
             name: self.name,
             scope: None,
             xml_path: Some(self.xml_path),
-            levels: self.levels,
+            levels: Vec::new(),
             fields: self.fields,
             row: self.row,
             links: self.links,
@@ -2606,6 +2595,9 @@ macro_rules! config_from_yaml {
 }
 
 #[cfg(test)]
+// Version 1 tables are built with `TableConfig::new`, deprecated with that
+// format; the tests of version 1 behavior keep using it until both go.
+#[allow(deprecated)]
 mod tests {
     use std::path::PathBuf;
 

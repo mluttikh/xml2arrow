@@ -622,6 +622,9 @@ impl PathTracker {
 }
 
 #[cfg(test)]
+// Version 1 tables are built with `TableConfig::new`, deprecated with that
+// format; the tests of version 1 behavior keep using it until both go.
+#[allow(deprecated)]
 mod tests {
     use super::*;
 
