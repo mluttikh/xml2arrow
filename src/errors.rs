@@ -294,7 +294,7 @@ pub enum ConversionKind {
 /// Having this as a dedicated enum (rather than a free-form string) lets the
 /// Python bindings and structured logs distinguish e.g. a duplicate-name bug
 /// from a misaligned xml_path without substring matching.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ConfigIssue {
     /// A table had an empty `name`. Names identify output tables, so one is required.
@@ -550,8 +550,8 @@ pub enum ConfigIssue {
     // The variants below are the rules of configuration format version 2. While
     // version 1 is supported, only a config declaring `version: 2` is held to
     // them, and a version 1 config hears about the shapes it can have as lints
-    // and as steps in its deprecation notice. They are named after the rule rather than
-    // the version, and their messages state the rule and the fix, so that
+    // and in its deprecation notice, which lists these errors. They are named
+    // after the rule rather than the version, and their messages state the rule and the fix, so that
     // neither goes stale once version 2 is the only format.
     /// A table does not declare `row:`, the element that makes one row.
     MissingRow {
@@ -565,12 +565,13 @@ pub enum ConfigIssue {
     /// true once they are gone: the parser can then still recognize the old
     /// spelling and say what replaced it, rather than calling it unknown.
     ReplacedKey {
-        /// Where the key is: `table 'stations'`, `field 'id' of table
-        /// 'stations'`.
-        location: String,
+        /// The table the key is on, or whose field it is on.
+        table: String,
+        /// The field the key is on, or `None` for a key on the table.
+        field: Option<String>,
         /// The replaced key: `levels` or `xml_path`.
         key: &'static str,
-        /// The key that replaces it: `links` or `path`.
+        /// The key that replaces it: `links`, `scope` or `path`.
         replacement: &'static str,
     },
     /// A table nested inside another omits `links:` entirely.
@@ -967,14 +968,22 @@ impl fmt::Display for ConfigIssue {
                 "Table '{table}' does not declare 'row:', the element that makes one row; name the repeating element, or use row: \".\" for one row per table element"
             ),
             ConfigIssue::ReplacedKey {
-                location,
+                table,
+                field,
                 key,
                 replacement,
             } => {
-                write!(
-                    f,
-                    "The key '{key}:' in {location} is replaced by '{replacement}:'"
-                )?;
+                match field {
+                    Some(field) => write!(
+                        f,
+                        "The key '{key}:' in field '{field}' of table '{table}' is replaced by \
+                         '{replacement}:'"
+                    )?,
+                    None => write!(
+                        f,
+                        "The key '{key}:' in table '{table}' is replaced by '{replacement}:'"
+                    )?,
+                }
                 // What replacing involves differs by key, and is the part a
                 // reader needs next.
                 match *key {
@@ -1381,12 +1390,14 @@ mod tests {
         let rules = [
             ConfigIssue::MissingRow { table: "t".into() },
             ConfigIssue::ReplacedKey {
-                location: "table 't'".into(),
+                table: "t".into(),
+                field: None,
                 key: "levels",
                 replacement: "links",
             },
             ConfigIssue::ReplacedKey {
-                location: "field 'v' of table 't'".into(),
+                table: "t".into(),
+                field: Some("v".into()),
                 key: "xml_path",
                 replacement: "path",
             },
@@ -1422,7 +1433,8 @@ mod tests {
     #[test]
     fn a_replaced_key_says_what_replacing_it_involves() {
         let rename = ConfigIssue::ReplacedKey {
-            location: "field 'id' of table 'stations'".into(),
+            table: "stations".into(),
+            field: Some("id".into()),
             key: "xml_path",
             replacement: "path",
         };
@@ -1432,7 +1444,8 @@ mod tests {
              rename the key, as the value means the same"
         );
         let levels = ConfigIssue::ReplacedKey {
-            location: "table 'stations'".into(),
+            table: "stations".into(),
+            field: None,
             key: "levels",
             replacement: "links",
         };

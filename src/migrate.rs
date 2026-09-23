@@ -62,7 +62,7 @@ use std::fmt;
 use crate::config::{
     Config, DType, Link, OnMissing, TableConfig, path_is_strictly_under, path_segments,
 };
-use crate::errors::Result;
+use crate::errors::{ConfigIssue, Result};
 
 /// The result of [`Config::to_version_2`].
 #[derive(Debug, Clone, PartialEq)]
@@ -87,27 +87,6 @@ pub struct Conversion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Unconverted {
-    /// The document sets a key the configuration does not define. Version 1
-    /// ignores it and version 2 rejects it; removing it changes nothing, but if
-    /// it is a misspelling, correcting it can.
-    ///
-    /// The converted config does not carry the key when written out, since
-    /// only where it was is known, not its value.
-    UnknownKey {
-        /// Where the key is, as a reader would look for it.
-        location: String,
-        /// The unknown key, as written.
-        key: String,
-    },
-    /// A path has a `.` or `..` segment, which no element can match, so the
-    /// table has no rows, the field is never filled, or the stop path never
-    /// stops the parse. Writing it correctly changes that.
-    DotSegmentInPath {
-        /// Where the path is.
-        location: String,
-        /// The path, as written.
-        path: String,
-    },
     /// The table's rows end at more than one configured child element, or at
     /// none, so no `row:` reproduces them.
     ///
@@ -147,49 +126,32 @@ pub enum Unconverted {
         /// The table whose rows the level counts.
         counted_table: String,
     },
-    /// A field lies inside the element of a table nested within its own,
-    /// which captures every value there, so the field is never filled.
+    /// Something version 2 rejects, where fixing it can change the output, so
+    /// the choice is the author's. `reason` is the error the
+    /// converted config raises until it is resolved.
     ///
-    /// Version 2 rejects the field, and both ways to satisfy it change the
-    /// columns: declaring it on the nested table moves the column, and removing
-    /// it drops the column.
-    FieldInsideNestedTable {
-        /// The table the field is declared on.
-        table: String,
-        /// The field that is never filled.
-        field: String,
-        /// The nested table that captures values there.
-        nested_table: String,
-    },
-    /// A field lies outside its table's row element, so its value attaches to
-    /// whichever row ends next rather than to a row of its own.
+    /// One of:
     ///
-    /// Version 2 rejects the field. Pointing it inside the row reads a
-    /// different value, and giving it a table of its own moves the column, so
-    /// both change the output.
-    FieldOutsideRow {
-        /// The table the field is declared on.
-        table: String,
-        /// The field outside the row element.
-        field: String,
-        /// The table's resolved row element.
-        row_path: String,
+    /// - an unknown key, usually a misspelling. Removing it changes nothing,
+    ///   but correcting it can. The converted config does not carry the key
+    ///   when written out, since only where it was is known, not its value.
+    /// - a path with a `.` or `..` segment, which matches nothing; writing it
+    ///   correctly changes that.
+    /// - a field inside the element of a table nested within its own, which
+    ///   captures every value there; moving the field or removing it changes
+    ///   the columns.
+    /// - a field outside its table's row element, whose value attaches to
+    ///   whichever row ends next; pointing it inside the row, or giving it a
+    ///   table of its own, changes the output.
+    Rejected {
+        /// The error version 2 raises for this part.
+        reason: ConfigIssue,
     },
 }
 
 impl fmt::Display for Unconverted {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Unconverted::DotSegmentInPath { location, path } => write!(
-                f,
-                "{location}: the path '{path}' has a '.' or '..' segment, so it matches nothing; \
-                 version 2 rejects it, and writing it correctly changes the output"
-            ),
-            Unconverted::UnknownKey { location, key } => write!(
-                f,
-                "{location}: '{key}' is not a configuration key; version 2 rejects it, and \
-                 correcting a misspelling changes the output where removing it does not"
-            ),
             Unconverted::RowNotDeclarable {
                 table,
                 xml_path,
@@ -230,25 +192,9 @@ impl fmt::Display for Unconverted {
                 "table '{table}': level '{level}' counts the rows of '{counted_table}', which do \
                  not contain this table's rows, so no `index_of:` link can reproduce it"
             ),
-            Unconverted::FieldInsideNestedTable {
-                table,
-                field,
-                nested_table,
-            } => write!(
+            Unconverted::Rejected { reason } => write!(
                 f,
-                "table '{table}': field '{field}' lies inside table '{nested_table}', which \
-                 captures every value there, so it is never filled; version 2 rejects it, and \
-                 moving it to '{nested_table}' or removing it changes the columns"
-            ),
-            Unconverted::FieldOutsideRow {
-                table,
-                field,
-                row_path,
-            } => write!(
-                f,
-                "table '{table}': field '{field}' lies outside the row element {row_path}, so \
-                 its value attaches to whichever row ends next; version 2 rejects it, and \
-                 pointing it inside the row or giving it a table of its own changes the output"
+                "version 2 rejects this, and fixing it can change the output: {reason}"
             ),
         }
     }
@@ -304,18 +250,21 @@ impl Config {
         }
 
         let mut config = self.clone();
+        let rejected = |reason| Unconverted::Rejected { reason };
         let mut unconverted: Vec<Unconverted> = self
             .unknown_keys()
-            .map(|(location, key)| Unconverted::UnknownKey {
-                location,
-                key: key.to_string(),
+            .map(|(location, key)| {
+                rejected(ConfigIssue::UnknownKey {
+                    location,
+                    key: key.to_string(),
+                })
             })
             .collect();
         unconverted.extend(self.dot_segment_paths().map(|(location, path)| {
-            Unconverted::DotSegmentInPath {
+            rejected(ConfigIssue::DotSegmentInPath {
                 location,
                 path: path.to_string(),
-            }
+            })
         }));
         declare_rows(self, &mut config, &mut unconverted);
         rename_paths(&mut config);
@@ -329,7 +278,7 @@ impl Config {
             // Every rewrite was taken, so nothing version 2 rejects is left. A
             // step that is left anyway is a converter bug, which validation
             // then reports rather than returning a config that lies.
-            debug_assert_eq!(config.version_2_steps(), Vec::new());
+            debug_assert_eq!(config.version_2_issues(), Vec::new());
             config.validate()?;
         }
         Ok(Conversion {
@@ -468,21 +417,27 @@ fn report_misplaced_fields(config: &Config, unconverted: &mut Vec<Unconverted>) 
     for table in &config.tables {
         let row_path = table.row_path();
         for field in &table.fields {
-            if let Some((_, nested)) = config.nested_table_capturing(table, field) {
-                unconverted.push(Unconverted::FieldInsideNestedTable {
-                    table: table.name.clone(),
-                    field: field.name.clone(),
-                    nested_table: nested.name.clone(),
-                });
-            } else if let Some(row_path) = &row_path
-                && field.location_outside(row_path).is_some()
-            {
-                unconverted.push(Unconverted::FieldOutsideRow {
-                    table: table.name.clone(),
-                    field: field.name.clone(),
-                    row_path: row_path.clone(),
-                });
-            }
+            let reason =
+                if let Some((field_path, nested)) = config.nested_table_capturing(table, field) {
+                    ConfigIssue::FieldInsideNestedTable {
+                        table: table.name.clone(),
+                        field: field.name.clone(),
+                        field_path,
+                        nested_table: nested.name.clone(),
+                    }
+                } else if let Some(row_path) = &row_path
+                    && let Some(field_path) = field.location_outside(row_path)
+                {
+                    ConfigIssue::FieldOutsideRow {
+                        table: table.name.clone(),
+                        field: field.name.clone(),
+                        field_path: field_path.to_string(),
+                        row_path: row_path.clone(),
+                    }
+                } else {
+                    continue;
+                };
+            unconverted.push(Unconverted::Rejected { reason });
         }
     }
 }
@@ -954,10 +909,13 @@ mod tests {
         let conversion = config.to_version_2().unwrap();
         assert_eq!(
             conversion.unconverted,
-            vec![Unconverted::FieldInsideNestedTable {
-                table: "outer".to_string(),
-                field: "count".to_string(),
-                nested_table: "inner".to_string(),
+            vec![Unconverted::Rejected {
+                reason: ConfigIssue::FieldInsideNestedTable {
+                    table: "outer".to_string(),
+                    field: "count".to_string(),
+                    field_path: "/r/a/bs/@count".to_string(),
+                    nested_table: "inner".to_string(),
+                }
             }]
         );
         let converted = &conversion.config;
@@ -987,12 +945,24 @@ mod tests {
         let conversion = config.to_version_2().unwrap();
         assert_eq!(
             conversion.unconverted,
-            vec![Unconverted::FieldOutsideRow {
-                table: "items".to_string(),
-                field: "id".to_string(),
-                row_path: "/data/item".to_string(),
+            vec![Unconverted::Rejected {
+                reason: ConfigIssue::FieldOutsideRow {
+                    table: "items".to_string(),
+                    field: "id".to_string(),
+                    field_path: "/data/@id".to_string(),
+                    row_path: "/data/item".to_string(),
+                }
             }]
         );
+        // The reason is exactly what the converted config fails with until the
+        // author resolves it.
+        let Unconverted::Rejected { reason } = &conversion.unconverted[0] else {
+            unreachable!()
+        };
+        assert!(matches!(
+            conversion.config.validate(),
+            Err(crate::Error::InvalidConfig { reason: raised }) if &raised == reason
+        ));
         let items = &conversion.config.tables[0];
         assert_eq!(conversion.config.version, Some(2));
         assert_eq!(items.row.as_deref(), Some("item"));
@@ -1016,9 +986,11 @@ mod tests {
         let conversion = config.to_version_2().unwrap();
         assert_eq!(
             conversion.unconverted,
-            vec![Unconverted::UnknownKey {
-                location: "field 'v' of table 'items'".to_string(),
-                key: "scal".to_string(),
+            vec![Unconverted::Rejected {
+                reason: ConfigIssue::UnknownKey {
+                    location: "field 'v' of table 'items'".to_string(),
+                    key: "scal".to_string(),
+                }
             }]
         );
         let items = &conversion.config.tables[0];
@@ -1051,17 +1023,23 @@ mod tests {
         assert_eq!(
             conversion.unconverted,
             vec![
-                Unconverted::DotSegmentInPath {
-                    location: "field 'w' of table 'items'".to_string(),
-                    path: "/data/./item/w".to_string(),
+                Unconverted::Rejected {
+                    reason: ConfigIssue::DotSegmentInPath {
+                        location: "field 'w' of table 'items'".to_string(),
+                        path: "/data/./item/w".to_string(),
+                    },
                 },
-                Unconverted::DotSegmentInPath {
-                    location: "the xml_path of table 'dotted'".to_string(),
-                    path: "/other/./group".to_string(),
+                Unconverted::Rejected {
+                    reason: ConfigIssue::DotSegmentInPath {
+                        location: "the xml_path of table 'dotted'".to_string(),
+                        path: "/other/./group".to_string(),
+                    },
                 },
-                Unconverted::DotSegmentInPath {
-                    location: "field 'x' of table 'dotted'".to_string(),
-                    path: "/other/./group/entry/x".to_string(),
+                Unconverted::Rejected {
+                    reason: ConfigIssue::DotSegmentInPath {
+                        location: "field 'x' of table 'dotted'".to_string(),
+                        path: "/other/./group/entry/x".to_string(),
+                    },
                 },
             ]
         );

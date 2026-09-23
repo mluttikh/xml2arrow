@@ -258,8 +258,10 @@ also changes two defaults: `Utf8` values are trimmed, and a missing
 non-nullable `Utf8` value is an error rather than ""
 ```
 
-In Rust, the notice is `Lint::ConfigVersion1 { steps }`, with one
-`MigrationStep` per remaining change. A host that fails on any warning sees the
+In Rust, the notice is `Lint::ConfigVersion1 { issues }`, holding the
+`ConfigIssue` errors that declaring `version: 2` would raise. An unknown key, a
+path with a `.` or `..` segment and a field captured by a nested table are not
+among them: each is already reported as a lint of its own. A host that fails on any warning sees the
 notice for every version 1 config; filter out `Lint::ConfigVersion1` until you
 migrate.
 

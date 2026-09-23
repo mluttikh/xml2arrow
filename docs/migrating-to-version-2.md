@@ -429,5 +429,5 @@ let config = Config::builder()
 ```
 
 To drive a migration from code, `Config::to_version_2` converts a config, and
-`Lint::ConfigVersion1 { steps }` lists what version 2 needs as `MigrationStep`
-values.
+`Lint::ConfigVersion1 { issues }` lists what version 2 needs as the
+`ConfigIssue` errors it would raise.

@@ -449,9 +449,10 @@ pub xml2arrow::errors::ConfigIssue::RelativeFieldPathWithoutRow::field: alloc::s
 pub xml2arrow::errors::ConfigIssue::RelativeFieldPathWithoutRow::path: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::RelativeFieldPathWithoutRow::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::ReplacedKey
+pub xml2arrow::errors::ConfigIssue::ReplacedKey::field: core::option::Option<alloc::string::String>
 pub xml2arrow::errors::ConfigIssue::ReplacedKey::key: &'static str
-pub xml2arrow::errors::ConfigIssue::ReplacedKey::location: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::ReplacedKey::replacement: &'static str
+pub xml2arrow::errors::ConfigIssue::ReplacedKey::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::ReservedMetadataKey
 pub xml2arrow::errors::ConfigIssue::ReservedMetadataKey::field: core::option::Option<alloc::string::String>
 pub xml2arrow::errors::ConfigIssue::ReservedMetadataKey::key: alloc::string::String
@@ -482,12 +483,18 @@ pub xml2arrow::errors::ConfigIssue::UnknownParentTable::parent: alloc::string::S
 pub xml2arrow::errors::ConfigIssue::UnknownParentTable::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::UnsupportedConfigVersion
 pub xml2arrow::errors::ConfigIssue::UnsupportedConfigVersion::version: u32
+impl core::clone::Clone for xml2arrow::errors::ConfigIssue
+pub fn xml2arrow::errors::ConfigIssue::clone(&self) -> xml2arrow::errors::ConfigIssue
+impl core::cmp::Eq for xml2arrow::errors::ConfigIssue
+impl core::cmp::PartialEq for xml2arrow::errors::ConfigIssue
+pub fn xml2arrow::errors::ConfigIssue::eq(&self, &xml2arrow::errors::ConfigIssue) -> bool
 impl core::convert::From<xml2arrow::errors::ConfigIssue> for xml2arrow::errors::Error
 pub fn xml2arrow::errors::Error::from(xml2arrow::errors::ConfigIssue) -> Self
 impl core::fmt::Debug for xml2arrow::errors::ConfigIssue
 pub fn xml2arrow::errors::ConfigIssue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::fmt::Display for xml2arrow::errors::ConfigIssue
 pub fn xml2arrow::errors::ConfigIssue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for xml2arrow::errors::ConfigIssue
 impl core::marker::Freeze for xml2arrow::errors::ConfigIssue
 impl core::marker::Send for xml2arrow::errors::ConfigIssue
 impl core::marker::Sync for xml2arrow::errors::ConfigIssue
@@ -630,7 +637,7 @@ pub type xml2arrow::errors::Result<T> = core::result::Result<T, xml2arrow::error
 pub mod xml2arrow::lint
 #[non_exhaustive] pub enum xml2arrow::lint::Lint
 pub xml2arrow::lint::Lint::ConfigVersion1
-pub xml2arrow::lint::Lint::ConfigVersion1::steps: alloc::vec::Vec<xml2arrow::lint::MigrationStep>
+pub xml2arrow::lint::Lint::ConfigVersion1::issues: alloc::vec::Vec<xml2arrow::errors::ConfigIssue>
 pub xml2arrow::lint::Lint::DotSegmentInPath
 pub xml2arrow::lint::Lint::DotSegmentInPath::location: alloc::string::String
 pub xml2arrow::lint::Lint::DotSegmentInPath::path: alloc::string::String
@@ -676,75 +683,22 @@ impl core::marker::Unpin for xml2arrow::lint::Lint
 impl core::marker::UnsafeUnpin for xml2arrow::lint::Lint
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::lint::Lint
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::lint::Lint
-#[non_exhaustive] pub enum xml2arrow::lint::MigrationStep
-pub xml2arrow::lint::MigrationStep::DeclareRow
-pub xml2arrow::lint::MigrationStep::DeclareRow::table: alloc::string::String
-pub xml2arrow::lint::MigrationStep::LinkNestedTable
-pub xml2arrow::lint::MigrationStep::LinkNestedTable::enclosing_table: alloc::string::String
-pub xml2arrow::lint::MigrationStep::LinkNestedTable::table: alloc::string::String
-pub xml2arrow::lint::MigrationStep::MoveFieldToNestedTable
-pub xml2arrow::lint::MigrationStep::MoveFieldToNestedTable::field: alloc::string::String
-pub xml2arrow::lint::MigrationStep::MoveFieldToNestedTable::field_path: alloc::string::String
-pub xml2arrow::lint::MigrationStep::MoveFieldToNestedTable::nested_table: alloc::string::String
-pub xml2arrow::lint::MigrationStep::MoveFieldToNestedTable::table: alloc::string::String
-pub xml2arrow::lint::MigrationStep::RemoveDotSegment
-pub xml2arrow::lint::MigrationStep::RemoveDotSegment::location: alloc::string::String
-pub xml2arrow::lint::MigrationStep::RemoveDotSegment::path: alloc::string::String
-pub xml2arrow::lint::MigrationStep::RemoveUnknownKey
-pub xml2arrow::lint::MigrationStep::RemoveUnknownKey::key: alloc::string::String
-pub xml2arrow::lint::MigrationStep::RemoveUnknownKey::location: alloc::string::String
-pub xml2arrow::lint::MigrationStep::RenameFieldXmlPath
-pub xml2arrow::lint::MigrationStep::RenameFieldXmlPath::field: alloc::string::String
-pub xml2arrow::lint::MigrationStep::RenameFieldXmlPath::table: alloc::string::String
-pub xml2arrow::lint::MigrationStep::RenameTableXmlPath
-pub xml2arrow::lint::MigrationStep::RenameTableXmlPath::table: alloc::string::String
-pub xml2arrow::lint::MigrationStep::ReplaceLevels
-pub xml2arrow::lint::MigrationStep::ReplaceLevels::table: alloc::string::String
-impl core::clone::Clone for xml2arrow::lint::MigrationStep
-pub fn xml2arrow::lint::MigrationStep::clone(&self) -> xml2arrow::lint::MigrationStep
-impl core::cmp::Eq for xml2arrow::lint::MigrationStep
-impl core::cmp::PartialEq for xml2arrow::lint::MigrationStep
-pub fn xml2arrow::lint::MigrationStep::eq(&self, &xml2arrow::lint::MigrationStep) -> bool
-impl core::fmt::Debug for xml2arrow::lint::MigrationStep
-pub fn xml2arrow::lint::MigrationStep::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for xml2arrow::lint::MigrationStep
-pub fn xml2arrow::lint::MigrationStep::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for xml2arrow::lint::MigrationStep
-impl core::marker::Freeze for xml2arrow::lint::MigrationStep
-impl core::marker::Send for xml2arrow::lint::MigrationStep
-impl core::marker::Sync for xml2arrow::lint::MigrationStep
-impl core::marker::Unpin for xml2arrow::lint::MigrationStep
-impl core::marker::UnsafeUnpin for xml2arrow::lint::MigrationStep
-impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::lint::MigrationStep
-impl core::panic::unwind_safe::UnwindSafe for xml2arrow::lint::MigrationStep
 pub mod xml2arrow::migrate
 #[non_exhaustive] pub enum xml2arrow::migrate::Unconverted
-pub xml2arrow::migrate::Unconverted::DotSegmentInPath
-pub xml2arrow::migrate::Unconverted::DotSegmentInPath::location: alloc::string::String
-pub xml2arrow::migrate::Unconverted::DotSegmentInPath::path: alloc::string::String
 pub xml2arrow::migrate::Unconverted::ExcessLevels
 pub xml2arrow::migrate::Unconverted::ExcessLevels::available: usize
 pub xml2arrow::migrate::Unconverted::ExcessLevels::declared: usize
 pub xml2arrow::migrate::Unconverted::ExcessLevels::table: alloc::string::String
-pub xml2arrow::migrate::Unconverted::FieldInsideNestedTable
-pub xml2arrow::migrate::Unconverted::FieldInsideNestedTable::field: alloc::string::String
-pub xml2arrow::migrate::Unconverted::FieldInsideNestedTable::nested_table: alloc::string::String
-pub xml2arrow::migrate::Unconverted::FieldInsideNestedTable::table: alloc::string::String
-pub xml2arrow::migrate::Unconverted::FieldOutsideRow
-pub xml2arrow::migrate::Unconverted::FieldOutsideRow::field: alloc::string::String
-pub xml2arrow::migrate::Unconverted::FieldOutsideRow::row_path: alloc::string::String
-pub xml2arrow::migrate::Unconverted::FieldOutsideRow::table: alloc::string::String
 pub xml2arrow::migrate::Unconverted::LevelCountsNonEnclosingTable
 pub xml2arrow::migrate::Unconverted::LevelCountsNonEnclosingTable::counted_table: alloc::string::String
 pub xml2arrow::migrate::Unconverted::LevelCountsNonEnclosingTable::level: alloc::string::String
 pub xml2arrow::migrate::Unconverted::LevelCountsNonEnclosingTable::table: alloc::string::String
+pub xml2arrow::migrate::Unconverted::Rejected
+pub xml2arrow::migrate::Unconverted::Rejected::reason: xml2arrow::errors::ConfigIssue
 pub xml2arrow::migrate::Unconverted::RowNotDeclarable
 pub xml2arrow::migrate::Unconverted::RowNotDeclarable::child_elements: alloc::vec::Vec<alloc::string::String>
 pub xml2arrow::migrate::Unconverted::RowNotDeclarable::table: alloc::string::String
 pub xml2arrow::migrate::Unconverted::RowNotDeclarable::xml_path: alloc::string::String
-pub xml2arrow::migrate::Unconverted::UnknownKey
-pub xml2arrow::migrate::Unconverted::UnknownKey::key: alloc::string::String
-pub xml2arrow::migrate::Unconverted::UnknownKey::location: alloc::string::String
 impl core::clone::Clone for xml2arrow::migrate::Unconverted
 pub fn xml2arrow::migrate::Unconverted::clone(&self) -> xml2arrow::migrate::Unconverted
 impl core::cmp::Eq for xml2arrow::migrate::Unconverted
@@ -881,7 +835,7 @@ impl !core::panic::unwind_safe::RefUnwindSafe for xml2arrow::errors::Error
 impl !core::panic::unwind_safe::UnwindSafe for xml2arrow::errors::Error
 #[non_exhaustive] pub enum xml2arrow::Lint
 pub xml2arrow::Lint::ConfigVersion1
-pub xml2arrow::Lint::ConfigVersion1::steps: alloc::vec::Vec<xml2arrow::lint::MigrationStep>
+pub xml2arrow::Lint::ConfigVersion1::issues: alloc::vec::Vec<xml2arrow::errors::ConfigIssue>
 pub xml2arrow::Lint::DotSegmentInPath
 pub xml2arrow::Lint::DotSegmentInPath::location: alloc::string::String
 pub xml2arrow::Lint::DotSegmentInPath::path: alloc::string::String
@@ -1021,32 +975,20 @@ impl core::marker::UnsafeUnpin for xml2arrow::config::RowId
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::RowId
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::RowId
 #[non_exhaustive] pub enum xml2arrow::Unconverted
-pub xml2arrow::Unconverted::DotSegmentInPath
-pub xml2arrow::Unconverted::DotSegmentInPath::location: alloc::string::String
-pub xml2arrow::Unconverted::DotSegmentInPath::path: alloc::string::String
 pub xml2arrow::Unconverted::ExcessLevels
 pub xml2arrow::Unconverted::ExcessLevels::available: usize
 pub xml2arrow::Unconverted::ExcessLevels::declared: usize
 pub xml2arrow::Unconverted::ExcessLevels::table: alloc::string::String
-pub xml2arrow::Unconverted::FieldInsideNestedTable
-pub xml2arrow::Unconverted::FieldInsideNestedTable::field: alloc::string::String
-pub xml2arrow::Unconverted::FieldInsideNestedTable::nested_table: alloc::string::String
-pub xml2arrow::Unconverted::FieldInsideNestedTable::table: alloc::string::String
-pub xml2arrow::Unconverted::FieldOutsideRow
-pub xml2arrow::Unconverted::FieldOutsideRow::field: alloc::string::String
-pub xml2arrow::Unconverted::FieldOutsideRow::row_path: alloc::string::String
-pub xml2arrow::Unconverted::FieldOutsideRow::table: alloc::string::String
 pub xml2arrow::Unconverted::LevelCountsNonEnclosingTable
 pub xml2arrow::Unconverted::LevelCountsNonEnclosingTable::counted_table: alloc::string::String
 pub xml2arrow::Unconverted::LevelCountsNonEnclosingTable::level: alloc::string::String
 pub xml2arrow::Unconverted::LevelCountsNonEnclosingTable::table: alloc::string::String
+pub xml2arrow::Unconverted::Rejected
+pub xml2arrow::Unconverted::Rejected::reason: xml2arrow::errors::ConfigIssue
 pub xml2arrow::Unconverted::RowNotDeclarable
 pub xml2arrow::Unconverted::RowNotDeclarable::child_elements: alloc::vec::Vec<alloc::string::String>
 pub xml2arrow::Unconverted::RowNotDeclarable::table: alloc::string::String
 pub xml2arrow::Unconverted::RowNotDeclarable::xml_path: alloc::string::String
-pub xml2arrow::Unconverted::UnknownKey
-pub xml2arrow::Unconverted::UnknownKey::key: alloc::string::String
-pub xml2arrow::Unconverted::UnknownKey::location: alloc::string::String
 impl core::clone::Clone for xml2arrow::migrate::Unconverted
 pub fn xml2arrow::migrate::Unconverted::clone(&self) -> xml2arrow::migrate::Unconverted
 impl core::cmp::Eq for xml2arrow::migrate::Unconverted
