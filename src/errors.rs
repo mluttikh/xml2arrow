@@ -402,12 +402,6 @@ pub enum ConfigIssue {
         /// Why it cannot apply to this column.
         reason: &'static str,
     },
-    /// A table declared both `links` and a non-empty `levels`. They are two
-    /// ways to say the same thing, and `links` supersedes `levels`.
-    LinksAndLevels {
-        /// The table that set both.
-        table: String,
-    },
     /// A link set both `parent` and `index_of`, or neither. They produce
     /// different column types with different guarantees, so exactly one.
     LinkKindAmbiguous {
@@ -841,7 +835,7 @@ impl fmt::Display for ConfigIssue {
             ),
             ConfigIssue::EmptyRowPath { table } => write!(
                 f,
-                "Table '{table}' declares an empty 'row'. Use row: \".\" for one row per table element, or remove the key to keep inferred row boundaries"
+                "Table '{table}' declares an empty 'row'. Name the element that makes one row, or use row: \".\" for one row per table element"
             ),
             ConfigIssue::RowPathNotUnderTable {
                 table,
@@ -860,10 +854,6 @@ impl fmt::Display for ConfigIssue {
             } => write!(
                 f,
                 "Field '{field}' in table '{table}' sets {policy}, which cannot apply here: {reason}"
-            ),
-            ConfigIssue::LinksAndLevels { table } => write!(
-                f,
-                "Table '{table}' declares both 'links' and 'levels'; they are two ways to express the same relationships, so use one. 'links' replaces 'levels' and is removed in neither direction silently"
             ),
             ConfigIssue::LinkKindAmbiguous { table } => write!(
                 f,
@@ -932,7 +922,7 @@ impl fmt::Display for ConfigIssue {
             ),
             ConfigIssue::FieldPathConflict { table, field } => write!(
                 f,
-                "Field '{field}' in table '{table}' sets both 'path' and 'xml_path'; they are two spellings of the same location, so set exactly one ('path' is the one that survives to 1.0)"
+                "Field '{field}' in table '{table}' sets both 'path' and 'xml_path'; they are two spellings of the same location, so set exactly one ('path' is the version 2 key)"
             ),
             ConfigIssue::FieldPathMissing { table, field } => write!(
                 f,
@@ -940,11 +930,11 @@ impl fmt::Display for ConfigIssue {
             ),
             ConfigIssue::RelativeFieldPathWithoutRow { table, field, path } => write!(
                 f,
-                "Field '{field}' in table '{table}' has a relative path '{path}', but the table declares no 'row:' to resolve it against. Either declare a row element or write the field path absolutely (leading '/')"
+                "Field '{field}' in table '{table}' has a relative path '{path}', but the table declares no 'row:' to resolve it against; declare the element that makes one row with 'row:'"
             ),
             ConfigIssue::RowIsRootTable { table } => write!(
                 f,
-                "Table '{table}' has xml_path '/' and declares a row resolving to it. The implicit document root never closes, so no row would ever be finalized and the table would produce no rows. Name the document's top-level element as the row instead (row: <element>), or set scope to that element and keep row: \".\""
+                "Table '{table}' has scope '/' and declares a row resolving to it. The implicit document root never closes, so no row would ever be finalized and the table would produce no rows. Name the document's top-level element as the row instead (row: <element>), or set scope to that element and keep row: \".\""
             ),
             ConfigIssue::RowPathCrossesTable {
                 table,
@@ -961,7 +951,7 @@ impl fmt::Display for ConfigIssue {
             ),
             ConfigIssue::UnsupportedConfigVersion { version } => write!(
                 f,
-                "Unsupported config version {version}; this build understands 1 (the default, and every release so far) and 2"
+                "Unsupported config version {version}; this build understands 1, the default when `version:` is absent, and 2"
             ),
             ConfigIssue::MissingRow { table } => write!(
                 f,
@@ -1426,6 +1416,48 @@ mod tests {
             let message = rule.to_string();
             assert!(!message.to_lowercase().contains("version"), "{message}");
         }
+    }
+
+    /// Advice in a message has to be something the reader can do. These
+    /// messages belong to keys only version 2 has, so they point at version 2's
+    /// spellings and requirements, never at version 1's.
+    #[test]
+    fn version_2_messages_give_advice_version_2_accepts() {
+        let cases = [
+            (
+                ConfigIssue::EmptyRowPath { table: "t".into() },
+                "Table 't' declares an empty 'row'. Name the element that makes one row, or use \
+                 row: \".\" for one row per table element",
+            ),
+            (
+                ConfigIssue::RelativeFieldPathWithoutRow {
+                    table: "t".into(),
+                    field: "v".into(),
+                    path: "v".into(),
+                },
+                "Field 'v' in table 't' has a relative path 'v', but the table declares no \
+                 'row:' to resolve it against; declare the element that makes one row with \
+                 'row:'",
+            ),
+            (
+                ConfigIssue::FieldPathConflict {
+                    table: "t".into(),
+                    field: "v".into(),
+                },
+                "Field 'v' in table 't' sets both 'path' and 'xml_path'; they are two spellings \
+                 of the same location, so set exactly one ('path' is the version 2 key)",
+            ),
+            (
+                ConfigIssue::UnsupportedConfigVersion { version: 3 },
+                "Unsupported config version 3; this build understands 1, the default when \
+                 `version:` is absent, and 2",
+            ),
+        ];
+        for (issue, expected) in cases {
+            assert_eq!(issue.to_string(), expected);
+        }
+        let root = ConfigIssue::RowIsRootTable { table: "t".into() }.to_string();
+        assert!(root.starts_with("Table 't' has scope '/'"), "{root}");
     }
 
     /// Replacing `levels` and renaming `xml_path` are different jobs, and the

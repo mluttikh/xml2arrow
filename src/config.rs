@@ -428,8 +428,8 @@ impl Config {
         // One pass per table rather than one pass per concern, so the first
         // error a broken config reports is the first problem in document
         // order rather than the first problem of whichever kind is checked
-        // earliest. The four helpers below are in the order a reader meets
-        // them in the YAML.
+        // earliest. The helpers below are in the order a reader meets their
+        // keys in the YAML.
         if self.is_version_1() && self.defaults.is_some() {
             return Err(ConfigIssue::KeyRequiresVersion2 {
                 location: "the top level".to_string(),
@@ -516,7 +516,14 @@ impl Config {
             }
             (Some(path), None) | (None, Some(path)) => path,
         };
-        if path.is_empty() {
+        // `scope` must name something, so a blank one is empty too. `xml_path`
+        // keeps the check 0.19 made, which a blank value passed.
+        let is_empty = if table.scope.is_some() {
+            path.trim().is_empty()
+        } else {
+            path.is_empty()
+        };
+        if is_empty {
             return Err(ConfigIssue::EmptyTablePath {
                 table: table.name.clone(),
             }
@@ -662,13 +669,6 @@ impl Config {
         let Some(links) = &table.links else {
             return Ok(());
         };
-        if !table.levels.is_empty() {
-            return Err(ConfigIssue::LinksAndLevels {
-                table: table.name.clone(),
-            }
-            .into());
-        }
-
         let scope = table.link_scope_path();
         // Seeded with the field names and the key column, so a link column
         // that shadowed either is caught by the same check as one that shadows
@@ -896,7 +896,17 @@ impl Config {
                     }
                     .into());
                 }
-                (Some(p), None) | (None, Some(p)) if p.trim().is_empty() => {
+                // `path` must name something, so a blank one is empty too.
+                // `xml_path` keeps the check 0.19 made, which a blank value
+                // passed.
+                (Some(p), None) if p.trim().is_empty() => {
+                    return Err(ConfigIssue::EmptyFieldPath {
+                        table: table.name.clone(),
+                        field: field.name.clone(),
+                    }
+                    .into());
+                }
+                (None, Some("")) => {
                     return Err(ConfigIssue::EmptyFieldPath {
                         table: table.name.clone(),
                         field: field.name.clone(),
@@ -3877,13 +3887,15 @@ tables:
         assert!(err.to_string().contains(expected), "{err}");
     }
 
+    /// Version 2 replaces `levels` with `links`, so a table with both is told
+    /// to replace its levels, like any other table that still has them.
     #[test]
-    fn links_and_levels_together_are_rejected() {
+    fn links_and_levels_together_are_rejected_for_the_levels() {
         let config = linked(vec![parent_link("outer")], vec!["station".to_string()]);
         assert!(matches!(
             config,
             Err(Error::InvalidConfig {
-                reason: ConfigIssue::LinksAndLevels { .. }
+                reason: ConfigIssue::ReplacedKey { key: "levels", .. }
             })
         ));
     }
@@ -5257,6 +5269,49 @@ tables:
             let written = yaml_serde::to_string(&config).unwrap();
             assert!(!written.contains("scal"), "{written}");
             assert!(!written.contains("unknown"), "{written}");
+        }
+    }
+
+    /// A path that names nothing. The version 2 keys reject a blank value as
+    /// well as an empty one; `xml_path` keeps the check 0.19 made, so a
+    /// version 1 config that loaded then still loads.
+    mod blank_paths {
+        use super::*;
+
+        fn issue(yaml: &str) -> ConfigIssue {
+            match Config::from_yaml_str(yaml) {
+                Err(Error::InvalidConfig { reason }) => reason,
+                other => panic!("expected a config error, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn a_blank_scope_is_rejected() {
+            let yaml = "version: 2\ntables:\n  - {name: t, scope: '   ', row: i, fields: [{name: v, path: v, data_type: Int32}]}\n";
+            assert_eq!(
+                issue(yaml),
+                ConfigIssue::EmptyTablePath { table: "t".into() }
+            );
+        }
+
+        #[test]
+        fn a_blank_path_is_rejected() {
+            let yaml = "version: 2\ntables:\n  - {name: t, scope: /r, row: i, fields: [{name: v, path: '   ', data_type: Int32}]}\n";
+            assert_eq!(
+                issue(yaml),
+                ConfigIssue::EmptyFieldPath {
+                    table: "t".into(),
+                    field: "v".into()
+                }
+            );
+        }
+
+        #[test]
+        fn a_blank_xml_path_loads_as_it_did_in_0_19() {
+            let config = Config::from_yaml_str(
+                "tables:\n  - {name: t, xml_path: '   ', fields: [{name: v, xml_path: '   ', data_type: Int32, nullable: true}]}\n",
+            );
+            assert!(config.is_ok(), "{config:?}");
         }
     }
 
