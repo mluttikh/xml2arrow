@@ -1257,6 +1257,22 @@ tables:
 }
 
 #[test]
+fn test_a_blank_scope_is_rejected() {
+    // Regression: `scope: '   '` loaded, while a blank field `path` was
+    // rejected, and a table on it names an element no document contains, so it
+    // silently produced no rows. The version 2 keys now reject a blank value;
+    // `xml_path` keeps the check 0.19 made.
+    let err = Config::from_yaml_str(
+        "version: 2\ntables:\n  - {name: t, scope: '   ', row: i, fields: [{name: v, path: v, data_type: Int32}]}\n",
+    )
+    .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "Table 't' names no element: its path is empty"
+    );
+}
+
+#[test]
 fn test_version_1_rejects_a_version_2_key() {
     // Regression: a config without `version: 2` could set `links:`, `row:` or
     // any other key version 2 added, and was parsed as a mix of both formats,

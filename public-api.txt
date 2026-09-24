@@ -429,8 +429,6 @@ pub xml2arrow::errors::ConfigIssue::KeyRequiresVersion2::key: &'static str
 pub xml2arrow::errors::ConfigIssue::KeyRequiresVersion2::location: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::LinkKindAmbiguous
 pub xml2arrow::errors::ConfigIssue::LinkKindAmbiguous::table: alloc::string::String
-pub xml2arrow::errors::ConfigIssue::LinksAndLevels
-pub xml2arrow::errors::ConfigIssue::LinksAndLevels::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::MissingRow
 pub xml2arrow::errors::ConfigIssue::MissingRow::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::NestedTableWithoutLinks
