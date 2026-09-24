@@ -40,10 +40,23 @@ The converter operates in phases:
 3. **Finalization:** `TableBuilder::finish` drains builders into one
    `RecordBatch` per table, returned as an ordered `IndexMap`.
 
-**Row semantics (load-bearing):** a row of table T is finalized when a
-*configured* (registry-known) direct child element of T's `xml_path` closes.
-Unknown elements never delimit rows. Parent-link `levels` columns are labels
-for the index columns; their values come from ancestor tables' row counters.
+**Two configuration formats, one engine.** A config is version 1 (no
+`version:` key; exactly the format 0.19 read, deprecated) or version 2
+(`version: 2`), never a mix: version 1 rejects every key only version 2 has.
+Both compile to the same trie, so the parser has no per-version code path.
+
+**Row semantics (load-bearing):** a row of table T ends when its row element
+closes, and values go to the innermost open table.
+
+- **Version 2** declares the row element with `row:`, relative to the table's
+  `scope`.
+- **Version 1** infers it: a row ends when a *configured* (registry-known)
+  direct child element of T's `xml_path` closes, so unknown elements never
+  delimit rows.
+
+Both set the same `ends_row` bit on a trie node. Version 1 `levels` columns are
+labels whose values come from ancestor tables' row counters; version 2 `links:`
+name the table they count or join to.
 
 ## Critical Rules (MUST follow)
 
@@ -69,8 +82,14 @@ Inside `process_xml_events`, `process_xml_events_slice`, `handle_event`,
   python-feature tests.
 
 ### 3. Behavioral contracts (pinned by tests — do not "fix" these)
-- Missing non-nullable **Utf8** yields `""`; missing non-nullable
-  numerics/booleans raise `MissingRequiredField`. Intentional asymmetry.
+- **Version 1 output is frozen.** The corpus in `tests/corpus` pins it
+  byte for byte, through all three drivers. A change to a version 1 case is a
+  behavior change, to be decided and recorded in `MIGRATION.md`, never a
+  side effect.
+- **A missing non-nullable value.** In version 1, a `Utf8` field yields `""`
+  while numerics and booleans raise `MissingRequiredField`, an intentional
+  asymmetry. In version 2, every type raises it unless the field sets
+  `on_missing`.
 - A repeated value-bearing occurrence of a field's element in one row raises
   `ParseKind::DuplicateValue` (never concatenate). A value-less repeat
   (`<v/><v>2</v>`) is fine.
@@ -81,12 +100,12 @@ Inside `process_xml_events`, `process_xml_events_slice`, `handle_event`,
   decoding; element text is taken raw (spec-required difference).
 - With `validate_attributes: false`, duplicate attributes concatenate — a
   documented trusted-input trade-off.
-- Numeric **and** boolean parsing trim surrounding whitespace before parsing,
-  independently of `trim_text`; `Utf8` does not, so a value is taken exactly as
-  the document spells it. Verified: with `trim_text: false`, `<v> 42 </v>`
-  parses to `42` and `<v> true </v>` to `true`, while a `Utf8` field keeps
-  `" hi "`. Booleans additionally accept
-  `true/false/1/0/yes/no/on/off/t/f/y/n` case-insensitively.
+- **Whitespace around a value.** In version 1, numeric and boolean parsing
+  trim it, independently of `trim_text`, while `Utf8` keeps it: with
+  `trim_text: false`, `<v> 42 </v>` parses to `42` and `<v> true </v>` to
+  `true`, while a `Utf8` field keeps `" hi "`. In version 2, every type trims
+  unless the field sets `trim: false`.
+- Booleans accept `true/false/1/0/yes/no/on/off/t/f/y/n` case-insensitively.
 - A table with no column is structural only and excluded from the output
   map. In version 1 that is any table with an empty `fields` list. In version 2
   a table without fields is still output when it declares a key (`row_id:`) or
@@ -157,10 +176,10 @@ the pattern before reading any code:
 found this way, none by a stopwatch:
 
 ```bash
-# Lost inlining — the cause of a 6% regression in Phase B. Want no output:
+# Lost inlining — once the cause of a 6% regression. Want no output:
 nm -C target/release/deps/parse_benchmark-* | grep -E 'handle_event|close_element'
 
-# Hot-path struct growth — the cause of a 1–2% regression in Phase C.
+# Hot-path struct growth — once the cause of a 1–2% regression.
 # `PathTracker` pushes a `StackEntry` per element, so a `bool` added there
 # costs 4 bytes per element. Guarded by `hot_path_frames_stay_small`.
 cargo test --lib hot_path_frames_stay_small
@@ -178,25 +197,37 @@ out of line so that `close_element` and `handle_event` stay fully inlined.
 3. Add the byte-slice → value parse arm in `FieldBuilder::append_current_value`.
 4. If scale/offset should (not) apply, update `FieldConfig::validate`.
 5. Tests: parse + null/missing + overflow cases in `xml_parser.rs`, and the
-   `as_arrow_type` conversion test in `config.rs`. Update the README's
-   supported-types list.
+   `as_arrow_type` conversion test in `config.rs`. Update the data types
+   table in `docs/configuration.md`.
 
 ### Modifying configuration logic
-1. Change the struct in `config.rs`.
+1. Change the struct in `config.rs`. A new key belongs to version 2: add it to
+   `version_2_key`, so a version 1 config that sets it is rejected.
 2. **Crucial:** extend `Config::validate()` (and add a `ConfigIssue` variant
    with a `Display` arm for new failure modes) — invalid configs must fail
-   loudly at load, not silently at parse.
-3. Add validation tests; check YAML round-trip still passes; update the
-   README's config schema block.
+   loudly at load, not silently at parse. A rule that version 1 configs can
+   break too belongs in `version_2_issues`, so the deprecation notice and
+   version 2 validation report it the same way.
+3. Add validation tests, including one that renders the new message; check
+   YAML round-trip still passes; update `docs/configuration.md`, including
+   its complete schema.
 
 ## Repository Map
 
 - `src/lib.rs` — public re-exports (the API surface).
 - `src/config.rs` — YAML config structs; **all validation lives here**.
+- `src/lint.rs` — advisory findings about valid configs, including the version 1
+  deprecation notice. Almost all apply to version 1 only.
+- `src/migrate.rs` — `Config::to_version_2`, which converts a version 1 config
+  without changing its output.
 - `src/path_registry.rs` — integer path trie + `PathTracker`. Performance critical.
 - `src/xml_parser.rs` — event loops, builders, row finalization. Performance critical.
 - `src/errors.rs` — structured errors + Python exception mapping.
-- `tests/` — integration tests (`common/` has shared macros/helpers).
+- `tests/` — integration tests (`common/` has shared macros/helpers), plus the
+  frozen corpus (`frozen_corpus.rs`, cases in `corpus/`) and the conversion
+  corpus (`convert_corpus.rs`), which checks conversion changes no output.
+- `docs/` — the configuration references for both versions and the migration
+  guide. The README links them rather than repeating them.
 - `benches/parse_benchmark.rs` — criterion/CodSpeed benchmarks.
 - `examples/profile_large.rs` — profiling target for large documents.
 

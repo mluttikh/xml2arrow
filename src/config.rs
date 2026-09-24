@@ -323,9 +323,11 @@ pub(crate) fn paths_equal(a: &str, b: &str) -> bool {
 /// use xml2arrow::config::{Config, DType, FieldConfigBuilder, TableConfig};
 ///
 /// let config = Config::builder()
+///     .version(2)
 ///     .table(
 ///         TableConfig::builder("items", "/data")
-///             .field(FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build()?)
+///             .row("item")
+///             .field(FieldConfigBuilder::new("value", "value", DType::Int32).build()?)
 ///             .build(),
 ///     )
 ///     .build()?;

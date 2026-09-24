@@ -69,9 +69,10 @@ use crate::path_registry::{PathNodeId, PathNodeInfo, PathRegistry, PathTracker};
 /// ```rust
 /// use xml2arrow::{Parser, config::{Config, TableConfig, FieldConfigBuilder, DType}};
 ///
-/// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build().unwrap()];
+/// let fields = vec![FieldConfigBuilder::new("value", "value", DType::Int32).build().unwrap()];
 /// let config = Config::builder()
-///     .table(TableConfig::builder("items", "/data").fields(fields).build())
+///     .version(2)
+///     .table(TableConfig::builder("items", "/data").row("item").fields(fields).build())
 ///     .build()
 ///     .unwrap();
 ///
@@ -514,9 +515,10 @@ impl Parser {
     /// ```rust
     /// use xml2arrow::{BatchOptions, Parser, config::{Config, TableConfig, FieldConfigBuilder, DType}};
     ///
-    /// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build().unwrap()];
+    /// let fields = vec![FieldConfigBuilder::new("value", "value", DType::Int32).build().unwrap()];
     /// let config = Config::builder()
-    ///     .table(TableConfig::builder("items", "/data").fields(fields).build())
+    ///     .version(2)
+    ///     .table(TableConfig::builder("items", "/data").row("item").fields(fields).build())
     ///     .build()
     ///     .unwrap();
     /// let parser = Parser::new(&config).unwrap();
@@ -577,11 +579,12 @@ impl Parser {
     /// ```rust
     /// # use xml2arrow::{BatchOptions, Parser, config_from_yaml};
     /// # let config = config_from_yaml!(r#"
+    /// # version: 2
     /// # tables:
     /// #   - name: items
-    /// #     xml_path: /data
-    /// #     levels: []
-    /// #     fields: [{name: v, xml_path: /data/item/v, data_type: Int32}]
+    /// #     scope: /data
+    /// #     row: item
+    /// #     fields: [{name: v, path: v, data_type: Int32}]
     /// # "#);
     /// let parser = Parser::new(&config)?;
     /// let xml: &'static [u8] = b"<data><item><v>1</v></item></data>";
