@@ -1,0 +1,9 @@
+# frozen snapshot — see tests/frozen_corpus.rs
+table: items
+rows: 2
+columns:
+  1. s: Utf8 (not null)
+  2. a: Utf8 (not null)
+data:
+  "ABC & D" | "xBy"
+  "raw <not markup> &amp;" | "tab\there"

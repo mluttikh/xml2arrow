@@ -1,0 +1,9 @@
+# frozen snapshot — see tests/frozen_corpus.rs
+table: items
+rows: 2
+columns:
+  1. <scope>: UInt32 (not null)
+  2. v: Int32 (not null)
+data:
+  "0" | "1"
+  "0" | "2"

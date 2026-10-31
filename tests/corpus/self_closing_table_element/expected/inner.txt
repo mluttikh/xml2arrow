@@ -1,0 +1,9 @@
+# frozen snapshot — see tests/frozen_corpus.rs
+table: inner
+rows: 2
+columns:
+  1. <group>: UInt32 (not null)
+  2. v: Int32 (nullable)
+data:
+  "0" | null
+  "0" | "10"

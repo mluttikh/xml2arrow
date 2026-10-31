@@ -1,0 +1,21 @@
+# frozen snapshot — see tests/frozen_corpus.rs
+table: values
+rows: 2
+columns:
+  1. b: Boolean (not null)
+  2. i8: Int8 (not null)
+  3. i16: Int16 (not null)
+  4. i32: Int32 (not null)
+  5. i64: Int64 (not null)
+  6. u8: UInt8 (not null)
+  7. u16: UInt16 (not null)
+  8. u32: UInt32 (not null)
+  9. u64: UInt64 (not null)
+  10. f32: Float32 (not null)
+  11. f64: Float64 (not null)
+  12. s: Utf8 (not null)
+  13. scaled: Float64 (not null)
+  14. opt: Int32 (nullable)
+data:
+  "true" | "-8" | "-16" | "-32" | "-64" | "8" | "16" | "32" | "64" | "1.25" | "2.5" | "text" | "3.0" | "7"
+  "false" | "8" | "16" | "32" | "64" | "0" | "0" | "0" | "0" | "-1.25" | "-2.5" | "" | "1.5" | null

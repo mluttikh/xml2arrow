@@ -1,0 +1,17 @@
+<report>
+  <stations>
+    <station>
+      <name>alpha</name>
+      <measurements>
+        <measurement><value>1.5</value></measurement>
+        <measurement><value>2.5</value></measurement>
+      </measurements>
+    </station>
+    <station>
+      <name>beta</name>
+      <measurements>
+        <measurement><value>3.5</value></measurement>
+      </measurements>
+    </station>
+  </stations>
+</report>

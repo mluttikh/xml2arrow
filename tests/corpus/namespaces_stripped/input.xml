@@ -1,0 +1,4 @@
+<ns:data xmlns:ns="http://example.com/ns">
+  <ns:item ns:id="1"><ns:value>10</ns:value></ns:item>
+  <ns:item ns:id="2"><ns:value>20</ns:value></ns:item>
+</ns:data>
