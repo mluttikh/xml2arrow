@@ -38,3 +38,87 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
         run: cargo test
+
+  # --- API compatibility gates ---
+  #
+  # The crate promises that no release removes or changes a public item without
+  # a deprecation period first. Review cannot enforce that across a long run of
+  # additive releases; these two jobs can.
+
+  semver:
+    name: Semver
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Compares the working tree against the newest version on crates.io and
+      # judges it by the version in Cargo.toml. Cargo's 0.x rules apply, so a
+      # minor bump (0.19 -> 0.20) permits a deliberate breaking change; the job
+      # fails when a break arrives *without* the bump.
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+
+  public-api:
+    name: Public API
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # cargo-public-api renders the API from rustdoc JSON, which is nightly-only.
+      #
+      # The nightly is PINNED, and must stay pinned: rustdoc renders types by
+      # their current path, so a floating `nightly` changes the snapshot without
+      # the API changing at all. The first run of this job failed exactly that
+      # way — `std::io::error::Error` on one nightly, `core::io::error::Error`
+      # on a newer one, same type, same API. Bumping the pin is fine; do it
+      # deliberately and re-record `public-api.txt` in the same commit, using:
+      #
+      #     RUSTUP_TOOLCHAIN=<the pin> cargo public-api --simplified > public-api.txt
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-25
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-public-api
+      # The same shape as the frozen corpus: a checked-in snapshot, regenerated
+      # and compared. An intentional API change is a reviewable diff in
+      # public-api.txt; an accidental removal is a failing job.
+      - name: Check the public API against its snapshot
+        run: |
+          cargo public-api --simplified > /tmp/public-api.actual
+          if ! diff -u public-api.txt /tmp/public-api.actual; then
+            echo
+            echo "::error::The public API differs from public-api.txt."
+            echo "If the change is intentional, re-record it and commit the diff:"
+            echo "    cargo public-api --simplified > public-api.txt"
+            echo "Removing or changing a public item also needs a deprecation"
+            echo "period first: deprecate it for at least two minor releases"
+            echo "before deleting it."
+            exit 1
+          fi
+
+  # --- Codegen gate ---
+  #
+  # `handle_event` and `close_element` run once per XML event. When either stops
+  # being inlined into the event pumps, every parse pays a call per event: a
+  # past change that added only a few instructions to a helper pushed
+  # `handle_event` past the inliner's cost limit and cost 6-7% across every
+  # buffered benchmark. Timing cannot catch that reliably on shared runners;
+  # the symbol table can, deterministically: an inlined function has no symbol.
+  inlining:
+    name: Hot path stays inlined
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the benchmark binary
+        run: cargo bench --bench parse_benchmark --no-run
+      - name: Check that the hot functions emit no symbol
+        run: |
+          bin=$(ls -t target/release/deps/parse_benchmark-* | grep -v '\.d$' | head -1)
+          if nm -C "$bin" | grep -E 'xml_parser::(handle_event|close_element)'; then
+            echo "::error::handle_event or close_element is no longer inlined (symbols above)."
+            echo "Move the growth into an #[inline(never)] / #[cold] helper; see AGENTS.md, Hot-path performance."
+            exit 1
+          fi
