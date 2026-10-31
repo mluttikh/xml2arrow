@@ -16,7 +16,12 @@ permissions:
 jobs:
   codspeed:
     name: Run benchmarks
-    runs-on: ubuntu-latest
+    # Pinned rather than `ubuntu-latest`: the CodSpeed runner supports a fixed
+    # set of images, and `ubuntu-latest` moving to 26.04 failed every run with
+    # "Unsupported system". A pinned image also keeps benchmark results
+    # comparable across runs. Bump it deliberately once CodSpeed supports the
+    # newer image.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
