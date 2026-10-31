@@ -1,0 +1,6 @@
+tables:
+  - name: items
+    xml_path: /data
+    levels: []
+    fields:
+      - {name: id, xml_path: /data/item/id, data_type: Int32}

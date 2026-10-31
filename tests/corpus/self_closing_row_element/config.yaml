@@ -1,0 +1,8 @@
+# Self-closing row elements arrive as Event::Empty, which enters and closes in
+# one event rather than as a Start/End pair.
+tables:
+  - name: items
+    xml_path: /data
+    levels: []
+    fields:
+      - {name: v, xml_path: /data/item/v, data_type: Int32, nullable: true}

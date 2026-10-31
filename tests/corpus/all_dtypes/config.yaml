@@ -1,0 +1,19 @@
+tables:
+  - name: values
+    xml_path: /data
+    levels: []
+    fields:
+      - {name: b, xml_path: /data/row/b, data_type: Boolean}
+      - {name: i8, xml_path: /data/row/i8, data_type: Int8}
+      - {name: i16, xml_path: /data/row/i16, data_type: Int16}
+      - {name: i32, xml_path: /data/row/i32, data_type: Int32}
+      - {name: i64, xml_path: /data/row/i64, data_type: Int64}
+      - {name: u8, xml_path: /data/row/u8, data_type: UInt8}
+      - {name: u16, xml_path: /data/row/u16, data_type: UInt16}
+      - {name: u32, xml_path: /data/row/u32, data_type: UInt32}
+      - {name: u64, xml_path: /data/row/u64, data_type: UInt64}
+      - {name: f32, xml_path: /data/row/f32, data_type: Float32}
+      - {name: f64, xml_path: /data/row/f64, data_type: Float64}
+      - {name: s, xml_path: /data/row/s, data_type: Utf8}
+      - {name: scaled, xml_path: /data/row/scaled, data_type: Float64, scale: 0.001, offset: 1.0}
+      - {name: opt, xml_path: /data/row/opt, data_type: Int32, nullable: true}

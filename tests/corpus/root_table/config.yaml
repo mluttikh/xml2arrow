@@ -1,0 +1,7 @@
+tables:
+  - name: doc
+    xml_path: /
+    levels: []
+    fields:
+      - {name: title, xml_path: /report/title, data_type: Utf8}
+      - {name: version, xml_path: /report/version, data_type: Int32}

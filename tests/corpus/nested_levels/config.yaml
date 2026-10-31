@@ -1,0 +1,11 @@
+tables:
+  - name: stations
+    xml_path: /report/stations
+    levels: []
+    fields:
+      - {name: name, xml_path: /report/stations/station/name, data_type: Utf8}
+  - name: measurements
+    xml_path: /report/stations/station/measurements
+    levels: [station]
+    fields:
+      - {name: value, xml_path: /report/stations/station/measurements/measurement/value, data_type: Float64}

@@ -1,0 +1,8 @@
+# frozen snapshot — see tests/frozen_corpus.rs
+table: items
+rows: 1
+columns:
+  1. s: Utf8 (not null)
+  2. n: Int32 (not null)
+data:
+  "  padded  " | "42"

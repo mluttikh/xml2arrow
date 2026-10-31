@@ -1,0 +1,9 @@
+parser_options:
+  strip_namespaces: true
+tables:
+  - name: items
+    xml_path: /data
+    levels: []
+    fields:
+      - {name: v, xml_path: /data/item/value, data_type: Int32}
+      - {name: id, xml_path: /data/item/@id, data_type: Int32}
