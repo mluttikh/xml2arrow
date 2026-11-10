@@ -4,8 +4,17 @@
 mechanical, and they are what lets every later release add configuration keys,
 parser options and data types without breaking your build.
 
+1. [Required](#required-mechanical-source-changes): source changes, because
+   five public types became `#[non_exhaustive]` and two error variants gained
+   a field.
+2. [Behavioral](#behavioral-changes): value errors end with document
+   coordinates.
+3. [New](#new-no-action-needed): additions that need no action.
+
 If you load configs from YAML, or build them with `TableConfig::new` and
-`FieldConfigBuilder`, and you do not `match` on `DType`, there is nothing to do.
+`FieldConfigBuilder`, and you do not `match` on `DType` or destructure
+`Error::ParseError` or `Error::MissingRequiredField` without `..`, the required
+work is nothing.
 
 ## Required: mechanical source changes
 
@@ -76,3 +85,44 @@ match dtype {
     _ => ...,
 }
 ```
+
+### Error::ParseError and Error::MissingRequiredField
+
+Both variants gained a `location` field. A pattern that names every field needs
+`..`, and code that constructs either variant, usually a test, supplies
+`location: Box::default()`:
+
+```rust
+// before
+Error::MissingRequiredField { field, path } => ...
+
+// after
+Error::MissingRequiredField { field, path, .. } => ...
+```
+
+## Behavioral changes
+
+### Value errors end with document coordinates
+
+`ParseError`, `MissingRequiredField` and the new `ValueTooLarge` append the row
+index and byte offset of the failure:
+
+```text
+Missing value for non-nullable field 'v' at path /data/item/v (row index 1, near byte offset 46)
+```
+
+The text before the suffix is unchanged, so a prefix or substring match still
+works. A test that compares the whole message needs loosening, or can read the
+structured fields instead: `location.row` and `location.position` on the error.
+The row index is the position the failing row would have had in its table.
+
+## New, no action needed
+
+- `parser_options.error_on_unmatched_fields` (default off) fails the parse
+  with `Error::UnmatchedFields` when a configured field captured nothing
+  anywhere in the document, listing every such field. A misspelled `xml_path`
+  otherwise shows up as a silently empty column.
+- `parser_options.max_value_bytes` (default unlimited) bounds what one field
+  value may accumulate across text, CDATA and entity events, and raises
+  `Error::ValueTooLarge` beyond it.
+- `Config::builder()` and `TableConfig::builder()`.

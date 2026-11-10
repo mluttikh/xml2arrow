@@ -1,0 +1,1 @@
+1 configured field(s) never matched any element or attribute in the document (check the xml_path spellings — and note that parser_options.stop_at_paths ends the parse early, so fields below a stop path never match): field 'v' of table 'items' (xml_path '/data/items/item/v')
