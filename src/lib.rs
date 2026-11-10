@@ -8,6 +8,9 @@ pub mod config;
 pub mod errors;
 pub use errors::{Error, Result};
 
+pub mod lint;
+pub use lint::Lint;
+
 mod path_registry;
 mod xml_parser;
 pub use xml_parser::{

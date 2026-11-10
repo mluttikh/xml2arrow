@@ -1178,3 +1178,138 @@ tables:
         2
     );
 }
+
+// ---------------------------------------------------------------------------
+// Config lints
+// ---------------------------------------------------------------------------
+//
+// A lint is a claim about what the parser does with a config. These tests hold
+// each claim against a real parse, so a lint cannot drift from the engine it
+// describes, and pin that asking for lints changes nothing.
+
+#[test]
+fn a_table_reported_as_never_finalizing_rows_is_empty() {
+    use xml2arrow::Lint;
+
+    let config: Config = yaml_serde::from_str(
+        r#"
+tables:
+  - name: doc
+    xml_path: /data
+    levels: []
+    fields:
+      - {name: id, xml_path: /data/@id, data_type: Int32, nullable: true}
+"#,
+    )
+    .unwrap();
+    let parser = Parser::new(&config).unwrap();
+
+    assert!(
+        parser
+            .warnings()
+            .iter()
+            .any(|lint| matches!(lint, Lint::NeverFinalizesRows { table, .. } if table == "doc")),
+        "{:?}",
+        parser.warnings()
+    );
+    let batches = parser.parse_slice(b"<data id=\"7\"><x/></data>").unwrap();
+    assert_eq!(batches["doc"].num_rows(), 0);
+}
+
+#[test]
+fn a_field_reported_as_inside_a_nested_table_stays_empty() {
+    use xml2arrow::Lint;
+
+    let config: Config = yaml_serde::from_str(
+        r#"
+tables:
+  - name: outer
+    xml_path: /data
+    levels: []
+    fields:
+      - {name: n, xml_path: /data/group/n, data_type: Int32, nullable: true}
+  - name: inner
+    xml_path: /data/group
+    levels: [group]
+    fields:
+      - {name: v, xml_path: /data/group/item/v, data_type: Int32, nullable: true}
+"#,
+    )
+    .unwrap();
+    let parser = Parser::new(&config).unwrap();
+
+    assert!(
+        parser.warnings().iter().any(|lint| matches!(
+            lint,
+            Lint::FieldInsideNestedTable { field, nested_table, .. }
+                if field == "n" && nested_table == "inner"
+        )),
+        "{:?}",
+        parser.warnings()
+    );
+    let batches = parser
+        .parse_slice(b"<data><group><n>1</n><item><v>2</v></item></group></data>")
+        .unwrap();
+    let outer = &batches["outer"];
+    assert_eq!(
+        outer.column_by_name("n").unwrap().null_count(),
+        outer.num_rows()
+    );
+}
+
+#[test]
+fn a_root_table_reported_for_excess_levels_fails_once_it_has_a_row() {
+    use xml2arrow::Lint;
+
+    let config: Config = yaml_serde::from_str(
+        r#"
+tables:
+  - name: doc
+    xml_path: /
+    levels: [report]
+    fields:
+      - {name: title, xml_path: /report/title, data_type: Utf8}
+"#,
+    )
+    .unwrap();
+    let parser = Parser::new(&config).unwrap();
+
+    assert!(
+        parser.warnings().iter().any(|lint| matches!(
+            lint,
+            Lint::ExcessLevels {
+                declared: 1,
+                available: 0,
+                ..
+            }
+        )),
+        "{:?}",
+        parser.warnings()
+    );
+    assert!(
+        parser
+            .parse_slice(b"<report><title>t</title></report>")
+            .is_err()
+    );
+}
+
+#[test]
+fn asking_for_warnings_does_not_change_a_parse() {
+    let config: Config = yaml_serde::from_str(
+        r#"
+tables:
+  - name: items
+    xml_path: /data
+    levels: []
+    fields:
+      - {name: s, xml_path: /data/item/s, data_type: Utf8}
+"#,
+    )
+    .unwrap();
+    let xml = b"<data><item><s>a</s></item><item/></data>";
+
+    let before = Parser::new(&config).unwrap().parse_slice(xml).unwrap();
+    let parser = Parser::new(&config).unwrap();
+    assert!(!parser.warnings().is_empty());
+    assert_eq!(parser.parse_slice(xml).unwrap(), before);
+}

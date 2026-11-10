@@ -37,6 +37,7 @@ use crate::errors::ErrorLocation;
 use crate::errors::ParseKind;
 use crate::errors::Result;
 use crate::errors::UnmatchedField;
+use crate::lint::Lint;
 use crate::path_registry::{PathNodeId, PathNodeInfo, PathRegistry, PathTracker};
 
 // === Field-level accumulation ===
@@ -1161,6 +1162,39 @@ impl Parser {
                 table_names,
             }),
         })
+    }
+
+    /// Returns advisory findings about this parser's configuration: configs
+    /// that are valid but in which a table can never produce a row, a column
+    /// can never be filled, or a value is handled in a way that commonly
+    /// surprises. See [`Lint`] for what is checked.
+    ///
+    /// Hosts are expected to log these; the library never prints. Lints are
+    /// advisory in every release they appear in and never change parsing
+    /// behavior.
+    ///
+    /// Computed on demand rather than cached in [`Parser::new`]: `Parser::new`'s
+    /// fixed cost dominates parses of small documents, and callers typically
+    /// want this exactly once, at startup.
+    ///
+    /// ```rust
+    /// # use xml2arrow::{Parser, config_from_yaml};
+    /// # let config = config_from_yaml!(r#"
+    /// # tables:
+    /// #   - name: items
+    /// #     xml_path: /data
+    /// #     levels: []
+    /// #     fields: [{name: v, xml_path: /data/item/v, data_type: Int32}]
+    /// # "#);
+    /// let parser = Parser::new(&config)?;
+    /// for lint in parser.warnings() {
+    ///     eprintln!("xml2arrow config warning: {lint}");
+    /// }
+    /// # Ok::<(), xml2arrow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn warnings(&self) -> Vec<Lint> {
+        self.inner.config.lint()
     }
 
     /// Returns the output schema of `table` without parsing any document.

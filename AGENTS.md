@@ -91,7 +91,8 @@ Inside `process_xml_events`, `process_xml_events_slice`, `handle_event`,
 Treat `src/lib.rs` re-exports as the public API; avoid breaking changes:
 `parse_xml`, `parse_xml_slice`, `Parser`, `Config`, `ConfigBuilder`,
 `TableConfig`, `TableConfigBuilder`, `FieldConfig`, `FieldConfigBuilder`,
-`ParserOptions`, `DType`, `Error`, `Result`, and the `config_from_yaml!` macro.
+`ParserOptions`, `DType`, `Lint`, `Error`, `Result`, and the
+`config_from_yaml!` macro.
 
 `Config`, `TableConfig`, `FieldConfig`, `ParserOptions` and `DType` are
 `#[non_exhaustive]`, so a new config key, parser option or data type is an
@@ -153,6 +154,10 @@ cargo bench --bench parse_benchmark -- --baseline before 'parse_(tiny|small|wide
 
 - `src/lib.rs` — public re-exports (the API surface).
 - `src/config.rs` — YAML config structs; **all validation lives here**.
+- `src/lint.rs` — advisory findings (`Config::lint`, `Parser::warnings`). A lint
+  never changes behavior, and each one is a claim about the engine: pair it
+  with a test in `tests/integration_tests.rs` that holds the claim against a
+  real parse.
 - `src/path_registry.rs` — integer path trie + `PathTracker`. Performance critical.
 - `src/xml_parser.rs` — event loops, builders, row finalization. Performance critical.
 - `src/errors.rs` — structured errors + Python exception mapping.

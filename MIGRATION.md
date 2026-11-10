@@ -126,3 +126,7 @@ The row index is the position the failing row would have had in its table.
   value may accumulate across text, CDATA and entity events, and raises
   `Error::ValueTooLarge` beyond it.
 - `Config::builder()` and `TableConfig::builder()`.
+- `Config::lint()` and `Parser::warnings()` return advisory findings about a
+  configuration that is valid but cannot do what it looks like it does, such as
+  a table that can never produce a row. The library never prints them, and
+  they never change how a document parses.
