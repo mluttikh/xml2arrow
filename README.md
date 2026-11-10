@@ -217,6 +217,30 @@ allocates fresh Arrow builders, so batches from one document never leak into the
 next. The amortization matters most for small documents, where setup would
 otherwise dominate; for a single large file the win is negligible.
 
+#### Checking a configuration
+
+Some configurations load and run but cannot do what they look like they do: a
+table that can never produce a row, a field that can never receive a value.
+`Config::lint()` and `Parser::warnings()` report them. The library never
+prints, and a warning never changes how a document parses, so log them once at
+startup:
+
+```rust
+let parser = Parser::new(&config)?;
+for warning in parser.warnings() {
+    eprintln!("xml2arrow config: {warning}");
+}
+```
+
+| Warning | What it means |
+|---|---|
+| `DotSegmentInPath` | A path has a `.` or `..` segment, which no element matches. |
+| `FieldInsideNestedTable` | A field lies inside a nested table's `xml_path`; that table captures its values, so the column stays empty. |
+| `NeverFinalizesRows` | Every field of a table is an attribute of the table element itself, so no row ever ends and the table is empty. |
+| `StructuralTable` | A table has no fields and is left out of the output. |
+| `ExcessLevels` | A table declares more `levels` than it has enclosing tables; the parse fails once the table has a row. |
+| `ImplicitEmptyString` | A non-nullable `Utf8` field yields `""` when its value is missing, where other types raise an error. |
+
 #### Catching a misspelled path
 
 A field whose `xml_path` matches nothing in a document gives a column that is

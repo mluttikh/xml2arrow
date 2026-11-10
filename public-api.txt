@@ -45,6 +45,8 @@ pub fn xml2arrow::config::Config::from_yaml_str(&str) -> xml2arrow::errors::Resu
 pub fn xml2arrow::config::Config::requires_attribute_parsing(&self) -> bool
 pub fn xml2arrow::config::Config::to_yaml_file(&self, impl core::convert::AsRef<std::path::Path>) -> xml2arrow::errors::Result<()>
 pub fn xml2arrow::config::Config::validate(&self) -> xml2arrow::errors::Result<()>
+impl xml2arrow::config::Config
+pub fn xml2arrow::config::Config::lint(&self) -> alloc::vec::Vec<xml2arrow::lint::Lint>
 impl core::clone::Clone for xml2arrow::config::Config
 pub fn xml2arrow::config::Config::clone(&self) -> xml2arrow::config::Config
 impl core::cmp::PartialEq for xml2arrow::config::Config
@@ -356,6 +358,46 @@ impl core::marker::UnsafeUnpin for xml2arrow::errors::UnmatchedField
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::errors::UnmatchedField
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::errors::UnmatchedField
 pub type xml2arrow::errors::Result<T> = core::result::Result<T, xml2arrow::errors::Error>
+pub mod xml2arrow::lint
+#[non_exhaustive] pub enum xml2arrow::lint::Lint
+pub xml2arrow::lint::Lint::DotSegmentInPath
+pub xml2arrow::lint::Lint::DotSegmentInPath::location: alloc::string::String
+pub xml2arrow::lint::Lint::DotSegmentInPath::path: alloc::string::String
+pub xml2arrow::lint::Lint::ExcessLevels
+pub xml2arrow::lint::Lint::ExcessLevels::available: usize
+pub xml2arrow::lint::Lint::ExcessLevels::declared: usize
+pub xml2arrow::lint::Lint::ExcessLevels::table: alloc::string::String
+pub xml2arrow::lint::Lint::FieldInsideNestedTable
+pub xml2arrow::lint::Lint::FieldInsideNestedTable::field: alloc::string::String
+pub xml2arrow::lint::Lint::FieldInsideNestedTable::field_path: alloc::string::String
+pub xml2arrow::lint::Lint::FieldInsideNestedTable::nested_table: alloc::string::String
+pub xml2arrow::lint::Lint::FieldInsideNestedTable::nested_table_path: alloc::string::String
+pub xml2arrow::lint::Lint::FieldInsideNestedTable::table: alloc::string::String
+pub xml2arrow::lint::Lint::ImplicitEmptyString
+pub xml2arrow::lint::Lint::ImplicitEmptyString::fields: alloc::vec::Vec<alloc::string::String>
+pub xml2arrow::lint::Lint::ImplicitEmptyString::table: alloc::string::String
+pub xml2arrow::lint::Lint::NeverFinalizesRows
+pub xml2arrow::lint::Lint::NeverFinalizesRows::table: alloc::string::String
+pub xml2arrow::lint::Lint::NeverFinalizesRows::xml_path: alloc::string::String
+pub xml2arrow::lint::Lint::StructuralTable
+pub xml2arrow::lint::Lint::StructuralTable::table: alloc::string::String
+impl core::clone::Clone for xml2arrow::lint::Lint
+pub fn xml2arrow::lint::Lint::clone(&self) -> xml2arrow::lint::Lint
+impl core::cmp::Eq for xml2arrow::lint::Lint
+impl core::cmp::PartialEq for xml2arrow::lint::Lint
+pub fn xml2arrow::lint::Lint::eq(&self, &xml2arrow::lint::Lint) -> bool
+impl core::fmt::Debug for xml2arrow::lint::Lint
+pub fn xml2arrow::lint::Lint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for xml2arrow::lint::Lint
+pub fn xml2arrow::lint::Lint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for xml2arrow::lint::Lint
+impl core::marker::Freeze for xml2arrow::lint::Lint
+impl core::marker::Send for xml2arrow::lint::Lint
+impl core::marker::Sync for xml2arrow::lint::Lint
+impl core::marker::Unpin for xml2arrow::lint::Lint
+impl core::marker::UnsafeUnpin for xml2arrow::lint::Lint
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::lint::Lint
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::lint::Lint
 pub macro xml2arrow::config_from_yaml!
 #[non_exhaustive] pub enum xml2arrow::DType
 pub xml2arrow::DType::Boolean
@@ -452,6 +494,45 @@ impl core::marker::Unpin for xml2arrow::errors::Error
 impl core::marker::UnsafeUnpin for xml2arrow::errors::Error
 impl !core::panic::unwind_safe::RefUnwindSafe for xml2arrow::errors::Error
 impl !core::panic::unwind_safe::UnwindSafe for xml2arrow::errors::Error
+#[non_exhaustive] pub enum xml2arrow::Lint
+pub xml2arrow::Lint::DotSegmentInPath
+pub xml2arrow::Lint::DotSegmentInPath::location: alloc::string::String
+pub xml2arrow::Lint::DotSegmentInPath::path: alloc::string::String
+pub xml2arrow::Lint::ExcessLevels
+pub xml2arrow::Lint::ExcessLevels::available: usize
+pub xml2arrow::Lint::ExcessLevels::declared: usize
+pub xml2arrow::Lint::ExcessLevels::table: alloc::string::String
+pub xml2arrow::Lint::FieldInsideNestedTable
+pub xml2arrow::Lint::FieldInsideNestedTable::field: alloc::string::String
+pub xml2arrow::Lint::FieldInsideNestedTable::field_path: alloc::string::String
+pub xml2arrow::Lint::FieldInsideNestedTable::nested_table: alloc::string::String
+pub xml2arrow::Lint::FieldInsideNestedTable::nested_table_path: alloc::string::String
+pub xml2arrow::Lint::FieldInsideNestedTable::table: alloc::string::String
+pub xml2arrow::Lint::ImplicitEmptyString
+pub xml2arrow::Lint::ImplicitEmptyString::fields: alloc::vec::Vec<alloc::string::String>
+pub xml2arrow::Lint::ImplicitEmptyString::table: alloc::string::String
+pub xml2arrow::Lint::NeverFinalizesRows
+pub xml2arrow::Lint::NeverFinalizesRows::table: alloc::string::String
+pub xml2arrow::Lint::NeverFinalizesRows::xml_path: alloc::string::String
+pub xml2arrow::Lint::StructuralTable
+pub xml2arrow::Lint::StructuralTable::table: alloc::string::String
+impl core::clone::Clone for xml2arrow::lint::Lint
+pub fn xml2arrow::lint::Lint::clone(&self) -> xml2arrow::lint::Lint
+impl core::cmp::Eq for xml2arrow::lint::Lint
+impl core::cmp::PartialEq for xml2arrow::lint::Lint
+pub fn xml2arrow::lint::Lint::eq(&self, &xml2arrow::lint::Lint) -> bool
+impl core::fmt::Debug for xml2arrow::lint::Lint
+pub fn xml2arrow::lint::Lint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for xml2arrow::lint::Lint
+pub fn xml2arrow::lint::Lint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for xml2arrow::lint::Lint
+impl core::marker::Freeze for xml2arrow::lint::Lint
+impl core::marker::Send for xml2arrow::lint::Lint
+impl core::marker::Sync for xml2arrow::lint::Lint
+impl core::marker::Unpin for xml2arrow::lint::Lint
+impl core::marker::UnsafeUnpin for xml2arrow::lint::Lint
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::lint::Lint
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::lint::Lint
 #[non_exhaustive] pub struct xml2arrow::BatchOptions
 pub xml2arrow::BatchOptions::max_bytes_per_batch: usize
 pub xml2arrow::BatchOptions::max_rows_per_batch: usize
@@ -496,6 +577,8 @@ pub fn xml2arrow::config::Config::from_yaml_str(&str) -> xml2arrow::errors::Resu
 pub fn xml2arrow::config::Config::requires_attribute_parsing(&self) -> bool
 pub fn xml2arrow::config::Config::to_yaml_file(&self, impl core::convert::AsRef<std::path::Path>) -> xml2arrow::errors::Result<()>
 pub fn xml2arrow::config::Config::validate(&self) -> xml2arrow::errors::Result<()>
+impl xml2arrow::config::Config
+pub fn xml2arrow::config::Config::lint(&self) -> alloc::vec::Vec<xml2arrow::lint::Lint>
 impl core::clone::Clone for xml2arrow::config::Config
 pub fn xml2arrow::config::Config::clone(&self) -> xml2arrow::config::Config
 impl core::cmp::PartialEq for xml2arrow::config::Config
@@ -588,6 +671,7 @@ pub fn xml2arrow::Parser::parse_slice(&self, &[u8]) -> xml2arrow::errors::Result
 pub fn xml2arrow::Parser::parse_streaming<R, F>(&self, R, xml2arrow::BatchOptions, F) -> xml2arrow::errors::Result<()> where R: alloc::io::buf_read::BufRead, F: core::ops::function::FnMut(&str, arrow_array::record_batch::RecordBatch) -> xml2arrow::errors::Result<()>
 pub fn xml2arrow::Parser::schema(&self, &str) -> core::option::Option<arrow_schema::schema::SchemaRef>
 pub fn xml2arrow::Parser::single_table_schema(&self) -> xml2arrow::errors::Result<arrow_schema::schema::SchemaRef>
+pub fn xml2arrow::Parser::warnings(&self) -> alloc::vec::Vec<xml2arrow::lint::Lint>
 impl core::clone::Clone for xml2arrow::Parser
 pub fn xml2arrow::Parser::clone(&self) -> Self
 impl core::marker::Freeze for xml2arrow::Parser

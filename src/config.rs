@@ -136,17 +136,26 @@ fn default_true() -> bool {
 /// registry: the leading `/` is ignored and empty segments (double or
 /// trailing slashes) are skipped. Validation and runtime matching must agree
 /// on what a "path" is, so this mirrors `PathRegistry::get_or_create_path`.
-fn path_segments(path: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn path_segments(path: &str) -> impl DoubleEndedIterator<Item = &str> {
     path.trim_start_matches('/')
         .split('/')
         .filter(|s| !s.is_empty())
+}
+
+/// Whether `path` has a `.` or `..` segment.
+///
+/// No element can match one: an XML name cannot be `.` or `..`, so such a path
+/// silently matches nothing, and a table built on it has no rows or a column
+/// that is never filled.
+pub(crate) fn has_dot_segment(path: &str) -> bool {
+    path_segments(path).any(|segment| segment == "." || segment == "..")
 }
 
 /// Returns true when `descendant` is equal to or nested under `ancestor`,
 /// compared segment-wise. A plain string prefix test is not enough:
 /// `/root/items_other` starts with `/root/item` as a string but is not under
 /// it as a path. The root path `/` has no segments, so everything is under it.
-fn path_is_under(descendant: &str, ancestor: &str) -> bool {
+pub(crate) fn path_is_under(descendant: &str, ancestor: &str) -> bool {
     // Fast path for canonical spellings: a character-level prefix whose cut
     // lands on a segment boundary is exactly the segment-wise relation.
     // Validation runs once per `Parser::new`, but that fixed cost dominates
@@ -167,6 +176,16 @@ fn path_is_under(descendant: &str, ancestor: &str) -> bool {
 /// ("/data", "data" and "/data/" are all the same path).
 pub(crate) fn paths_equal(a: &str, b: &str) -> bool {
     path_segments(a).eq(path_segments(b))
+}
+
+/// Returns true when `descendant` is nested *strictly* inside `ancestor`:
+/// under it, and not the same path.
+///
+/// "Is this table inside that one?" and "is this table inside or equal to that
+/// one?" have different right answers wherever one table's element is compared
+/// with another's, so the strict relation is named once here.
+pub(crate) fn path_is_strictly_under(descendant: &str, ancestor: &str) -> bool {
+    !paths_equal(descendant, ancestor) && path_is_under(descendant, ancestor)
 }
 
 /// Top-level configuration for XML to Arrow conversion.
