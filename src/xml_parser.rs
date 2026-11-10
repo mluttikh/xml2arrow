@@ -1046,9 +1046,8 @@ impl XmlToArrowConverter {
 /// same compiled state — the intended pattern when processing a stream or
 /// directory of files that all share one schema.
 ///
-/// The free functions [`parse_xml`] and [`parse_xml_slice`] are thin wrappers
-/// that build a throwaway `Parser` per call; reach for `Parser` directly
-/// whenever you parse more than one document with the same `Config`.
+/// A `Parser` is cheap to keep and safe to share: build one per `Config` and
+/// parse every document that uses that config through it.
 ///
 /// # Example
 ///
@@ -1442,6 +1441,10 @@ impl Parser {
     /// Returns the first error the underlying stream yields (XML parsing,
     /// value conversion, or `RecordBatch` creation), or the first error
     /// returned by `sink` — whichever occurs first aborts the parse.
+    #[deprecated(
+        since = "0.20.0",
+        note = "iterate `parse_batches` directly: `for item in parser.parse_batches(reader, options) { let TableBatch { table, batch } = item?; }` is the same code without a second entry point"
+    )]
     pub fn parse_streaming<R, F>(&self, reader: R, options: BatchOptions, mut sink: F) -> Result<()>
     where
         R: BufRead,
@@ -1603,7 +1606,7 @@ impl Parser {
 /// # Example
 ///
 /// ```rust
-/// use xml2arrow::{parse_xml, config::{Config, TableConfig, FieldConfigBuilder, DType}};
+/// use xml2arrow::{Parser, config::{Config, TableConfig, FieldConfigBuilder, DType}};
 /// use std::fs::File;
 /// use std::io::BufReader;
 ///
@@ -1611,9 +1614,13 @@ impl Parser {
 /// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build().unwrap()];
 /// let tables = vec![TableConfig::new("items", "/data", vec![], fields)];
 /// let config = Config::builder().tables(tables).build().unwrap();
-/// let record_batches = parse_xml(xml_content.as_bytes(), &config).unwrap();
+/// let record_batches = Parser::new(&config).unwrap().parse(xml_content.as_bytes()).unwrap();
 /// // ... use record_batches
 /// ```
+#[deprecated(
+    since = "0.20.0",
+    note = "construct a `Parser` and reuse it: `Parser::new(&config)?.parse(reader)`. The free function hides the one-time path-compilation cost, which it pays on every call"
+)]
 pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<String, RecordBatch>> {
     Parser::new(config)?.parse(reader)
 }
@@ -1645,14 +1652,18 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
 /// # Example
 ///
 /// ```rust
-/// use xml2arrow::{parse_xml_slice, config::{Config, TableConfig, FieldConfigBuilder, DType}};
+/// use xml2arrow::{Parser, config::{Config, TableConfig, FieldConfigBuilder, DType}};
 ///
 /// let xml = b"<data><item><value>123</value></item></data>";
 /// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build().unwrap()];
 /// let tables = vec![TableConfig::new("items", "/data", vec![], fields)];
 /// let config = Config::builder().tables(tables).build().unwrap();
-/// let record_batches = parse_xml_slice(xml, &config).unwrap();
+/// let record_batches = Parser::new(&config).unwrap().parse_slice(xml).unwrap();
 /// ```
+#[deprecated(
+    since = "0.20.0",
+    note = "construct a `Parser` and reuse it: `Parser::new(&config)?.parse_slice(xml)`. The free function hides the one-time path-compilation cost, which it pays on every call"
+)]
 pub fn parse_xml_slice(xml: &[u8], config: &Config) -> Result<IndexMap<String, RecordBatch>> {
     Parser::new(config)?.parse_slice(xml)
 }
@@ -2499,11 +2510,23 @@ mod tests {
     };
     use rstest::rstest;
 
+    /// `Parser::new(config)?.parse(reader)` in a single call.
+    ///
+    /// The deprecated `parse_xml` free function did exactly this. The unit
+    /// tests do hundreds of one-shot parses, so they keep the terse shape
+    /// locally while the public API stays `Parser`-first.
+    fn parse_document(
+        reader: impl BufRead,
+        config: &Config,
+    ) -> Result<IndexMap<String, RecordBatch>> {
+        Parser::new(config)?.parse(reader)
+    }
+
     /// Parse XML from a string using an inline YAML config.
     /// Panics on error -- intended for tests with known-good inputs.
     fn parse(xml: &str, yaml_config: &str) -> IndexMap<String, RecordBatch> {
         let config = config_from_yaml!(yaml_config);
-        parse_xml(xml.as_bytes(), &config).unwrap()
+        parse_document(xml.as_bytes(), &config).unwrap()
     }
 
     macro_rules! assert_array_values {
@@ -3404,7 +3427,7 @@ mod tests {
             "#
         );
 
-        let result = parse_xml(xml_content.as_bytes(), &config);
+        let result = parse_document(xml_content.as_bytes(), &config);
         assert!(result.is_err());
         let err = result.unwrap_err();
         match &err {
@@ -3446,7 +3469,7 @@ mod tests {
             "#
         );
 
-        let result = parse_xml(xml_content.as_bytes(), &config);
+        let result = parse_document(xml_content.as_bytes(), &config);
         assert!(result.is_err());
 
         // Nullable should succeed with nulls
@@ -3464,7 +3487,7 @@ mod tests {
             "#
         );
 
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let record_batches = parse_document(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("bools").unwrap();
         assert_array_values_option!(
             batch,
@@ -3580,7 +3603,7 @@ mod tests {
         );
 
         // Invalid value for Int32 should error
-        let result = parse_xml(
+        let result = parse_document(
             "<data><row><value>not_a_number</value></row></data>".as_bytes(),
             &config,
         );
@@ -3617,7 +3640,7 @@ mod tests {
             "#
         );
 
-        let record_batches = parse_xml(xml_content.as_bytes(), &config_no_trim)?;
+        let record_batches = parse_document(xml_content.as_bytes(), &config_no_trim)?;
         let batch = record_batches.get("test").unwrap();
         assert_array_values!(batch, "value", vec!["   trimmed   "], StringArray);
 
@@ -3637,7 +3660,7 @@ mod tests {
             "#
         );
 
-        let record_batches = parse_xml(xml_content.as_bytes(), &config_trim)?;
+        let record_batches = parse_document(xml_content.as_bytes(), &config_trim)?;
         let batch = record_batches.get("test").unwrap();
         assert_array_values!(batch, "value", vec!["trimmed"], StringArray);
 
@@ -3668,7 +3691,7 @@ mod tests {
             "#
         );
         let config: Config = yaml_serde::from_str(&yaml_config).unwrap();
-        let result = parse_xml(xml_content.as_bytes(), &config);
+        let result = parse_document(xml_content.as_bytes(), &config);
         assert!(
             result.is_err(),
             "Expected overflow error for {value} as {dtype}"
@@ -3692,7 +3715,7 @@ mod tests {
             "#
         );
 
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let record_batches = parse_document(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("test").unwrap();
         assert_array_values!(batch, "value", vec![i64::MAX], Int64Array);
 
@@ -4205,7 +4228,7 @@ mod tests {
             "#
         );
 
-        let result = parse_xml(xml_content.as_bytes(), &config);
+        let result = parse_document(xml_content.as_bytes(), &config);
         assert!(result.is_err());
         match result.unwrap_err() {
             e @ Error::MissingRequiredField { .. } => {
@@ -4234,7 +4257,7 @@ mod tests {
             "#
         );
 
-        let result = parse_xml(xml_content.as_bytes(), &config);
+        let result = parse_document(xml_content.as_bytes(), &config);
         assert!(result.is_err());
     }
 
@@ -4275,7 +4298,7 @@ mod tests {
             "#
         );
 
-        let record_batches = parse_xml(xml_content.as_bytes(), &config)?;
+        let record_batches = parse_document(xml_content.as_bytes(), &config)?;
         let batch = record_batches.get("boundaries").unwrap();
         assert_eq!(batch.num_rows(), 1);
         assert_array_values!(batch, "int8_min", vec![i8::MIN], Int8Array);
@@ -5187,7 +5210,7 @@ mod tests {
             "#
         );
 
-        let result = parse_xml(
+        let result = parse_document(
             "<data><row><value>not_a_float</value></row></data>".as_bytes(),
             &config,
         );
@@ -5214,7 +5237,7 @@ mod tests {
             "#
         );
 
-        let result = parse_xml(
+        let result = parse_document(
             "<data><row><value>abc</value></row></data>".as_bytes(),
             &config,
         );
@@ -5272,7 +5295,7 @@ mod tests {
             "#
         );
 
-        let result = parse_xml("<data><row></row></data>".as_bytes(), &config);
+        let result = parse_document("<data><row></row></data>".as_bytes(), &config);
         assert!(result.is_err());
         match result.unwrap_err() {
             e @ Error::MissingRequiredField { .. } => {
@@ -5453,7 +5476,7 @@ mod tests {
         );
 
         // Empty element <value></value> with has_value=false for non-nullable Int32
-        let result = parse_xml(
+        let result = parse_document(
             "<data><row><value></value></row></data>".as_bytes(),
             &config,
         );
@@ -5574,7 +5597,7 @@ mod tests {
             "#
         );
 
-        let result = parse_xml(
+        let result = parse_document(
             "<data><row><flag>   </flag></row></data>".as_bytes(),
             &config,
         );
@@ -5890,7 +5913,7 @@ mod tests {
             "#
         );
         let config: Config = yaml_serde::from_str(&yaml_config).unwrap();
-        let result = parse_xml(
+        let result = parse_document(
             "<data><row><other>x</other></row></data>".as_bytes(),
             &config,
         );
@@ -5920,7 +5943,7 @@ mod tests {
         );
 
         // Mismatched closing tag should produce an error
-        let result = parse_xml(
+        let result = parse_document(
             "<data><row><value>42</wrong></row></data>".as_bytes(),
             &config,
         );
@@ -5943,7 +5966,7 @@ mod tests {
         );
 
         let garbage: &[u8] = &[0xFF, 0xFE, 0x00, 0x01, 0x80, 0x90, 0xAB];
-        let result = parse_xml(garbage, &config);
+        let result = parse_document(garbage, &config);
         // Binary input should either error or produce an empty batch
         // (quick_xml may treat it as text with no matching elements)
         if let Ok(batches) = &result {
@@ -6208,7 +6231,7 @@ mod tests {
         );
 
         // Duplicate attribute "id" is invalid XML
-        let result = parse_xml(
+        let result = parse_document(
             r#"<data><item id="1" id="2">text</item></data>"#.as_bytes(),
             &config,
         );
@@ -6534,7 +6557,7 @@ mod tests {
                       data_type: Utf8
             "#
         );
-        let result = parse_xml(
+        let result = parse_document(
             r#"<data><row><v>a&nbsp;b</v></row></data>"#.as_bytes(),
             &config,
         );
@@ -6582,7 +6605,7 @@ mod tests {
                       data_type: Utf8
             "#
         );
-        let result = parse_xml(
+        let result = parse_document(
             r#"<data><row><v>&#xZZ;</v></row></data>"#.as_bytes(),
             &config,
         );
@@ -6689,7 +6712,7 @@ mod tests {
                       data_type: Int32
             "#
         );
-        let result = parse_xml(
+        let result = parse_document(
             r#"<data><row><v>1</v><v>2</v></row></data>"#.as_bytes(),
             &config,
         );
@@ -6741,7 +6764,7 @@ mod tests {
                       data_type: Int32
             "#
         );
-        let result = parse_xml(
+        let result = parse_document(
             r#"<data><row><v>1</v><v/></row></data>"#.as_bytes(),
             &config,
         );
@@ -7136,6 +7159,9 @@ mod tests {
         }
 
         #[test]
+        // Deprecated but supported until 1.0, so its behavior stays pinned. The
+        // allow is scoped to this test so new uses elsewhere still warn.
+        #[allow(deprecated)]
         fn parse_streaming_callback_receives_all_batches() {
             let config = config_from_yaml!(NESTED_YAML);
             let parser = Parser::new(&config).unwrap();
@@ -7159,6 +7185,9 @@ mod tests {
         }
 
         #[test]
+        // Deprecated but supported until 1.0, so its behavior stays pinned. The
+        // allow is scoped to this test so new uses elsewhere still warn.
+        #[allow(deprecated)]
         fn parse_streaming_sink_error_aborts() {
             let config = config_from_yaml!(NESTED_YAML);
             let parser = Parser::new(&config).unwrap();
@@ -7601,8 +7630,8 @@ mod tests {
                       data_type: Int32
             "#
         );
-        let err =
-            parse_xml(r#"<data><row><v>   </v></row></data>"#.as_bytes(), &config).unwrap_err();
+        let err = parse_document(r#"<data><row><v>   </v></row></data>"#.as_bytes(), &config)
+            .unwrap_err();
         assert!(
             matches!(err, Error::MissingRequiredField { .. }),
             "got: {err}"
@@ -7631,7 +7660,7 @@ mod tests {
             "#
         );
         let xml = format!("<data><row><v>{value}</v></row></data>");
-        let err = parse_xml(xml.as_bytes(), &config).unwrap_err();
+        let err = parse_document(xml.as_bytes(), &config).unwrap_err();
         assert!(
             matches!(err, Error::ParseError { .. }),
             "value {value:?} must error, got: {err}"
@@ -7674,7 +7703,7 @@ mod tests {
                       data_type: Int32
             "#
         );
-        let err = parse_xml(
+        let err = parse_document(
             b"<data><row><v>99999999999</v></row></data>".as_slice(),
             &config,
         )
@@ -7699,8 +7728,8 @@ mod tests {
                       data_type: Int32
             "#
         );
-        let err =
-            parse_xml(r#"<data><row><v> 3x </v></row></data>"#.as_bytes(), &config).unwrap_err();
+        let err = parse_document(r#"<data><row><v> 3x </v></row></data>"#.as_bytes(), &config)
+            .unwrap_err();
         assert!(matches!(err, Error::ParseError { .. }), "got: {err}");
         assert!(err.to_string().contains("' 3x '"), "got: {err}");
     }

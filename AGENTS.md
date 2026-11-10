@@ -101,6 +101,9 @@ additive change. Keep it that way: a new public config type is
 builder or a `Default`. Tests and doc examples outside the crate construct
 configs through the builders, which is what proves they are sufficient.
 
+`parse_xml`, `parse_xml_slice` and `Parser::parse_streaming` are deprecated and
+stay until 1.0. Use `Parser` in new code, tests, benches and examples.
+
 ## Testing Conventions
 
 - Parsing behavior is tested in `src/xml_parser.rs` `mod tests` using the

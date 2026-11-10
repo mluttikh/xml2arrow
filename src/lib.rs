@@ -13,6 +13,9 @@ pub use lint::Lint;
 
 mod path_registry;
 mod xml_parser;
+// The two free functions are deprecated (see their notes); re-exporting them
+// is not itself a use worth warning about.
+#[allow(deprecated)]
 pub use xml_parser::{
     BatchOptions, BatchStream, EventSource, Parser, ReaderSource, SingleTableReader, SliceSource,
     TableBatch, parse_xml, parse_xml_slice,
