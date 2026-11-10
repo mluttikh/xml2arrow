@@ -64,6 +64,10 @@ parser_options:
                                # the two options pull against each other.
   max_value_bytes: <number>    # Cap on the bytes a single field value may accumulate
                                # across text/CDATA/entity events (default: unlimited).
+  allow_truncated_input: <bool>  # Accept a document that ends while elements are
+                               # still open, returning the rows that closed before
+                               # the cut (default: false, which fails the parse with
+                               # TruncatedInput). For recovery tooling only.
 tables:
   - name: <table_name>         # Name of the resulting Arrow RecordBatch
     xml_path: <xml_path>       # Path to the element whose children are rows.
@@ -261,6 +265,15 @@ The row index is the position the failing row would have occupied in its table's
 batch — usually the more actionable of the two coordinates, since it points into
 the output you were building.
 
+#### Truncated documents
+
+A document that ends while elements are still open — a killed writer, a short
+read, a partial download — fails with `Error::TruncatedInput` rather than
+returning the rows that happened to close before the cut, which would be
+indistinguishable from a complete result. Recovery tooling that wants those
+rows sets `parser_options.allow_truncated_input: true`. Stopping early on
+purpose with `stop_at_paths` is not truncation and is unaffected.
+
 #### Streaming documents too large for memory
 
 `parser.parse` and `parser.parse_slice` read the input in one pass, but they
@@ -303,6 +316,11 @@ Guarantees and behavior:
   children — so a child batch can reference a parent row that arrives in a
   later batch of the parent table. Writing each table to its own sink (the
   Parquet case) is unaffected.
+- **An error invalidates the batches already yielded.** A failure found later
+  in the document — a malformed value, or the input ending mid-element
+  (`Error::TruncatedInput`) — arrives after earlier batches were handed out.
+  Treat any `Err` as invalidating the whole stream: discard what you
+  accumulated, or write to a staging location you can roll back.
 - Compressed input composes as a plain `BufRead` adapter (e.g. a
   `flate2::bufread::GzDecoder` or `bzip2::bufread::BzDecoder` wrapped around
   the file) — no crate support needed.

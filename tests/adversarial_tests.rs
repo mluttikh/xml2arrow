@@ -3,9 +3,7 @@
 //! These pin the crate's **trust model** — what an untrusted document can and
 //! cannot make the parser do. Each test names the guarantee it defends, so a
 //! change that weakens one fails loudly here rather than silently in a user's
-//! pipeline. Where today's behavior is a known gap rather than a guarantee
-//! (truncated input), the test says so, and pins it so that closing the gap is a
-//! deliberate change.
+//! pipeline.
 //!
 //! Every case runs through all three entry points (`parse_xml_slice`,
 //! `parse_xml` over a `BufRead`, and `Parser::parse_batches_slice`). That is
@@ -245,32 +243,36 @@ fn predefined_entities_and_char_refs_still_resolve() {
 }
 
 // ---------------------------------------------------------------------------
-// Truncation — pinned as it behaves today, so changing it is a deliberate act
+// Truncation — a document that ends mid-element is not silently accepted
 // ---------------------------------------------------------------------------
 
 /// Cut points: mid-text, mid-element (after a complete row), and after a
-/// complete row but before the root closes.
-///
-/// **This pins a known gap, not a guarantee.** A document that ends mid-element
-/// parses to `Ok` with the rows that closed before the cut, so a killed writer
-/// or a short read yields quietly incomplete data. Rejecting truncated input is
-/// planned, first as an opt-in and later as the default; the release that does
-/// it rewrites this test, which is the point of pinning it.
+/// complete row but before the root closes. All three previously returned
+/// `Ok` with a short batch.
 #[rstest]
 #[case::mid_text("<r><v>a</v><v2>b</v2><v>c")]
 #[case::mid_element("<r><v>a</v><nested><deep>")]
 #[case::root_not_closed("<r><v>a</v>")]
-fn truncated_input_returns_the_rows_before_the_cut(#[case] xml: &str) {
+fn truncated_input_is_rejected(#[case] xml: &str) {
     for entry in ALL_ENTRIES {
-        let values = entry
-            .run(xml, &default_config())
-            .unwrap_or_else(|e| panic!("{entry:?}: {e}"));
-        assert_eq!(values, vec!["a".to_string()], "{entry:?}");
+        match entry.run(xml, &default_config()) {
+            Err(Error::TruncatedInput { open_elements }) => {
+                assert!(
+                    open_elements > 0,
+                    "{entry:?}: open_elements should be positive"
+                );
+            }
+            Err(other) => panic!("{entry:?}: expected TruncatedInput, got {other}"),
+            Ok(values) => panic!(
+                "{entry:?}: truncated input silently returned {} row(s): {values:?}",
+                values.len()
+            ),
+        }
     }
 }
 
 #[test]
-fn complete_document_parses() {
+fn complete_document_is_not_reported_as_truncated() {
     // The other side of the check: a well-formed document must still parse.
     let xml = "<r><v>a</v></r>";
     for entry in ALL_ENTRIES {
@@ -282,11 +284,24 @@ fn complete_document_parses() {
 }
 
 #[test]
+fn truncated_input_is_accepted_when_opted_in() {
+    // The recovery escape hatch returns the rows parsed before the cut.
+    let config = config("  allow_truncated_input: true");
+    let xml = "<r><v>a</v><v2>x</v2><v>b";
+    for entry in ALL_ENTRIES {
+        let values = entry
+            .run(xml, &config)
+            .unwrap_or_else(|e| panic!("{entry:?}: {e}"));
+        assert_eq!(values, vec!["a".to_string()], "{entry:?}");
+    }
+}
+
+#[test]
 fn stop_at_paths_is_not_truncation() {
-    // Guards the future truncation check's *placement*. `stop_at_paths` exits
+    // Regression guard for the *placement* of the check. `stop_at_paths` exits
     // through `close_element`'s Break and never reaches the Eof arm, so a
-    // deliberate early stop on a complete document must keep succeeding. A
-    // naive "depth > 0 when the loop exits" check placed in the event pumps
+    // deliberate early stop on a complete document must still succeed. A naive
+    // "depth > 0 when the loop exits" implementation placed in the event pumps
     // rather than in the Eof arm would fail here.
     let config = config("  stop_at_paths: ['/r/v']");
     let xml = "<r><v>a</v><v>b</v></r>";
@@ -299,7 +314,7 @@ fn stop_at_paths_is_not_truncation() {
 }
 
 #[test]
-fn empty_input_parses_to_no_rows() {
+fn empty_input_is_not_reported_as_truncated() {
     // Zero elements opened means depth 0 at EOF — an empty document is valid
     // (and already covered by an integration test), not truncated.
     for entry in ALL_ENTRIES {

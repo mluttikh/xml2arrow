@@ -541,7 +541,6 @@ impl PathTracker {
 
     /// Returns the depth of the current path (number of segments from root).
     #[inline]
-    #[allow(dead_code)]
     pub fn depth(&self) -> usize {
         self.node_stack.len().saturating_sub(1)
     }

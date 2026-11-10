@@ -126,6 +126,7 @@ impl core::marker::UnsafeUnpin for xml2arrow::config::FieldConfigBuilder
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::FieldConfigBuilder
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::FieldConfigBuilder
 #[non_exhaustive] pub struct xml2arrow::config::ParserOptions
+pub xml2arrow::config::ParserOptions::allow_truncated_input: bool
 pub xml2arrow::config::ParserOptions::error_on_unmatched_fields: bool
 pub xml2arrow::config::ParserOptions::max_value_bytes: core::option::Option<usize>
 pub xml2arrow::config::ParserOptions::stop_at_paths: alloc::vec::Vec<alloc::string::String>
@@ -259,6 +260,8 @@ pub xml2arrow::errors::Error::ParseError::path: alloc::sync::Arc<str>
 pub xml2arrow::errors::Error::ParseError::value: alloc::string::String
 pub xml2arrow::errors::Error::RowIndexOverflow
 pub xml2arrow::errors::Error::RowIndexOverflow::table: alloc::sync::Arc<str>
+pub xml2arrow::errors::Error::TruncatedInput
+pub xml2arrow::errors::Error::TruncatedInput::open_elements: usize
 pub xml2arrow::errors::Error::UnmatchedFields
 pub xml2arrow::errors::Error::UnmatchedFields::fields: alloc::vec::Vec<xml2arrow::errors::UnmatchedField>
 pub xml2arrow::errors::Error::UnmatchedFields::stop_paths_configured: bool
@@ -451,6 +454,8 @@ pub xml2arrow::Error::ParseError::path: alloc::sync::Arc<str>
 pub xml2arrow::Error::ParseError::value: alloc::string::String
 pub xml2arrow::Error::RowIndexOverflow
 pub xml2arrow::Error::RowIndexOverflow::table: alloc::sync::Arc<str>
+pub xml2arrow::Error::TruncatedInput
+pub xml2arrow::Error::TruncatedInput::open_elements: usize
 pub xml2arrow::Error::UnmatchedFields
 pub xml2arrow::Error::UnmatchedFields::fields: alloc::vec::Vec<xml2arrow::errors::UnmatchedField>
 pub xml2arrow::Error::UnmatchedFields::stop_paths_configured: bool
@@ -682,6 +687,7 @@ impl core::marker::UnsafeUnpin for xml2arrow::Parser
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::Parser
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::Parser
 #[non_exhaustive] pub struct xml2arrow::ParserOptions
+pub xml2arrow::ParserOptions::allow_truncated_input: bool
 pub xml2arrow::ParserOptions::error_on_unmatched_fields: bool
 pub xml2arrow::ParserOptions::max_value_bytes: core::option::Option<usize>
 pub xml2arrow::ParserOptions::stop_at_paths: alloc::vec::Vec<alloc::string::String>
