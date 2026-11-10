@@ -1,5 +1,5 @@
 use std::time::Instant;
-use xml2arrow::{Config, parse_xml};
+use xml2arrow::{Config, Parser};
 
 /// Generate a realistic XML file structure matching the user's use case:
 /// - Header section with metadata (strings, timestamps, integers)
@@ -295,7 +295,7 @@ fn main() {
         print!("  Warming up... ");
         std::io::Write::flush(&mut std::io::stdout()).unwrap();
         for _ in 0..2 {
-            let _ = parse_xml(xml.as_bytes(), &config).unwrap();
+            let _ = Parser::new(&config).unwrap().parse(xml.as_bytes()).unwrap();
         }
         println!("done");
 
@@ -305,7 +305,7 @@ fn main() {
 
         let start = Instant::now();
         for _ in 0..iterations {
-            let _ = parse_xml(xml.as_bytes(), &config).unwrap();
+            let _ = Parser::new(&config).unwrap().parse(xml.as_bytes()).unwrap();
         }
         let duration = start.elapsed();
         println!("done");

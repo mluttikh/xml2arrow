@@ -9,7 +9,9 @@ parser options and data types without breaking your build.
    a field.
 2. [Behavioral](#behavioral-changes): value errors end with document
    coordinates.
-3. [New](#new-no-action-needed): additions that need no action.
+3. [Deprecated](#deprecated-still-working): what still works, and what
+   replaces it.
+4. [New](#new-no-action-needed): additions that need no action.
 
 If you load configs from YAML, or build them with `TableConfig::new` and
 `FieldConfigBuilder`, and you do not `match` on `DType` or destructure
@@ -115,6 +117,20 @@ The text before the suffix is unchanged, so a prefix or substring match still
 works. A test that compares the whole message needs loosening, or can read the
 structured fields instead: `location.row` and `location.position` on the error.
 The row index is the position the failing row would have had in its table.
+
+## Deprecated, still working
+
+These keep working, unchanged, until 1.0.
+
+| Deprecated | Replacement |
+|---|---|
+| `parse_xml(reader, &config)` | `Parser::new(&config)?.parse(reader)` |
+| `parse_xml_slice(xml, &config)` | `Parser::new(&config)?.parse_slice(xml)` |
+| `parser.parse_streaming(reader, options, sink)` | `for item in parser.parse_batches(reader, options)` |
+
+The free functions build a `Parser` on every call, so each one pays the
+config validation and path compilation again. Build a `Parser` once and reuse
+it for every document that shares the config.
 
 ## New, no action needed
 

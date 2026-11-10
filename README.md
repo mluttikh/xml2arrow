@@ -140,14 +140,15 @@ the `measurements` table back to the `stations` table on `<station>`.
 ```rust
 use std::fs::File;
 use std::io::BufReader;
-use xml2arrow::{Config, parse_xml};
+use xml2arrow::{Config, Parser};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_yaml_file("config.yaml")?;
+    let parser = Parser::new(&config)?;
 
     let file = File::open("data.xml")?;
     let reader = BufReader::new(file);
-    let record_batches = parse_xml(reader, &config)?;
+    let record_batches = parser.parse(reader)?;
 
     for (name, batch) in &record_batches {
         println!("Table '{}': {} rows, {} columns", name, batch.num_rows(), batch.num_columns());
@@ -162,7 +163,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`parse_xml` returns an `IndexMap<String, RecordBatch>` whose keys are the table
+`parse` returns an `IndexMap<String, RecordBatch>` whose keys are the table
 names defined in your config. The `RecordBatch` type is the standard Arrow
 in-memory columnar representation and can be passed directly to libraries such as
 [DataFusion](https://github.com/apache/datafusion),
@@ -175,28 +176,26 @@ over the network, or a test), use `Config::from_yaml_str` instead of
 
 #### Zero-copy parsing for in-memory data
 
-When the XML data is already in memory as a byte slice, use `parse_xml_slice` for
+When the XML data is already in memory as a byte slice, use `parse_slice` for
 better performance. It avoids per-event buffer copies by having quick-xml return
 events that borrow directly from the input:
 
 ```rust
-use xml2arrow::{Config, parse_xml_slice};
+use xml2arrow::{Config, Parser};
 
 let xml = std::fs::read("data.xml")?;
 let config = Config::from_yaml_file("config.yaml")?;
-let record_batches = parse_xml_slice(&xml, &config)?;
+let record_batches = Parser::new(&config)?.parse_slice(&xml)?;
 ```
 
-Use `parse_xml` for streaming sources (files, network) and `parse_xml_slice` when
-the full XML is already loaded into memory.
+Use `parse` for streaming sources (files, network) and `parse_slice` when the
+full XML is already loaded into memory.
 
 #### Reusing a parser across many documents
 
-`parse_xml` and `parse_xml_slice` are convenience wrappers that validate the
-config and compile its path trie on every call. When you parse many documents
-with the same config, build a `Parser` once and reuse it — the validation and
-trie construction (the fixed per-document setup cost) are then paid a single
-time instead of on every parse:
+`Parser::new` validates the config and compiles its path trie. When you parse
+many documents with the same config, build the `Parser` once and reuse it, so
+that fixed setup cost is paid a single time instead of once per document:
 
 ```rust
 use xml2arrow::{Config, Parser};
@@ -264,7 +263,7 @@ the output you were building.
 
 #### Streaming documents too large for memory
 
-`parse_xml` and `parser.parse` read the input incrementally, but they
+`parser.parse` and `parser.parse_slice` read the input in one pass, but they
 accumulate *all* rows into one `RecordBatch` per table — peak memory grows
 with the dataset. For documents that don't fit in memory (multi-GB exports,
 archives, log or catalogue extracts), use `parser.parse_batches`: it yields each
@@ -309,9 +308,7 @@ Guarantees and behavior:
   the file) — no crate support needed.
 
 Variants: `parser.parse_batches_slice(&xml, options)` is the zero-copy
-version for in-memory or memory-mapped input, and
-`parser.parse_streaming(reader, options, |table, batch| { ... })` is a
-callback-style wrapper.
+version for in-memory or memory-mapped input.
 
 When the config defines exactly one table with fields — the common shape for
 huge documents — `parser.parse_single_table(reader, options)` exposes the
@@ -555,8 +552,8 @@ parent station by row position, enabling a join on `stations.<station> = measure
 is a trie-based path registry that replaces string comparisons in the hot loop with
 direct integer indexing.
 
-Two parsing functions are available: `parse_xml` (buffered, for streaming readers)
-and `parse_xml_slice` (zero-copy, for in-memory byte slices). The zero-copy path
+Two parsing methods are available: `Parser::parse` (buffered, for streaming readers)
+and `Parser::parse_slice` (zero-copy, for in-memory byte slices). The zero-copy path
 avoids per-event buffer copies, yielding ~7-9% higher throughput when the XML is
 already in memory.
 
@@ -566,7 +563,7 @@ to amortize config validation and path-trie construction across calls.
 
 Benchmarks were measured on an Apple M1 Pro using [Criterion.rs](https://github.com/bheisler/criterion.rs):
 
-| Benchmark                             | File size | `parse_xml`  | `parse_xml_slice` |
+| Benchmark                             | File size | `parse`      | `parse_slice`     |
 | :------------------------------------ | --------: | :----------- | :---------------- |
 | 1K measurements, 2 sensors (small)    |   413 KB  | ~381 MiB/s   | ~415 MiB/s        |
 | 10K measurements, 5 sensors (medium)  |    10 MB  | ~394 MiB/s   | ~423 MiB/s        |

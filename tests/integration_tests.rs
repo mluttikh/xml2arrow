@@ -19,7 +19,7 @@ use arrow::array::{
 use arrow::compute::concat_batches;
 use indexmap::IndexMap;
 use tempfile::NamedTempFile;
-use xml2arrow::{BatchOptions, Config, Parser, TableBatch, parse_xml};
+use xml2arrow::{BatchOptions, Config, Parser, TableBatch};
 
 use common::{parse_xml_file, write_xml_tempfile};
 
@@ -117,6 +117,42 @@ fn test_large_file_10k_rows_parsed_correctly() {
 }
 
 // ---------------------------------------------------------------------------
+// Deprecated entry points
+// ---------------------------------------------------------------------------
+
+/// `parse_xml`, `parse_xml_slice` and `parse_streaming` are deprecated, not
+/// removed: until 1.0 they must keep producing what `Parser` produces.
+#[test]
+#[allow(deprecated)]
+fn deprecated_entry_points_still_produce_identical_output() {
+    let yaml = r#"
+tables:
+  - name: items
+    xml_path: /data
+    levels: []
+    fields:
+      - {name: value, xml_path: /data/item/value, data_type: Int32}
+"#;
+    let xml = b"<data><item><value>1</value></item><item><value>2</value></item></data>";
+    let config: Config = yaml_serde::from_str(yaml).unwrap();
+    let parser = Parser::new(&config).unwrap();
+
+    let expected = parser.parse_slice(xml).unwrap();
+    assert_eq!(xml2arrow::parse_xml(&xml[..], &config).unwrap(), expected);
+    assert_eq!(xml2arrow::parse_xml_slice(xml, &config).unwrap(), expected);
+
+    let mut seen = 0;
+    parser
+        .parse_streaming(&xml[..], BatchOptions::default(), |table, batch| {
+            assert_eq!(table, "items");
+            seen += batch.num_rows();
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(seen, 2);
+}
+
+// ---------------------------------------------------------------------------
 // Config loading from YAML file
 // ---------------------------------------------------------------------------
 
@@ -150,7 +186,9 @@ tables:
 
     let file = File::open(xml_file.path()).unwrap();
     let reader = BufReader::new(file);
-    let batches = parse_xml(reader, &config).unwrap();
+    let batches = Parser::new(&config)
+        .and_then(|parser| parser.parse(reader))
+        .unwrap();
     let batch = batches.get("items").unwrap();
 
     assert_eq!(batch.num_rows(), 1);
@@ -199,14 +237,18 @@ fn test_config_reused_across_multiple_files() {
 
     // Parse first file
     let file_a = File::open(xml_a.path()).unwrap();
-    let batches_a = parse_xml(BufReader::new(file_a), &config).unwrap();
+    let batches_a = Parser::new(&config)
+        .and_then(|parser| parser.parse(BufReader::new(file_a)))
+        .unwrap();
     let batch_a = batches_a.get("items").unwrap();
     assert_eq!(batch_a.num_rows(), 1);
     assert_array_values!(batch_a, "value", &[1], Int32Array);
 
     // Parse second file with the same config
     let file_b = File::open(xml_b.path()).unwrap();
-    let batches_b = parse_xml(BufReader::new(file_b), &config).unwrap();
+    let batches_b = Parser::new(&config)
+        .and_then(|parser| parser.parse(BufReader::new(file_b)))
+        .unwrap();
     let batch_b = batches_b.get("items").unwrap();
     assert_eq!(batch_b.num_rows(), 2);
     assert_array_values!(batch_b, "value", &[10, 20], Int32Array);
@@ -307,7 +349,9 @@ fn test_utf8_bom_file_parsed_correctly() {
 
     let file = File::open(xml_file.path()).unwrap();
     let reader = BufReader::new(file);
-    let batches = parse_xml(reader, &config).unwrap();
+    let batches = Parser::new(&config)
+        .and_then(|parser| parser.parse(reader))
+        .unwrap();
     let batch = batches.get("items").unwrap();
 
     assert_eq!(batch.num_rows(), 1);
@@ -339,7 +383,7 @@ fn test_empty_file_returns_empty_batch() {
 
     let file = File::open(xml_file.path()).unwrap();
     let reader = BufReader::new(file);
-    let result = parse_xml(reader, &config);
+    let result = Parser::new(&config).and_then(|parser| parser.parse(reader));
 
     assert!(result.is_ok());
     let batches = result.unwrap();
@@ -367,7 +411,7 @@ fn test_whitespace_only_file_returns_empty_batch() {
 
     let file = File::open(xml_file.path()).unwrap();
     let reader = BufReader::new(file);
-    let result = parse_xml(reader, &config);
+    let result = Parser::new(&config).and_then(|parser| parser.parse(reader));
 
     assert!(result.is_ok());
 }
