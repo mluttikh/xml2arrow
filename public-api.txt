@@ -1,6 +1,6 @@
 pub mod xml2arrow
 pub mod xml2arrow::config
-pub enum xml2arrow::config::DType
+#[non_exhaustive] pub enum xml2arrow::config::DType
 pub xml2arrow::config::DType::Boolean
 pub xml2arrow::config::DType::Float32
 pub xml2arrow::config::DType::Float64
@@ -35,10 +35,11 @@ impl core::marker::Unpin for xml2arrow::config::DType
 impl core::marker::UnsafeUnpin for xml2arrow::config::DType
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::DType
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::DType
-pub struct xml2arrow::config::Config
+#[non_exhaustive] pub struct xml2arrow::config::Config
 pub xml2arrow::config::Config::parser_options: xml2arrow::config::ParserOptions
 pub xml2arrow::config::Config::tables: alloc::vec::Vec<xml2arrow::config::TableConfig>
 impl xml2arrow::config::Config
+pub fn xml2arrow::config::Config::builder() -> xml2arrow::config::ConfigBuilder
 pub fn xml2arrow::config::Config::from_yaml_file(impl core::convert::AsRef<std::path::Path>) -> xml2arrow::errors::Result<Self>
 pub fn xml2arrow::config::Config::from_yaml_str(&str) -> xml2arrow::errors::Result<Self>
 pub fn xml2arrow::config::Config::requires_attribute_parsing(&self) -> bool
@@ -62,7 +63,24 @@ impl core::marker::Unpin for xml2arrow::config::Config
 impl core::marker::UnsafeUnpin for xml2arrow::config::Config
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::Config
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::Config
-pub struct xml2arrow::config::FieldConfig
+pub struct xml2arrow::config::ConfigBuilder
+impl xml2arrow::config::ConfigBuilder
+pub fn xml2arrow::config::ConfigBuilder::build(self) -> xml2arrow::errors::Result<xml2arrow::config::Config>
+pub fn xml2arrow::config::ConfigBuilder::parser_options(self, xml2arrow::config::ParserOptions) -> Self
+pub fn xml2arrow::config::ConfigBuilder::table(self, xml2arrow::config::TableConfig) -> Self
+pub fn xml2arrow::config::ConfigBuilder::tables(self, impl core::iter::traits::collect::IntoIterator<Item = xml2arrow::config::TableConfig>) -> Self
+impl core::default::Default for xml2arrow::config::ConfigBuilder
+pub fn xml2arrow::config::ConfigBuilder::default() -> xml2arrow::config::ConfigBuilder
+impl core::fmt::Debug for xml2arrow::config::ConfigBuilder
+pub fn xml2arrow::config::ConfigBuilder::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for xml2arrow::config::ConfigBuilder
+impl core::marker::Send for xml2arrow::config::ConfigBuilder
+impl core::marker::Sync for xml2arrow::config::ConfigBuilder
+impl core::marker::Unpin for xml2arrow::config::ConfigBuilder
+impl core::marker::UnsafeUnpin for xml2arrow::config::ConfigBuilder
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::ConfigBuilder
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::ConfigBuilder
+#[non_exhaustive] pub struct xml2arrow::config::FieldConfig
 pub xml2arrow::config::FieldConfig::data_type: xml2arrow::config::DType
 pub xml2arrow::config::FieldConfig::name: alloc::string::String
 pub xml2arrow::config::FieldConfig::nullable: bool
@@ -105,7 +123,7 @@ impl core::marker::Unpin for xml2arrow::config::FieldConfigBuilder
 impl core::marker::UnsafeUnpin for xml2arrow::config::FieldConfigBuilder
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::FieldConfigBuilder
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::FieldConfigBuilder
-pub struct xml2arrow::config::ParserOptions
+#[non_exhaustive] pub struct xml2arrow::config::ParserOptions
 pub xml2arrow::config::ParserOptions::stop_at_paths: alloc::vec::Vec<alloc::string::String>
 pub xml2arrow::config::ParserOptions::strip_namespaces: bool
 pub xml2arrow::config::ParserOptions::trim_text: bool
@@ -131,12 +149,13 @@ impl core::marker::Unpin for xml2arrow::config::ParserOptions
 impl core::marker::UnsafeUnpin for xml2arrow::config::ParserOptions
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::ParserOptions
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::ParserOptions
-pub struct xml2arrow::config::TableConfig
+#[non_exhaustive] pub struct xml2arrow::config::TableConfig
 pub xml2arrow::config::TableConfig::fields: alloc::vec::Vec<xml2arrow::config::FieldConfig>
 pub xml2arrow::config::TableConfig::levels: alloc::vec::Vec<alloc::string::String>
 pub xml2arrow::config::TableConfig::name: alloc::string::String
 pub xml2arrow::config::TableConfig::xml_path: alloc::string::String
 impl xml2arrow::config::TableConfig
+pub fn xml2arrow::config::TableConfig::builder(&str, &str) -> xml2arrow::config::TableConfigBuilder
 pub fn xml2arrow::config::TableConfig::new(&str, &str, alloc::vec::Vec<alloc::string::String>, alloc::vec::Vec<xml2arrow::config::FieldConfig>) -> Self
 impl core::clone::Clone for xml2arrow::config::TableConfig
 pub fn xml2arrow::config::TableConfig::clone(&self) -> xml2arrow::config::TableConfig
@@ -156,6 +175,20 @@ impl core::marker::Unpin for xml2arrow::config::TableConfig
 impl core::marker::UnsafeUnpin for xml2arrow::config::TableConfig
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::TableConfig
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::TableConfig
+pub struct xml2arrow::config::TableConfigBuilder
+impl xml2arrow::config::TableConfigBuilder
+pub fn xml2arrow::config::TableConfigBuilder::build(self) -> xml2arrow::config::TableConfig
+pub fn xml2arrow::config::TableConfigBuilder::field(self, xml2arrow::config::FieldConfig) -> Self
+pub fn xml2arrow::config::TableConfigBuilder::fields(self, impl core::iter::traits::collect::IntoIterator<Item = xml2arrow::config::FieldConfig>) -> Self
+impl core::fmt::Debug for xml2arrow::config::TableConfigBuilder
+pub fn xml2arrow::config::TableConfigBuilder::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for xml2arrow::config::TableConfigBuilder
+impl core::marker::Send for xml2arrow::config::TableConfigBuilder
+impl core::marker::Sync for xml2arrow::config::TableConfigBuilder
+impl core::marker::Unpin for xml2arrow::config::TableConfigBuilder
+impl core::marker::UnsafeUnpin for xml2arrow::config::TableConfigBuilder
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::TableConfigBuilder
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::TableConfigBuilder
 pub mod xml2arrow::errors
 #[non_exhaustive] pub enum xml2arrow::errors::ConfigIssue
 pub xml2arrow::errors::ConfigIssue::DuplicateFieldName
@@ -273,7 +306,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::errors::ParseKind
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::errors::ParseKind
 pub type xml2arrow::errors::Result<T> = core::result::Result<T, xml2arrow::errors::Error>
 pub macro xml2arrow::config_from_yaml!
-pub enum xml2arrow::DType
+#[non_exhaustive] pub enum xml2arrow::DType
 pub xml2arrow::DType::Boolean
 pub xml2arrow::DType::Float32
 pub xml2arrow::DType::Float64
@@ -392,10 +425,11 @@ impl<'p, S> core::marker::Unpin for xml2arrow::BatchStream<'p, S> where S: core:
 impl<'p, S> core::marker::UnsafeUnpin for xml2arrow::BatchStream<'p, S> where S: core::marker::UnsafeUnpin
 impl<'p, S> core::panic::unwind_safe::RefUnwindSafe for xml2arrow::BatchStream<'p, S> where S: core::panic::unwind_safe::RefUnwindSafe
 impl<'p, S> core::panic::unwind_safe::UnwindSafe for xml2arrow::BatchStream<'p, S> where S: core::panic::unwind_safe::UnwindSafe
-pub struct xml2arrow::Config
+#[non_exhaustive] pub struct xml2arrow::Config
 pub xml2arrow::Config::parser_options: xml2arrow::config::ParserOptions
 pub xml2arrow::Config::tables: alloc::vec::Vec<xml2arrow::config::TableConfig>
 impl xml2arrow::config::Config
+pub fn xml2arrow::config::Config::builder() -> xml2arrow::config::ConfigBuilder
 pub fn xml2arrow::config::Config::from_yaml_file(impl core::convert::AsRef<std::path::Path>) -> xml2arrow::errors::Result<Self>
 pub fn xml2arrow::config::Config::from_yaml_str(&str) -> xml2arrow::errors::Result<Self>
 pub fn xml2arrow::config::Config::requires_attribute_parsing(&self) -> bool
@@ -419,7 +453,24 @@ impl core::marker::Unpin for xml2arrow::config::Config
 impl core::marker::UnsafeUnpin for xml2arrow::config::Config
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::Config
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::Config
-pub struct xml2arrow::FieldConfig
+pub struct xml2arrow::ConfigBuilder
+impl xml2arrow::config::ConfigBuilder
+pub fn xml2arrow::config::ConfigBuilder::build(self) -> xml2arrow::errors::Result<xml2arrow::config::Config>
+pub fn xml2arrow::config::ConfigBuilder::parser_options(self, xml2arrow::config::ParserOptions) -> Self
+pub fn xml2arrow::config::ConfigBuilder::table(self, xml2arrow::config::TableConfig) -> Self
+pub fn xml2arrow::config::ConfigBuilder::tables(self, impl core::iter::traits::collect::IntoIterator<Item = xml2arrow::config::TableConfig>) -> Self
+impl core::default::Default for xml2arrow::config::ConfigBuilder
+pub fn xml2arrow::config::ConfigBuilder::default() -> xml2arrow::config::ConfigBuilder
+impl core::fmt::Debug for xml2arrow::config::ConfigBuilder
+pub fn xml2arrow::config::ConfigBuilder::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for xml2arrow::config::ConfigBuilder
+impl core::marker::Send for xml2arrow::config::ConfigBuilder
+impl core::marker::Sync for xml2arrow::config::ConfigBuilder
+impl core::marker::Unpin for xml2arrow::config::ConfigBuilder
+impl core::marker::UnsafeUnpin for xml2arrow::config::ConfigBuilder
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::ConfigBuilder
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::ConfigBuilder
+#[non_exhaustive] pub struct xml2arrow::FieldConfig
 pub xml2arrow::FieldConfig::data_type: xml2arrow::config::DType
 pub xml2arrow::FieldConfig::name: alloc::string::String
 pub xml2arrow::FieldConfig::nullable: bool
@@ -485,7 +536,7 @@ impl core::marker::Unpin for xml2arrow::Parser
 impl core::marker::UnsafeUnpin for xml2arrow::Parser
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::Parser
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::Parser
-pub struct xml2arrow::ParserOptions
+#[non_exhaustive] pub struct xml2arrow::ParserOptions
 pub xml2arrow::ParserOptions::stop_at_paths: alloc::vec::Vec<alloc::string::String>
 pub xml2arrow::ParserOptions::strip_namespaces: bool
 pub xml2arrow::ParserOptions::trim_text: bool
@@ -559,12 +610,13 @@ impl core::marker::Unpin for xml2arrow::TableBatch
 impl core::marker::UnsafeUnpin for xml2arrow::TableBatch
 impl !core::panic::unwind_safe::RefUnwindSafe for xml2arrow::TableBatch
 impl !core::panic::unwind_safe::UnwindSafe for xml2arrow::TableBatch
-pub struct xml2arrow::TableConfig
+#[non_exhaustive] pub struct xml2arrow::TableConfig
 pub xml2arrow::TableConfig::fields: alloc::vec::Vec<xml2arrow::config::FieldConfig>
 pub xml2arrow::TableConfig::levels: alloc::vec::Vec<alloc::string::String>
 pub xml2arrow::TableConfig::name: alloc::string::String
 pub xml2arrow::TableConfig::xml_path: alloc::string::String
 impl xml2arrow::config::TableConfig
+pub fn xml2arrow::config::TableConfig::builder(&str, &str) -> xml2arrow::config::TableConfigBuilder
 pub fn xml2arrow::config::TableConfig::new(&str, &str, alloc::vec::Vec<alloc::string::String>, alloc::vec::Vec<xml2arrow::config::FieldConfig>) -> Self
 impl core::clone::Clone for xml2arrow::config::TableConfig
 pub fn xml2arrow::config::TableConfig::clone(&self) -> xml2arrow::config::TableConfig
@@ -584,6 +636,20 @@ impl core::marker::Unpin for xml2arrow::config::TableConfig
 impl core::marker::UnsafeUnpin for xml2arrow::config::TableConfig
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::TableConfig
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::TableConfig
+pub struct xml2arrow::TableConfigBuilder
+impl xml2arrow::config::TableConfigBuilder
+pub fn xml2arrow::config::TableConfigBuilder::build(self) -> xml2arrow::config::TableConfig
+pub fn xml2arrow::config::TableConfigBuilder::field(self, xml2arrow::config::FieldConfig) -> Self
+pub fn xml2arrow::config::TableConfigBuilder::fields(self, impl core::iter::traits::collect::IntoIterator<Item = xml2arrow::config::FieldConfig>) -> Self
+impl core::fmt::Debug for xml2arrow::config::TableConfigBuilder
+pub fn xml2arrow::config::TableConfigBuilder::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for xml2arrow::config::TableConfigBuilder
+impl core::marker::Send for xml2arrow::config::TableConfigBuilder
+impl core::marker::Sync for xml2arrow::config::TableConfigBuilder
+impl core::marker::Unpin for xml2arrow::config::TableConfigBuilder
+impl core::marker::UnsafeUnpin for xml2arrow::config::TableConfigBuilder
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::TableConfigBuilder
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::TableConfigBuilder
 pub trait xml2arrow::EventSource: xml2arrow::xml_parser::sealed::Sealed
 impl xml2arrow::EventSource for xml2arrow::SliceSource<'_>
 impl<R: alloc::io::buf_read::BufRead> xml2arrow::EventSource for xml2arrow::ReaderSource<R>

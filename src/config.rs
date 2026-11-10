@@ -10,7 +10,19 @@ use arrow::datatypes::DataType;
 use serde::{Deserialize, Serialize};
 
 /// Configuration for the XML parser.
+///
+/// Marked `#[non_exhaustive]`: start from [`ParserOptions::default`] and set
+/// the fields you care about, so that an option added in a later release does
+/// not break your build.
+///
+/// ```rust
+/// use xml2arrow::ParserOptions;
+///
+/// let mut options = ParserOptions::default();
+/// options.trim_text = true;
+/// ```
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[non_exhaustive]
 pub struct ParserOptions {
     /// Whether to trim whitespace from text nodes. Defaults to false.
     #[serde(default)]
@@ -123,7 +135,25 @@ fn paths_equal(a: &str, b: &str) -> bool {
 ///
 /// This struct holds a collection of `TableConfig` structs, each defining how a specific
 /// part of the XML document should be parsed into an Arrow table.
+///
+/// Marked `#[non_exhaustive]`: build one with [`Config::builder`], or load it
+/// from YAML, so that a configuration key added in a later release does not
+/// break your build. The fields stay public for reading and mutation.
+///
+/// ```rust
+/// use xml2arrow::config::{Config, DType, FieldConfigBuilder, TableConfig};
+///
+/// let config = Config::builder()
+///     .table(
+///         TableConfig::builder("items", "/data")
+///             .field(FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build()?)
+///             .build(),
+///     )
+///     .build()?;
+/// # Ok::<(), xml2arrow::Error>(())
+/// ```
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[non_exhaustive]
 pub struct Config {
     /// A vector of `TableConfig` structs, each defining a table to be extracted from the XML.
     pub tables: Vec<TableConfig>,
@@ -133,6 +163,15 @@ pub struct Config {
 }
 
 impl Config {
+    /// Starts building a configuration in code.
+    ///
+    /// [`ConfigBuilder::build`] runs [`Config::validate`], so a config
+    /// obtained this way is as trustworthy as one loaded from YAML.
+    #[must_use]
+    pub fn builder() -> ConfigBuilder {
+        ConfigBuilder::default()
+    }
+
     /// Validates the configuration for structural correctness and field constraints.
     ///
     /// Checks performed:
@@ -363,7 +402,12 @@ impl Config {
 /// the path to the element whose configured direct children delimit rows, the
 /// index columns linking nested tables (`levels`), and the configuration of
 /// the fields (columns) within the table.
+///
+/// Marked `#[non_exhaustive]`: build one with [`TableConfig::builder`] or
+/// [`TableConfig::new`], so that a key added in a later release does not break
+/// your build. The fields stay public for reading and mutation.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[non_exhaustive]
 pub struct TableConfig {
     /// The name of the table.
     pub name: String,
@@ -387,13 +431,115 @@ impl TableConfig {
             fields,
         }
     }
+
+    /// Starts building a table configuration, adding fields one at a time.
+    ///
+    /// The builder has no method for `levels`: a table that needs them is
+    /// built with [`TableConfig::new`], or sets the public field afterwards.
+    #[must_use]
+    pub fn builder(name: &str, xml_path: &str) -> TableConfigBuilder {
+        TableConfigBuilder {
+            name: name.to_string(),
+            xml_path: xml_path.to_string(),
+            fields: Vec::new(),
+        }
+    }
+}
+
+/// A builder for [`Config`], created by [`Config::builder`].
+#[derive(Debug, Default)]
+pub struct ConfigBuilder {
+    tables: Vec<TableConfig>,
+    parser_options: ParserOptions,
+}
+
+impl ConfigBuilder {
+    /// Appends one table.
+    #[must_use]
+    pub fn table(mut self, table: TableConfig) -> Self {
+        self.tables.push(table);
+        self
+    }
+
+    /// Appends several tables.
+    #[must_use]
+    pub fn tables(mut self, tables: impl IntoIterator<Item = TableConfig>) -> Self {
+        self.tables.extend(tables);
+        self
+    }
+
+    /// Replaces the parser options, which otherwise are
+    /// [`ParserOptions::default`].
+    #[must_use]
+    pub fn parser_options(mut self, parser_options: ParserOptions) -> Self {
+        self.parser_options = parser_options;
+        self
+    }
+
+    /// Validates and returns the configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfig`] or [`Error::UnsupportedConversion`]
+    /// for any violation listed on [`Config::validate`].
+    pub fn build(self) -> Result<Config> {
+        let config = Config {
+            tables: self.tables,
+            parser_options: self.parser_options,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+}
+
+/// A builder for [`TableConfig`], created by [`TableConfig::builder`].
+#[derive(Debug)]
+pub struct TableConfigBuilder {
+    name: String,
+    xml_path: String,
+    fields: Vec<FieldConfig>,
+}
+
+impl TableConfigBuilder {
+    /// Appends one field (column).
+    #[must_use]
+    pub fn field(mut self, field: FieldConfig) -> Self {
+        self.fields.push(field);
+        self
+    }
+
+    /// Appends several fields (columns).
+    #[must_use]
+    pub fn fields(mut self, fields: impl IntoIterator<Item = FieldConfig>) -> Self {
+        self.fields.extend(fields);
+        self
+    }
+
+    /// Returns the assembled table configuration.
+    ///
+    /// Infallible by design: the checks that could fail here, such as unique
+    /// names and paths that agree across tables, need the whole configuration
+    /// and run in [`ConfigBuilder::build`] and [`Config::validate`].
+    #[must_use]
+    pub fn build(self) -> TableConfig {
+        TableConfig {
+            name: self.name,
+            xml_path: self.xml_path,
+            levels: Vec::new(),
+            fields: self.fields,
+        }
+    }
 }
 
 /// Configuration for a single field within an XML table.
 ///
 /// This struct defines how a specific XML element or attribute should be extracted and
 /// converted into an Arrow column.
+///
+/// Marked `#[non_exhaustive]`: build one with [`FieldConfigBuilder`], so that
+/// a per-field key added in a later release does not break your build.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[non_exhaustive]
 pub struct FieldConfig {
     /// The name of the field (and the name of the resulting Arrow column).
     pub name: String,
@@ -560,7 +706,12 @@ impl FieldConfigBuilder {
 }
 
 /// Represents the data type of a field.
+///
+/// Marked `#[non_exhaustive]`: a `match` outside this crate needs a wildcard
+/// arm, so that a data type added in a later release does not break your
+/// build.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[non_exhaustive]
 pub enum DType {
     Boolean,
     Float32,
@@ -712,6 +863,84 @@ tables:
         let from_file = Config::from_yaml_file(temp_file.path()).unwrap();
         let from_str = Config::from_yaml_str(yaml).unwrap();
         assert_eq!(from_file, from_str);
+    }
+
+    /// The builders are the only way to construct a config in code now that
+    /// the structs are `#[non_exhaustive]`, so they must produce exactly what
+    /// the same YAML does.
+    #[test]
+    fn builders_match_the_same_config_loaded_from_yaml() {
+        let built = Config::builder()
+            .table(
+                TableConfig::builder("items", "/data")
+                    .field(
+                        FieldConfigBuilder::new("id", "/data/item/@id", DType::UInt32)
+                            .build()
+                            .unwrap(),
+                    )
+                    .fields([
+                        FieldConfigBuilder::new("value", "/data/item/value", DType::Float64)
+                            .nullable(true)
+                            .scale(0.5)
+                            .build()
+                            .unwrap(),
+                    ])
+                    .build(),
+            )
+            .tables([TableConfig::new(
+                "parts",
+                "/data/item/parts",
+                vec!["item".to_string()],
+                vec![],
+            )])
+            .parser_options(ParserOptions {
+                trim_text: true,
+                ..Default::default()
+            })
+            .build()
+            .unwrap();
+
+        let loaded = Config::from_yaml_str(
+            r#"
+            tables:
+              - name: items
+                xml_path: /data
+                levels: []
+                fields:
+                  - {name: id, xml_path: /data/item/@id, data_type: UInt32}
+                  - {name: value, xml_path: /data/item/value, data_type: Float64, nullable: true, scale: 0.5}
+              - name: parts
+                xml_path: /data/item/parts
+                levels: [item]
+                fields: []
+            parser_options:
+              trim_text: true
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(built, loaded);
+    }
+
+    /// `ConfigBuilder::build` validates, so an invalid config cannot be
+    /// obtained from it any more than from a YAML file.
+    #[test]
+    fn config_builder_rejects_an_invalid_config() {
+        let table = || TableConfig::builder("items", "/data").build();
+        let err = Config::builder()
+            .table(table())
+            .table(table())
+            .build()
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::InvalidConfig {
+                    reason: ConfigIssue::DuplicateTableName { .. }
+                }
+            ),
+            "{err}"
+        );
     }
 
     #[test]
