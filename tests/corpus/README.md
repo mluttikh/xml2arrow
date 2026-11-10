@@ -20,7 +20,9 @@ A configuration that does not opt into a new capability must keep producing
 byte-identical output for the whole 0.x line. That promise is only worth
 something if it is checked mechanically, on every commit, rather than by review —
 this corpus is the check. Every case here is a configuration in today's format,
-recorded against the behavior of 0.19.
+recorded against the behavior of 0.19. The cases for options added since
+(`error_unmatched_fields`, `error_unmatched_fields_with_stop_path`,
+`error_value_too_large`) pin those options the same way.
 
 Every case additionally runs through all three entry points (buffered,
 zero-copy, and streaming with a batch size small enough to force flushes) and
@@ -43,7 +45,7 @@ values. A release that changes one of them on purpose re-records it and says so.
 | `empty_document_yields_empty_tables`, `stop_at_paths` | a zero-row table is returned empty when collecting, but never appears in a stream | — (asymmetry pinned, not yet scheduled) |
 | `self_closing_table_element` | a field's value is **dropped** when a different table's scope is on top of the stack when it arrives (`outer.n` is null although `<n>1</n>` is present) | declared field ownership |
 | `truncated_input` | a document cut off mid-element parses to `Ok` with the rows that closed before the cut — here one row instead of two | rejecting truncated input, first as an option, later as the default |
-| `error_duplicate_value`, `error_invalid_number`, `error_missing_required_field` | value errors carry no document coordinates | error locations (row index and byte offset) |
+| `error_duplicate_value`, `error_invalid_number`, `error_missing_required_field` | value errors end with the row index and byte offset of the failure | already changed in 0.20 (the message had no coordinates in 0.19; the text before the suffix is unchanged) |
 
 ## Adding a case
 

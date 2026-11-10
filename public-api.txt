@@ -124,6 +124,8 @@ impl core::marker::UnsafeUnpin for xml2arrow::config::FieldConfigBuilder
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::config::FieldConfigBuilder
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::FieldConfigBuilder
 #[non_exhaustive] pub struct xml2arrow::config::ParserOptions
+pub xml2arrow::config::ParserOptions::error_on_unmatched_fields: bool
+pub xml2arrow::config::ParserOptions::max_value_bytes: core::option::Option<usize>
 pub xml2arrow::config::ParserOptions::stop_at_paths: alloc::vec::Vec<alloc::string::String>
 pub xml2arrow::config::ParserOptions::strip_namespaces: bool
 pub xml2arrow::config::ParserOptions::trim_text: bool
@@ -245,18 +247,28 @@ pub xml2arrow::errors::Error::InvalidConfig::reason: xml2arrow::errors::ConfigIs
 pub xml2arrow::errors::Error::Io(core::io::error::Error)
 pub xml2arrow::errors::Error::MissingRequiredField
 pub xml2arrow::errors::Error::MissingRequiredField::field: alloc::sync::Arc<str>
+pub xml2arrow::errors::Error::MissingRequiredField::location: alloc::boxed::Box<xml2arrow::errors::ErrorLocation>
 pub xml2arrow::errors::Error::MissingRequiredField::path: alloc::sync::Arc<str>
 pub xml2arrow::errors::Error::ParseError
 pub xml2arrow::errors::Error::ParseError::field: alloc::sync::Arc<str>
 pub xml2arrow::errors::Error::ParseError::kind: xml2arrow::errors::ParseKind
+pub xml2arrow::errors::Error::ParseError::location: alloc::boxed::Box<xml2arrow::errors::ErrorLocation>
 pub xml2arrow::errors::Error::ParseError::path: alloc::sync::Arc<str>
 pub xml2arrow::errors::Error::ParseError::value: alloc::string::String
 pub xml2arrow::errors::Error::RowIndexOverflow
 pub xml2arrow::errors::Error::RowIndexOverflow::table: alloc::sync::Arc<str>
+pub xml2arrow::errors::Error::UnmatchedFields
+pub xml2arrow::errors::Error::UnmatchedFields::fields: alloc::vec::Vec<xml2arrow::errors::UnmatchedField>
+pub xml2arrow::errors::Error::UnmatchedFields::stop_paths_configured: bool
 pub xml2arrow::errors::Error::UnsupportedConversion
 pub xml2arrow::errors::Error::UnsupportedConversion::conversion: xml2arrow::errors::ConversionKind
 pub xml2arrow::errors::Error::UnsupportedConversion::data_type: alloc::string::String
 pub xml2arrow::errors::Error::Utf8Error(core::str::error::Utf8Error)
+pub xml2arrow::errors::Error::ValueTooLarge
+pub xml2arrow::errors::Error::ValueTooLarge::field: alloc::sync::Arc<str>
+pub xml2arrow::errors::Error::ValueTooLarge::limit: usize
+pub xml2arrow::errors::Error::ValueTooLarge::location: alloc::boxed::Box<xml2arrow::errors::ErrorLocation>
+pub xml2arrow::errors::Error::ValueTooLarge::path: alloc::sync::Arc<str>
 pub xml2arrow::errors::Error::XmlParseAttr(quick_xml::events::attributes::AttrError)
 pub xml2arrow::errors::Error::XmlParseEncoding(quick_xml::encoding::EncodingError)
 pub xml2arrow::errors::Error::XmlParsing(quick_xml::errors::Error)
@@ -304,6 +316,45 @@ impl core::marker::Unpin for xml2arrow::errors::ParseKind
 impl core::marker::UnsafeUnpin for xml2arrow::errors::ParseKind
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::errors::ParseKind
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::errors::ParseKind
+pub struct xml2arrow::errors::ErrorLocation
+pub xml2arrow::errors::ErrorLocation::position: core::option::Option<u64>
+pub xml2arrow::errors::ErrorLocation::row: core::option::Option<usize>
+impl core::clone::Clone for xml2arrow::errors::ErrorLocation
+pub fn xml2arrow::errors::ErrorLocation::clone(&self) -> xml2arrow::errors::ErrorLocation
+impl core::cmp::Eq for xml2arrow::errors::ErrorLocation
+impl core::cmp::PartialEq for xml2arrow::errors::ErrorLocation
+pub fn xml2arrow::errors::ErrorLocation::eq(&self, &xml2arrow::errors::ErrorLocation) -> bool
+impl core::default::Default for xml2arrow::errors::ErrorLocation
+pub fn xml2arrow::errors::ErrorLocation::default() -> xml2arrow::errors::ErrorLocation
+impl core::fmt::Debug for xml2arrow::errors::ErrorLocation
+pub fn xml2arrow::errors::ErrorLocation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for xml2arrow::errors::ErrorLocation
+impl core::marker::Freeze for xml2arrow::errors::ErrorLocation
+impl core::marker::Send for xml2arrow::errors::ErrorLocation
+impl core::marker::Sync for xml2arrow::errors::ErrorLocation
+impl core::marker::Unpin for xml2arrow::errors::ErrorLocation
+impl core::marker::UnsafeUnpin for xml2arrow::errors::ErrorLocation
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::errors::ErrorLocation
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::errors::ErrorLocation
+pub struct xml2arrow::errors::UnmatchedField
+pub xml2arrow::errors::UnmatchedField::field: alloc::string::String
+pub xml2arrow::errors::UnmatchedField::table: alloc::string::String
+pub xml2arrow::errors::UnmatchedField::xml_path: alloc::string::String
+impl core::clone::Clone for xml2arrow::errors::UnmatchedField
+pub fn xml2arrow::errors::UnmatchedField::clone(&self) -> xml2arrow::errors::UnmatchedField
+impl core::cmp::Eq for xml2arrow::errors::UnmatchedField
+impl core::cmp::PartialEq for xml2arrow::errors::UnmatchedField
+pub fn xml2arrow::errors::UnmatchedField::eq(&self, &xml2arrow::errors::UnmatchedField) -> bool
+impl core::fmt::Debug for xml2arrow::errors::UnmatchedField
+pub fn xml2arrow::errors::UnmatchedField::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for xml2arrow::errors::UnmatchedField
+impl core::marker::Freeze for xml2arrow::errors::UnmatchedField
+impl core::marker::Send for xml2arrow::errors::UnmatchedField
+impl core::marker::Sync for xml2arrow::errors::UnmatchedField
+impl core::marker::Unpin for xml2arrow::errors::UnmatchedField
+impl core::marker::UnsafeUnpin for xml2arrow::errors::UnmatchedField
+impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::errors::UnmatchedField
+impl core::panic::unwind_safe::UnwindSafe for xml2arrow::errors::UnmatchedField
 pub type xml2arrow::errors::Result<T> = core::result::Result<T, xml2arrow::errors::Error>
 pub macro xml2arrow::config_from_yaml!
 #[non_exhaustive] pub enum xml2arrow::DType
@@ -348,18 +399,28 @@ pub xml2arrow::Error::InvalidConfig::reason: xml2arrow::errors::ConfigIssue
 pub xml2arrow::Error::Io(core::io::error::Error)
 pub xml2arrow::Error::MissingRequiredField
 pub xml2arrow::Error::MissingRequiredField::field: alloc::sync::Arc<str>
+pub xml2arrow::Error::MissingRequiredField::location: alloc::boxed::Box<xml2arrow::errors::ErrorLocation>
 pub xml2arrow::Error::MissingRequiredField::path: alloc::sync::Arc<str>
 pub xml2arrow::Error::ParseError
 pub xml2arrow::Error::ParseError::field: alloc::sync::Arc<str>
 pub xml2arrow::Error::ParseError::kind: xml2arrow::errors::ParseKind
+pub xml2arrow::Error::ParseError::location: alloc::boxed::Box<xml2arrow::errors::ErrorLocation>
 pub xml2arrow::Error::ParseError::path: alloc::sync::Arc<str>
 pub xml2arrow::Error::ParseError::value: alloc::string::String
 pub xml2arrow::Error::RowIndexOverflow
 pub xml2arrow::Error::RowIndexOverflow::table: alloc::sync::Arc<str>
+pub xml2arrow::Error::UnmatchedFields
+pub xml2arrow::Error::UnmatchedFields::fields: alloc::vec::Vec<xml2arrow::errors::UnmatchedField>
+pub xml2arrow::Error::UnmatchedFields::stop_paths_configured: bool
 pub xml2arrow::Error::UnsupportedConversion
 pub xml2arrow::Error::UnsupportedConversion::conversion: xml2arrow::errors::ConversionKind
 pub xml2arrow::Error::UnsupportedConversion::data_type: alloc::string::String
 pub xml2arrow::Error::Utf8Error(core::str::error::Utf8Error)
+pub xml2arrow::Error::ValueTooLarge
+pub xml2arrow::Error::ValueTooLarge::field: alloc::sync::Arc<str>
+pub xml2arrow::Error::ValueTooLarge::limit: usize
+pub xml2arrow::Error::ValueTooLarge::location: alloc::boxed::Box<xml2arrow::errors::ErrorLocation>
+pub xml2arrow::Error::ValueTooLarge::path: alloc::sync::Arc<str>
 pub xml2arrow::Error::XmlParseAttr(quick_xml::events::attributes::AttrError)
 pub xml2arrow::Error::XmlParseEncoding(quick_xml::encoding::EncodingError)
 pub xml2arrow::Error::XmlParsing(quick_xml::errors::Error)
@@ -537,6 +598,8 @@ impl core::marker::UnsafeUnpin for xml2arrow::Parser
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::Parser
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::Parser
 #[non_exhaustive] pub struct xml2arrow::ParserOptions
+pub xml2arrow::ParserOptions::error_on_unmatched_fields: bool
+pub xml2arrow::ParserOptions::max_value_bytes: core::option::Option<usize>
 pub xml2arrow::ParserOptions::stop_at_paths: alloc::vec::Vec<alloc::string::String>
 pub xml2arrow::ParserOptions::strip_namespaces: bool
 pub xml2arrow::ParserOptions::trim_text: bool

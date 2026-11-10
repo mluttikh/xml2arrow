@@ -56,6 +56,14 @@ parser_options:
                                # Set false to match raw qualified names and skip
                                # the per-name prefix scan (~4-7% faster); paths must
                                # then spell out any prefix. Free for prefix-free XML.
+  error_on_unmatched_fields: <bool>  # Fail if a configured field never matched
+                               # anything in the document (default: false). Catches
+                               # misspelled xml_paths, whose symptom is otherwise a
+                               # silently all-null column. Note that stop_at_paths
+                               # leaves everything below the stop path unmatched, so
+                               # the two options pull against each other.
+  max_value_bytes: <number>    # Cap on the bytes a single field value may accumulate
+                               # across text/CDATA/entity events (default: unlimited).
 tables:
   - name: <table_name>         # Name of the resulting Arrow RecordBatch
     xml_path: <xml_path>       # Path to the element whose children are rows.
@@ -208,6 +216,27 @@ readers and `parser.parse_slice(&xml)` for in-memory byte slices. Each call
 allocates fresh Arrow builders, so batches from one document never leak into the
 next. The amortization matters most for small documents, where setup would
 otherwise dominate; for a single large file the win is negligible.
+
+#### Catching a misspelled path
+
+A field whose `xml_path` matches nothing in a document gives a column that is
+silently all null or empty. Set `parser_options.error_on_unmatched_fields` to
+fail instead; the error lists every such field at once.
+
+#### Locating a failure
+
+Value-level errors (`ParseError`, `MissingRequiredField`, `ValueTooLarge`) carry
+the row index and byte offset of the failure, both in the message and as
+structured data on the error:
+
+```text
+Failed to parse value '30 units' as i32 for field 'v' at path /data/item/v:
+invalid digit found in string (row index 41207, near byte offset 2883104)
+```
+
+The row index is the position the failing row would have occupied in its table's
+batch — usually the more actionable of the two coordinates, since it points into
+the output you were building.
 
 #### Streaming documents too large for memory
 
