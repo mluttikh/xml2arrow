@@ -44,7 +44,7 @@ values. A release that changes one of them on purpose re-records it and says so.
 | `whitespace_without_trim` | `trim_text` governs strings, while numerics trim regardless | per-field `trim` |
 | `empty_document_yields_empty_tables`, `stop_at_paths` | a zero-row table is returned empty when collecting, but never appears in a stream | — (asymmetry pinned, not yet scheduled) |
 | `self_closing_table_element` | a field's value is **dropped** when a different table's scope is on top of the stack when it arrives (`outer.n` is null although `<n>1</n>` is present) | declared field ownership |
-| `truncated_input` | a document cut off mid-element parses to `Ok` with the rows that closed before the cut — here one row instead of two | rejecting truncated input, first as an option, later as the default |
+| `error_truncated_input` | a document cut off mid-element is rejected with `TruncatedInput` instead of returning the rows that closed before the cut | already changed in 0.20 (0.19 returned `Ok` with one row instead of two); `allow_truncated_input` restores the old result |
 | `error_duplicate_value`, `error_invalid_number`, `error_missing_required_field` | value errors end with the row index and byte offset of the failure | already changed in 0.20 (the message had no coordinates in 0.19; the text before the suffix is unchanged) |
 
 ## Adding a case

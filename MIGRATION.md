@@ -118,6 +118,30 @@ works. A test that compares the whole message needs loosening, or can read the
 structured fields instead: `location.row` and `location.position` on the error.
 The row index is the position the failing row would have had in its table.
 
+### Truncated documents are rejected
+
+A document that ends while elements are still open used to parse to `Ok` with
+the rows that had closed before the cut, so a killed writer or a short read
+produced a result that looked complete and was not. It now fails:
+
+```text
+Truncated document: input ended with 2 element(s) still open; the rows parsed so far are incomplete and were discarded (set parser_options.allow_truncated_input to accept them)
+```
+
+The error is `Error::TruncatedInput { open_elements }`. A well-formed document
+is unaffected, and so is an early stop through `stop_at_paths`.
+
+If you read partial documents on purpose, restore the previous result with:
+
+```yaml
+parser_options:
+  allow_truncated_input: true
+```
+
+When streaming, the error arrives at the end of the input, after earlier
+batches were already yielded. Treat an `Err` from a batch stream as
+invalidating everything the stream produced.
+
 ## Deprecated, still working
 
 These keep working, unchanged, until 1.0.

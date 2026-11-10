@@ -1357,3 +1357,54 @@ tables:
     assert!(!parser.warnings().is_empty());
     assert_eq!(parser.parse_slice(xml).unwrap(), before);
 }
+
+// ---------------------------------------------------------------------------
+// Truncated input
+// ---------------------------------------------------------------------------
+
+/// A file cut off mid-document must not come back as a short, plausible
+/// result. Through a real file, so the buffered reader reaches EOF by an
+/// actual short read rather than by the end of a slice.
+#[test]
+fn truncated_file_is_rejected_and_accepted_only_on_request() {
+    let yaml = r#"
+tables:
+  - name: items
+    xml_path: /data
+    levels: [item]
+    fields:
+      - {name: v, xml_path: /data/item/v, data_type: Int32}
+"#;
+    let xml = "<data><item><v>1</v></item><item><v>2</v></item><item><v>3";
+    let file = write_xml_tempfile(xml);
+    let open = || BufReader::new(File::open(file.path()).unwrap());
+
+    let mut config: Config = yaml_serde::from_str(yaml).unwrap();
+    let err = Parser::new(&config).unwrap().parse(open()).unwrap_err();
+    match &err {
+        // `<data>`, `<item>` and `<v>` were all still open.
+        xml2arrow::Error::TruncatedInput { open_elements } => assert_eq!(*open_elements, 3),
+        other => panic!("expected TruncatedInput, got {other}"),
+    }
+    assert!(
+        err.to_string().contains("allow_truncated_input"),
+        "the message must name the way out: {err}"
+    );
+
+    // A stream has already yielded the first batch by the time it finds out;
+    // the error must still surface, as the stream's last item.
+    let parser = Parser::new(&config).unwrap();
+    let items: Vec<_> = parser
+        .parse_batches(open(), BatchOptions::default().with_max_rows_per_batch(1))
+        .collect();
+    assert!(items.len() > 1, "expected batches before the error");
+    assert!(matches!(
+        items.last(),
+        Some(Err(xml2arrow::Error::TruncatedInput { .. }))
+    ));
+    assert!(items[..items.len() - 1].iter().all(Result::is_ok));
+
+    config.parser_options.allow_truncated_input = true;
+    let batches = Parser::new(&config).unwrap().parse(open()).unwrap();
+    assert_eq!(batches["items"].num_rows(), 2);
+}
