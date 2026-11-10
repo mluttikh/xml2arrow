@@ -89,14 +89,16 @@ Inside `process_xml_events`, `process_xml_events_slice`, `handle_event`,
 ## Public API & Compatibility
 
 Treat `src/lib.rs` re-exports as the public API; avoid breaking changes:
-`parse_xml`, `parse_xml_slice`, `Parser`, `Config`, `TableConfig`,
-`FieldConfig`, `FieldConfigBuilder`, `ParserOptions`, `DType`, `Error`,
-`Result`, and the `config_from_yaml!` macro.
+`parse_xml`, `parse_xml_slice`, `Parser`, `Config`, `ConfigBuilder`,
+`TableConfig`, `TableConfigBuilder`, `FieldConfig`, `FieldConfigBuilder`,
+`ParserOptions`, `DType`, `Error`, `Result`, and the `config_from_yaml!` macro.
 
-Beware of hidden breakage: `DType` and `ParserOptions` are exhaustive pub
-types — adding a `DType` variant breaks downstream exhaustive matches, and
-adding a `ParserOptions` field breaks struct-literal construction. Call this
-out in the PR when unavoidable.
+`Config`, `TableConfig`, `FieldConfig`, `ParserOptions` and `DType` are
+`#[non_exhaustive]`, so a new config key, parser option or data type is an
+additive change. Keep it that way: a new public config type is
+`#[non_exhaustive]` from the start, and anything a user must construct gets a
+builder or a `Default`. Tests and doc examples outside the crate construct
+configs through the builders, which is what proves they are sufficient.
 
 ## Testing Conventions
 

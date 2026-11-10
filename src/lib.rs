@@ -15,4 +15,7 @@ pub use xml_parser::{
     TableBatch, parse_xml, parse_xml_slice,
 };
 
-pub use config::{Config, DType, FieldConfig, FieldConfigBuilder, ParserOptions, TableConfig};
+pub use config::{
+    Config, ConfigBuilder, DType, FieldConfig, FieldConfigBuilder, ParserOptions, TableConfig,
+    TableConfigBuilder,
+};

@@ -937,7 +937,7 @@ impl XmlToArrowConverter {
 ///
 /// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build().unwrap()];
 /// let tables = vec![TableConfig::new("items", "/data", vec![], fields)];
-/// let config = Config { tables, parser_options: Default::default() };
+/// let config = Config::builder().tables(tables).build().unwrap();
 ///
 /// // Compile once...
 /// let parser = Parser::new(&config).unwrap();
@@ -1162,7 +1162,7 @@ impl Parser {
     ///
     /// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build().unwrap()];
     /// let tables = vec![TableConfig::new("items", "/data", vec![], fields)];
-    /// let config = Config { tables, parser_options: Default::default() };
+    /// let config = Config::builder().tables(tables).build().unwrap();
     /// let parser = Parser::new(&config).unwrap();
     ///
     /// let xml: &[u8] = b"<data><item><value>1</value></item><item><value>2</value></item></data>";
@@ -1452,7 +1452,7 @@ impl Parser {
 /// let xml_content = r#"<data><item><value>123</value></item></data>"#;
 /// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build().unwrap()];
 /// let tables = vec![TableConfig::new("items", "/data", vec![], fields)];
-/// let config = Config { tables, parser_options: Default::default() };
+/// let config = Config::builder().tables(tables).build().unwrap();
 /// let record_batches = parse_xml(xml_content.as_bytes(), &config).unwrap();
 /// // ... use record_batches
 /// ```
@@ -1492,7 +1492,7 @@ pub fn parse_xml(reader: impl BufRead, config: &Config) -> Result<IndexMap<Strin
 /// let xml = b"<data><item><value>123</value></item></data>";
 /// let fields = vec![FieldConfigBuilder::new("value", "/data/item/value", DType::Int32).build().unwrap()];
 /// let tables = vec![TableConfig::new("items", "/data", vec![], fields)];
-/// let config = Config { tables, parser_options: Default::default() };
+/// let config = Config::builder().tables(tables).build().unwrap();
 /// let record_batches = parse_xml_slice(xml, &config).unwrap();
 /// ```
 pub fn parse_xml_slice(xml: &[u8], config: &Config) -> Result<IndexMap<String, RecordBatch>> {
