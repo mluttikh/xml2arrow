@@ -207,6 +207,9 @@ it for every document that shares the config.
   value may accumulate across text, CDATA and entity events, and raises
   `Error::ValueTooLarge` beyond it.
 - `Config::builder()` and `TableConfig::builder()`.
+- `From<ConfigIssue> for Error`, so a tool that builds or checks configs can
+  turn an issue into the error the library would have raised, with `?` or
+  `.into()`, instead of writing `Error::InvalidConfig { reason }` by hand.
 - `Config::lint()` and `Parser::warnings()` return advisory findings about a
   configuration that is valid but cannot do what it looks like it does, such as
   a table that can never produce a row. The library never prints them, and
