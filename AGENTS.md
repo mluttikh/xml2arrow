@@ -204,6 +204,9 @@ Code is a document for human logic verification:
    single-use micro-functions — but *do* outline cold/error paths from hot
    functions (that's performance, not style).
 5. **No generic `utils.rs`.** A helper used by one module stays private in it.
+6. **Every public item is documented.** `#![warn(missing_docs)]` is on and CI's
+   `-D warnings` promotes it, so a new public field, variant or function needs
+   a doc comment to merge.
 
 ## Git & PR Conventions
 
