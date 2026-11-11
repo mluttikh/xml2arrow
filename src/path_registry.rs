@@ -96,8 +96,11 @@ impl PathNodeInfo {
     }
 
     /// Returns true if this path has any associated fields.
+    ///
+    /// Test-only: the parser reads `field_indices` directly, since it needs
+    /// the indices themselves on the same branch.
+    #[cfg(test)]
     #[inline]
-    #[allow(dead_code)]
     pub fn has_fields(&self) -> bool {
         !self.field_indices.is_empty()
     }
@@ -230,66 +233,89 @@ impl PathRegistry {
             node_info: vec![PathNodeInfo::default()], // Root info
         };
 
-        // Phase 1: register table paths
-        // The table boundary must be known so the parser can push/pop row scopes.
-        for (table_idx, table_config) in config.tables.iter().enumerate() {
-            let node_id = registry.get_or_create_path(table_config.scope());
-            registry.node_info[node_id.index()].table_index = Some(table_idx);
-        }
+        // The order below is load-bearing, and each step says why in its own
+        // doc comment. In short: a path must exist before anything can be
+        // marked on it, and the row marking reads the finished trie, so it
+        // runs last.
+        registry.register_table_paths(config);
+        registry.register_field_paths(config);
+        registry.mark_attribute_parents();
+        registry.register_stop_paths(config);
+        registry.mark_row_ends();
 
-        // Phase 2: register field paths
-        // We allow multiple fields to map to the same node (e.g., different
-        // tables that share a path shape).
+        registry
+    }
+
+    /// Registers every table's path, so the parser can push and pop row
+    /// scopes as those elements open and close.
+    fn register_table_paths(&mut self, config: &Config) {
+        for (table_idx, table_config) in config.tables.iter().enumerate() {
+            let node_id = self.get_or_create_path(table_config.scope());
+            self.node_info[node_id.index()].table_index = Some(table_idx);
+        }
+    }
+
+    /// Registers every field's location. Several fields may land on one node —
+    /// two tables sharing a path shape, for instance — so a node carries a
+    /// list rather than a single index.
+    fn register_field_paths(&mut self, config: &Config) {
         for (table_idx, table_config) in config.tables.iter().enumerate() {
             for (field_idx, field_config) in table_config.fields.iter().enumerate() {
-                let node_id = registry.get_or_create_path(field_config.path());
-                registry.node_info[node_id.index()]
+                let node_id = self.get_or_create_path(field_config.path());
+                self.node_info[node_id.index()]
                     .field_indices
                     .push((table_idx, field_idx));
             }
         }
+    }
 
-        // Phase 3: mark nodes that have attribute children so the parser can
-        // skip attribute iteration for elements with no attribute fields.
-        for node_id_idx in 0..registry.children.len() {
-            registry.node_info[node_id_idx].has_attribute_children =
-                registry.children[node_id_idx].any_attribute_name();
+    /// Marks nodes that have at least one attribute child, so the parser can
+    /// skip attribute iteration entirely for elements with no attribute fields.
+    ///
+    /// Runs after the table and field paths are registered, which are the only
+    /// steps that can introduce an attribute node a field reads.
+    fn mark_attribute_parents(&mut self) {
+        for node_idx in 0..self.children.len() {
+            self.node_info[node_idx].has_attribute_children =
+                self.children[node_idx].any_attribute_name();
         }
+    }
 
-        // Phase 4: register optional stop paths and mark them, so ending the
-        // parse is a bit test rather than a scan of the configured paths.
+    /// Registers `stop_at_paths` and flags them, so ending the parse early is
+    /// a bit test on the current node rather than a scan of configured paths.
+    fn register_stop_paths(&mut self, config: &Config) {
         for stop_path in &config.parser_options.stop_at_paths {
-            let node_id = registry.get_or_create_path(stop_path);
-            registry.node_info[node_id.index()].is_stop = true;
+            let node_id = self.get_or_create_path(stop_path);
+            self.node_info[node_id.index()].is_stop = true;
         }
+    }
 
-        // Phase 5: mark the nodes whose closing tag finalizes a row — every
-        // element child of a table node. See `PathNodeInfo::ends_row` for why
-        // this is exactly the rule the parser used to evaluate per event.
-        //
-        // Must run *after* phase 4: a stop path can introduce nodes, and a node
-        // introduced under a table path delimits rows exactly like any other
-        // configured child. Marking before phase 4 would miss those and quietly
-        // change row counts for configs that combine the two.
-        for node_idx in 0..registry.children.len() {
-            if !registry.node_info[node_idx].is_table() {
+    /// Marks the nodes whose closing tag finalizes a row: every element child
+    /// of a table node. See [`PathNodeInfo::ends_row`] for why this is exactly
+    /// the rule the parser used to evaluate per event.
+    ///
+    /// Must run after [`PathRegistry::register_stop_paths`]: a stop path can
+    /// introduce nodes, and one introduced under a table path delimits rows
+    /// exactly like any other configured child. Marking earlier would miss
+    /// those and quietly change row counts for configs that combine the two.
+    fn mark_row_ends(&mut self) {
+        for node_idx in 0..self.children.len() {
+            if !self.node_info[node_idx].is_table() {
                 continue;
             }
-            // Move the child list aside rather than collecting it: marking goes
-            // through `registry`, which would otherwise stay borrowed for the
-            // whole loop. `NodeChildren::new()` is an empty `Vec`, so the swap
-            // costs no allocation — and this runs in `Parser::new`, whose fixed
-            // cost is the whole parse for anyone handling small documents.
-            let children = std::mem::replace(&mut registry.children[node_idx], NodeChildren::new());
+            // Move the child list aside rather than collecting it: marking
+            // writes to `node_info` while the list is being read. An empty
+            // `NodeChildren` is an empty `Vec`, so the swap costs no
+            // allocation — and this runs in `Parser::new`, whose fixed cost is
+            // the whole parse for anyone handling small documents.
+            let children = std::mem::replace(&mut self.children[node_idx], NodeChildren::new());
             for (name, child_id) in children.entries() {
                 if !name.starts_with(b"@") {
-                    registry.node_info[child_id.index()].ends_row = true;
+                    self.node_info[child_id.index()].ends_row = true;
                 }
             }
-            registry.children[node_idx] = children;
+            self.children[node_idx] = children;
         }
-
-        registry
     }
 
     /// Gets or creates a path in the trie, returning its node ID.
@@ -358,13 +384,6 @@ impl PathRegistry {
     #[inline]
     pub fn get_table_index(&self, node_id: PathNodeId) -> Option<usize> {
         self.node_info[node_id.index()].table_index
-    }
-
-    /// Returns the root node info.
-    #[inline]
-    #[allow(dead_code)]
-    pub fn root_info(&self) -> &PathNodeInfo {
-        &self.node_info[0]
     }
 }
 
@@ -523,18 +542,12 @@ impl PathTracker {
         }
     }
 
-    /// Returns the current node ID, or ROOT if unknown.
-    #[inline]
-    #[allow(dead_code)]
-    pub fn current_or_root(&self) -> PathNodeId {
-        self.node_stack
-            .last()
-            .map_or(PathNodeId::ROOT, |e| e.node_id)
-    }
-
     /// Returns true if the current path is known (exists in the registry).
+    ///
+    /// Test-only: the parser branches on the `StackEntry` it already holds
+    /// rather than re-reading the top of the stack.
+    #[cfg(test)]
     #[inline]
-    #[allow(dead_code)]
     pub fn is_current_known(&self) -> bool {
         self.node_stack.last().is_some_and(|e| e.is_known)
     }
