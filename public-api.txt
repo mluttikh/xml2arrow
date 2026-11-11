@@ -88,8 +88,9 @@ pub xml2arrow::config::FieldConfig::name: alloc::string::String
 pub xml2arrow::config::FieldConfig::nullable: bool
 pub xml2arrow::config::FieldConfig::offset: core::option::Option<f64>
 pub xml2arrow::config::FieldConfig::scale: core::option::Option<f64>
-pub xml2arrow::config::FieldConfig::xml_path: alloc::string::String
+pub xml2arrow::config::FieldConfig::xml_path: core::option::Option<alloc::string::String>
 impl xml2arrow::config::FieldConfig
+pub fn xml2arrow::config::FieldConfig::path(&self) -> &str
 pub fn xml2arrow::config::FieldConfig::validate(&self) -> xml2arrow::errors::Result<()>
 impl core::clone::Clone for xml2arrow::config::FieldConfig
 pub fn xml2arrow::config::FieldConfig::clone(&self) -> xml2arrow::config::FieldConfig
@@ -158,10 +159,11 @@ impl core::panic::unwind_safe::UnwindSafe for xml2arrow::config::ParserOptions
 pub xml2arrow::config::TableConfig::fields: alloc::vec::Vec<xml2arrow::config::FieldConfig>
 pub xml2arrow::config::TableConfig::levels: alloc::vec::Vec<alloc::string::String>
 pub xml2arrow::config::TableConfig::name: alloc::string::String
-pub xml2arrow::config::TableConfig::xml_path: alloc::string::String
+pub xml2arrow::config::TableConfig::xml_path: core::option::Option<alloc::string::String>
 impl xml2arrow::config::TableConfig
 pub fn xml2arrow::config::TableConfig::builder(&str, &str) -> xml2arrow::config::TableConfigBuilder
 pub fn xml2arrow::config::TableConfig::new(&str, &str, alloc::vec::Vec<alloc::string::String>, alloc::vec::Vec<xml2arrow::config::FieldConfig>) -> Self
+pub fn xml2arrow::config::TableConfig::scope(&self) -> &str
 impl core::clone::Clone for xml2arrow::config::TableConfig
 pub fn xml2arrow::config::TableConfig::clone(&self) -> xml2arrow::config::TableConfig
 impl core::cmp::PartialEq for xml2arrow::config::TableConfig
@@ -201,18 +203,21 @@ pub xml2arrow::errors::ConfigIssue::DuplicateFieldName::field: alloc::string::St
 pub xml2arrow::errors::ConfigIssue::DuplicateFieldName::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::DuplicateTableName
 pub xml2arrow::errors::ConfigIssue::DuplicateTableName::name: alloc::string::String
-pub xml2arrow::errors::ConfigIssue::DuplicateTableXmlPath
-pub xml2arrow::errors::ConfigIssue::DuplicateTableXmlPath::table_a: alloc::string::String
-pub xml2arrow::errors::ConfigIssue::DuplicateTableXmlPath::table_b: alloc::string::String
-pub xml2arrow::errors::ConfigIssue::DuplicateTableXmlPath::xml_path: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::DuplicateTablePath
+pub xml2arrow::errors::ConfigIssue::DuplicateTablePath::path: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::DuplicateTablePath::table_a: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::DuplicateTablePath::table_b: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::EmptyFieldName
 pub xml2arrow::errors::ConfigIssue::EmptyFieldName::table: alloc::string::String
-pub xml2arrow::errors::ConfigIssue::EmptyFieldXmlPath
-pub xml2arrow::errors::ConfigIssue::EmptyFieldXmlPath::field: alloc::string::String
-pub xml2arrow::errors::ConfigIssue::EmptyFieldXmlPath::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::EmptyFieldPath
+pub xml2arrow::errors::ConfigIssue::EmptyFieldPath::field: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::EmptyFieldPath::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::EmptyTableName
-pub xml2arrow::errors::ConfigIssue::EmptyTableXmlPath
-pub xml2arrow::errors::ConfigIssue::EmptyTableXmlPath::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::EmptyTablePath
+pub xml2arrow::errors::ConfigIssue::EmptyTablePath::table: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::FieldPathMissing
+pub xml2arrow::errors::ConfigIssue::FieldPathMissing::field: alloc::string::String
+pub xml2arrow::errors::ConfigIssue::FieldPathMissing::table: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::FieldPathNotUnderTable
 pub xml2arrow::errors::ConfigIssue::FieldPathNotUnderTable::field: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::FieldPathNotUnderTable::field_path: alloc::string::String
@@ -220,6 +225,8 @@ pub xml2arrow::errors::ConfigIssue::FieldPathNotUnderTable::table: alloc::string
 pub xml2arrow::errors::ConfigIssue::FieldPathNotUnderTable::table_path: alloc::string::String
 pub xml2arrow::errors::ConfigIssue::SingleTableRequired
 pub xml2arrow::errors::ConfigIssue::SingleTableRequired::output_tables: usize
+pub xml2arrow::errors::ConfigIssue::TablePathMissing
+pub xml2arrow::errors::ConfigIssue::TablePathMissing::table: alloc::string::String
 impl core::fmt::Debug for xml2arrow::errors::ConfigIssue
 pub fn xml2arrow::errors::ConfigIssue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::fmt::Display for xml2arrow::errors::ConfigIssue
@@ -625,8 +632,9 @@ pub xml2arrow::FieldConfig::name: alloc::string::String
 pub xml2arrow::FieldConfig::nullable: bool
 pub xml2arrow::FieldConfig::offset: core::option::Option<f64>
 pub xml2arrow::FieldConfig::scale: core::option::Option<f64>
-pub xml2arrow::FieldConfig::xml_path: alloc::string::String
+pub xml2arrow::FieldConfig::xml_path: core::option::Option<alloc::string::String>
 impl xml2arrow::config::FieldConfig
+pub fn xml2arrow::config::FieldConfig::path(&self) -> &str
 pub fn xml2arrow::config::FieldConfig::validate(&self) -> xml2arrow::errors::Result<()>
 impl core::clone::Clone for xml2arrow::config::FieldConfig
 pub fn xml2arrow::config::FieldConfig::clone(&self) -> xml2arrow::config::FieldConfig
@@ -767,10 +775,11 @@ impl !core::panic::unwind_safe::UnwindSafe for xml2arrow::TableBatch
 pub xml2arrow::TableConfig::fields: alloc::vec::Vec<xml2arrow::config::FieldConfig>
 pub xml2arrow::TableConfig::levels: alloc::vec::Vec<alloc::string::String>
 pub xml2arrow::TableConfig::name: alloc::string::String
-pub xml2arrow::TableConfig::xml_path: alloc::string::String
+pub xml2arrow::TableConfig::xml_path: core::option::Option<alloc::string::String>
 impl xml2arrow::config::TableConfig
 pub fn xml2arrow::config::TableConfig::builder(&str, &str) -> xml2arrow::config::TableConfigBuilder
 pub fn xml2arrow::config::TableConfig::new(&str, &str, alloc::vec::Vec<alloc::string::String>, alloc::vec::Vec<xml2arrow::config::FieldConfig>) -> Self
+pub fn xml2arrow::config::TableConfig::scope(&self) -> &str
 impl core::clone::Clone for xml2arrow::config::TableConfig
 pub fn xml2arrow::config::TableConfig::clone(&self) -> xml2arrow::config::TableConfig
 impl core::cmp::PartialEq for xml2arrow::config::TableConfig

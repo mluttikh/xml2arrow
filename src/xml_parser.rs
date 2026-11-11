@@ -140,7 +140,7 @@ impl FieldMeta {
     fn from_config(fc: &FieldConfig) -> Self {
         Self {
             name: fc.name.clone(),
-            xml_path: fc.xml_path.clone(),
+            xml_path: fc.path().to_string(),
             nullable: fc.nullable,
             scale: fc.scale,
             offset: fc.offset,
@@ -484,7 +484,7 @@ impl TableMeta {
     fn from_config(tc: &TableConfig) -> Self {
         Self {
             name: tc.name.clone(),
-            xml_path: tc.xml_path.clone(),
+            xml_path: tc.scope().to_string(),
         }
     }
 }
