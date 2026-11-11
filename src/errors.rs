@@ -28,6 +28,7 @@ use pyo3::Python;
 #[cfg(feature = "python")]
 use pyo3::create_exception;
 
+/// The result type of every fallible operation in this crate.
 pub type Result<T> = core::result::Result<T, Error>;
 
 /// The crate's top-level error type.
@@ -69,10 +70,15 @@ pub enum Error {
     /// payload every hot-path function returns — `Error` stays pointer-thin
     /// per variant while the cold error path pays one allocation.
     ParseError {
+        /// The name of the field whose value failed to decode.
         field: Arc<str>,
+        /// The field's configured path.
         path: Arc<str>,
+        /// The raw text that failed to decode.
         value: String,
+        /// What was wrong with it.
         kind: ParseKind,
+        /// Where in the document, and in the output, the failure occurred.
         location: Box<ErrorLocation>,
     },
     /// A non-nullable field had no text (or whitespace-only text) in a row.
@@ -83,8 +89,11 @@ pub enum Error {
     /// `location` carries the same document coordinates as
     /// [`Error::ParseError`].
     MissingRequiredField {
+        /// The name of the non-nullable field that had no value.
         field: Arc<str>,
+        /// The field's configured path.
         path: Arc<str>,
+        /// Where in the document, and in the output, the row ended.
         location: Box<ErrorLocation>,
     },
     /// With `ParserOptions::error_on_unmatched_fields` enabled, one or more
@@ -100,7 +109,9 @@ pub enum Error {
     /// leaves every field below the stop path unmatched, and telling that user
     /// to check their spelling sends them hunting for a bug they do not have.
     UnmatchedFields {
+        /// Every configured field that captured nothing, in config order.
         fields: Vec<UnmatchedField>,
+        /// Whether `stop_at_paths` was set, which changes the likely cause.
         stop_paths_configured: bool,
     },
     /// A single field's accumulated value exceeded
@@ -112,9 +123,13 @@ pub enum Error {
     /// cap is crossed the parser stops appending — memory stays bounded — and
     /// the row raises this when it finalizes.
     ValueTooLarge {
+        /// The name of the field whose value grew past the cap.
         field: Arc<str>,
+        /// The field's configured path.
         path: Arc<str>,
+        /// The configured `max_value_bytes`.
         limit: usize,
+        /// Where in the document, and in the output, the row ended.
         location: Box<ErrorLocation>,
     },
     /// A table's per-scope row counter passed `u32::MAX`, the largest value a
@@ -122,7 +137,10 @@ pub enum Error {
     /// foreign keys of every subsequent child row, so the parse fails
     /// instead. Only reachable on enormous inputs (more than 2^32 rows in a
     /// single table scope), which the streaming entry points make possible.
-    RowIndexOverflow { table: Arc<str> },
+    RowIndexOverflow {
+        /// The table whose row counter overflowed.
+        table: Arc<str>,
+    },
     /// The input ended while elements were still open.
     ///
     /// A document cut short mid-element — a killed writer, a short read, a
@@ -138,11 +156,16 @@ pub enum Error {
     },
     /// A scale or offset was configured on a data type that doesn't support it.
     UnsupportedConversion {
+        /// Which transform was attempted.
         conversion: ConversionKind,
+        /// The data type it was attempted on, as configured.
         data_type: String,
     },
     /// The configuration failed `Config::validate()`.
-    InvalidConfig { reason: ConfigIssue },
+    InvalidConfig {
+        /// The specific problem found.
+        reason: ConfigIssue,
+    },
 }
 
 /// Document coordinates locating a value-level failure.
@@ -159,7 +182,9 @@ pub enum Error {
 /// two.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ErrorLocation {
+    /// The 0-based index the failing row would have had in its table.
     pub row: Option<usize>,
+    /// The byte offset just past the XML event that raised the error.
     pub position: Option<u64>,
 }
 
@@ -227,7 +252,9 @@ pub enum ParseKind {
     /// A numeric (integer or float) parser rejected the raw text. Carries
     /// the target type name and the underlying parser's message.
     InvalidNumber {
+        /// The Rust name of the target type, for example `i32`.
         type_name: &'static str,
+        /// The underlying parser's message.
         reason: String,
     },
     /// A boolean token didn't match any recognized form.
@@ -250,7 +277,9 @@ pub enum ParseKind {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ConversionKind {
+    /// A `scale` was configured.
     Scaling,
+    /// An `offset` was configured.
     Offset,
 }
 
@@ -263,48 +292,69 @@ pub enum ConversionKind {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ConfigIssue {
+    /// A table had an empty `name`. Names identify output tables, so one is required.
     EmptyTableName,
+    /// Two tables share a `name`. Output is keyed by name, so the second would replace the first.
     DuplicateTableName {
+        /// The name claimed by more than one table.
         name: String,
     },
     /// Two tables name the same element. The path registry stores a single
     /// table per path node, so the earlier table would silently receive zero
     /// rows — rejected instead.
     DuplicateTablePath {
+        /// The table that claimed the element first.
         table_a: String,
+        /// The table that claimed it again.
         table_b: String,
         /// The contested path, as the later table spelled it.
         path: String,
     },
     /// A table named its element with an empty string, so it matches nothing.
     EmptyTablePath {
+        /// The table whose path was empty.
         table: String,
     },
     /// A table has no `xml_path`, so it names no element.
     TablePathMissing {
+        /// The table naming no element.
         table: String,
     },
+    /// A field had an empty `name`. Names become column names.
     EmptyFieldName {
+        /// The table containing the unnamed field.
         table: String,
     },
+    /// Two fields in one table share a `name`, which would produce two columns of the same name.
     DuplicateFieldName {
+        /// The table containing the repeated name.
         table: String,
+        /// The name used by more than one field.
         field: String,
     },
     /// A field named its location with an empty string.
     EmptyFieldPath {
+        /// The field's table.
         table: String,
+        /// The field whose path was empty.
         field: String,
     },
     /// A field has no `xml_path`, so it names no location.
     FieldPathMissing {
+        /// The field's table.
         table: String,
+        /// The field naming no location.
         field: String,
     },
+    /// A field's path lies outside its table's `xml_path`, so it could never be captured for that table's rows.
     FieldPathNotUnderTable {
+        /// The field's table.
         table: String,
+        /// The table's `xml_path`, which the field must sit inside.
         table_path: String,
+        /// The field that pointed outside it.
         field: String,
+        /// The field's path, as configured.
         field_path: String,
     },
     /// An operation that requires exactly one output table (a table with a
@@ -313,6 +363,7 @@ pub enum ConfigIssue {
     /// on a config with a different number of them. Structural tables (empty
     /// `fields`) don't count: they never produce output.
     SingleTableRequired {
+        /// How many output tables the config actually has.
         output_tables: usize,
     },
 }

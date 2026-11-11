@@ -1,3 +1,13 @@
+//! Configuration: the mapping from XML paths to Arrow tables and fields.
+//!
+//! A [`Config`] is normally written as YAML and loaded with
+//! [`Config::from_yaml_file`] or [`Config::from_yaml_str`], but it is an
+//! ordinary struct and [`Config::builder`] builds one in Rust.
+//!
+//! Everything is validated up front: [`Config::validate`] runs when a config
+//! is built or loaded, and again in `Parser::new`. A configuration mistake is
+//! an error at load rather than a wrong column at parse.
+
 use std::{
     collections::HashSet,
     fs::File,
@@ -535,6 +545,12 @@ pub struct TableConfig {
 }
 
 impl TableConfig {
+    /// Creates a table configuration from all of its parts.
+    ///
+    /// `xml_path` is the element whose configured children delimit rows,
+    /// `levels` names the index columns that link this table to its
+    /// ancestors, and `fields` are its columns. Use [`TableConfig::builder`]
+    /// for a table without `levels`.
     #[must_use]
     pub fn new(name: &str, xml_path: &str, levels: Vec<String>, fields: Vec<FieldConfig>) -> Self {
         Self {
@@ -856,17 +872,31 @@ impl FieldConfigBuilder {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[non_exhaustive]
 pub enum DType {
+    /// `true`/`false`, and the other spellings boolean parsing accepts
+    /// (`1`/`0`, `yes`/`no`, `on`/`off`, `t`/`f`, `y`/`n`), case-insensitive.
     Boolean,
+    /// 32-bit float. Accepts `scale` and `offset`.
     Float32,
+    /// 64-bit float. Accepts `scale` and `offset`.
     Float64,
+    /// 8-bit signed integer.
     Int8,
+    /// 8-bit unsigned integer.
     UInt8,
+    /// 16-bit signed integer.
     Int16,
+    /// 16-bit unsigned integer.
     UInt16,
+    /// 32-bit signed integer.
     Int32,
+    /// 32-bit unsigned integer.
     UInt32,
+    /// 64-bit signed integer.
     Int64,
+    /// 64-bit unsigned integer.
     UInt64,
+    /// UTF-8 string, and the default. A missing non-nullable value yields an
+    /// empty string rather than an error.
     #[default]
     Utf8,
 }
