@@ -1408,3 +1408,26 @@ tables:
     let batches = Parser::new(&config).unwrap().parse(open()).unwrap();
     assert_eq!(batches["items"].num_rows(), 2);
 }
+
+#[test]
+fn a_config_without_xml_path_is_rejected_at_load() {
+    // `xml_path` is optional in the struct, so the loader, not serde, is what
+    // refuses a table or field that leaves it out.
+    let table = Config::from_yaml_str("tables:\n  - name: items\n    levels: []\n    fields: []\n")
+        .unwrap_err();
+    assert!(
+        table.to_string().contains("Table 'items' has no xml_path"),
+        "{table}"
+    );
+
+    let field = Config::from_yaml_str(
+        "tables:\n  - name: items\n    xml_path: /data\n    levels: []\n    fields:\n      - {name: v, data_type: Utf8}\n",
+    )
+    .unwrap_err();
+    assert!(
+        field
+            .to_string()
+            .contains("Field 'v' in table 'items' has no xml_path"),
+        "{field}"
+    );
+}

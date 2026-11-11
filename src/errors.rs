@@ -267,15 +267,21 @@ pub enum ConfigIssue {
     DuplicateTableName {
         name: String,
     },
-    /// Two tables resolve to the same `xml_path`. The path registry stores a
-    /// single table per path node, so the earlier table would silently
-    /// receive zero rows — rejected instead.
-    DuplicateTableXmlPath {
+    /// Two tables name the same element. The path registry stores a single
+    /// table per path node, so the earlier table would silently receive zero
+    /// rows — rejected instead.
+    DuplicateTablePath {
         table_a: String,
         table_b: String,
-        xml_path: String,
+        /// The contested path, as the later table spelled it.
+        path: String,
     },
-    EmptyTableXmlPath {
+    /// A table named its element with an empty string, so it matches nothing.
+    EmptyTablePath {
+        table: String,
+    },
+    /// A table has no `xml_path`, so it names no element.
+    TablePathMissing {
         table: String,
     },
     EmptyFieldName {
@@ -285,7 +291,13 @@ pub enum ConfigIssue {
         table: String,
         field: String,
     },
-    EmptyFieldXmlPath {
+    /// A field named its location with an empty string.
+    EmptyFieldPath {
+        table: String,
+        field: String,
+    },
+    /// A field has no `xml_path`, so it names no location.
+    FieldPathMissing {
         table: String,
         field: String,
     },
@@ -443,16 +455,19 @@ impl fmt::Display for ConfigIssue {
         match self {
             ConfigIssue::EmptyTableName => f.write_str("Table name must not be empty"),
             ConfigIssue::DuplicateTableName { name } => write!(f, "Duplicate table name '{name}'"),
-            ConfigIssue::DuplicateTableXmlPath {
+            ConfigIssue::DuplicateTablePath {
                 table_a,
                 table_b,
-                xml_path,
+                path,
             } => write!(
                 f,
-                "Tables '{table_a}' and '{table_b}' share the same xml_path '{xml_path}'; each table must have a distinct xml_path"
+                "Tables '{table_a}' and '{table_b}' share the same xml_path '{path}'; each table must have a distinct xml_path"
             ),
-            ConfigIssue::EmptyTableXmlPath { table } => {
+            ConfigIssue::EmptyTablePath { table } => {
                 write!(f, "Table '{table}' has an empty xml_path")
+            }
+            ConfigIssue::TablePathMissing { table } => {
+                write!(f, "Table '{table}' has no xml_path, so it names no element")
             }
             ConfigIssue::EmptyFieldName { table } => {
                 write!(f, "Field name must not be empty in table '{table}'")
@@ -460,12 +475,16 @@ impl fmt::Display for ConfigIssue {
             ConfigIssue::DuplicateFieldName { table, field } => {
                 write!(f, "Duplicate field name '{field}' in table '{table}'")
             }
-            ConfigIssue::EmptyFieldXmlPath { table, field } => {
+            ConfigIssue::EmptyFieldPath { table, field } => {
                 write!(
                     f,
                     "Field '{field}' in table '{table}' has an empty xml_path"
                 )
             }
+            ConfigIssue::FieldPathMissing { table, field } => write!(
+                f,
+                "Field '{field}' in table '{table}' has no xml_path, so it names no location"
+            ),
             ConfigIssue::FieldPathNotUnderTable {
                 table,
                 table_path,

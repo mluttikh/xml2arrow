@@ -219,10 +219,10 @@ impl Config {
                 continue;
             }
 
-            if self.row_delimiting_children(&table.xml_path).is_empty() {
+            if self.row_delimiting_children(table.scope()).is_empty() {
                 lints.push(Lint::NeverFinalizesRows {
                     table: table.name.clone(),
-                    xml_path: table.xml_path.clone(),
+                    xml_path: table.scope().to_string(),
                 });
             }
 
@@ -233,14 +233,14 @@ impl Config {
                     lints.push(Lint::FieldInsideNestedTable {
                         table: table.name.clone(),
                         field: field.name.clone(),
-                        field_path: field.xml_path.clone(),
+                        field_path: field.path().to_string(),
                         nested_table: nested.name.clone(),
-                        nested_table_path: nested.xml_path.clone(),
+                        nested_table_path: nested.scope().to_string(),
                     });
                 }
             }
 
-            let available = self.enclosing_table_scopes(&table.xml_path);
+            let available = self.enclosing_table_scopes(table.scope());
             if table.levels.len() > available {
                 lints.push(Lint::ExcessLevels {
                     table: table.name.clone(),
@@ -275,20 +275,20 @@ impl Config {
             .filter(|path| has_dot_segment(path))
             .map(|path| ("`parser_options.stop_at_paths`".to_string(), path.as_str()));
         let tables = self.tables.iter().flat_map(|table| {
-            let table_path = has_dot_segment(&table.xml_path).then(|| {
+            let table_path = has_dot_segment(table.scope()).then(|| {
                 (
                     format!("the xml_path of table '{}'", table.name),
-                    table.xml_path.as_str(),
+                    table.scope(),
                 )
             });
             let fields = table
                 .fields
                 .iter()
-                .filter(|field| has_dot_segment(&field.xml_path))
+                .filter(|field| has_dot_segment(field.path()))
                 .map(move |field| {
                     (
                         format!("field '{}' of table '{}'", field.name, table.name),
-                        field.xml_path.as_str(),
+                        field.path(),
                     )
                 });
             table_path.into_iter().chain(fields)
@@ -314,14 +314,14 @@ impl Config {
         field: &FieldConfig,
     ) -> Option<&TableConfig> {
         // A path no element can match is reported for that alone.
-        if has_dot_segment(&field.xml_path) {
+        if has_dot_segment(field.path()) {
             return None;
         }
         self.tables
             .iter()
-            .filter(|other| path_is_strictly_under(&other.xml_path, &table.xml_path))
-            .filter(|other| path_is_under(&field.xml_path, &other.xml_path))
-            .max_by_key(|other| path_segments(&other.xml_path).count())
+            .filter(|other| path_is_strictly_under(other.scope(), table.scope()))
+            .filter(|other| path_is_under(field.path(), other.scope()))
+            .max_by_key(|other| path_segments(other.scope()).count())
     }
 
     /// How many index values a row of the table at `table_path` receives: one
@@ -341,8 +341,8 @@ impl Config {
                 .tables
                 .iter()
                 .filter(|ancestor| {
-                    path_segments(&ancestor.xml_path).next().is_some()
-                        && path_is_strictly_under(table_path, &ancestor.xml_path)
+                    path_segments(ancestor.scope()).next().is_some()
+                        && path_is_strictly_under(table_path, ancestor.scope())
                 })
                 .count()
     }
@@ -364,10 +364,7 @@ impl Config {
         let all_paths = self
             .tables
             .iter()
-            .flat_map(|t| {
-                std::iter::once(t.xml_path.as_str())
-                    .chain(t.fields.iter().map(|f| f.xml_path.as_str()))
-            })
+            .flat_map(|t| std::iter::once(t.scope()).chain(t.fields.iter().map(|f| f.path())))
             .chain(self.parser_options.stop_at_paths.iter().map(String::as_str));
 
         let mut children: Vec<&str> = Vec::new();

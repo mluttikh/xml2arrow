@@ -233,7 +233,7 @@ impl PathRegistry {
         // Phase 1: register table paths
         // The table boundary must be known so the parser can push/pop row scopes.
         for (table_idx, table_config) in config.tables.iter().enumerate() {
-            let node_id = registry.get_or_create_path(&table_config.xml_path);
+            let node_id = registry.get_or_create_path(table_config.scope());
             registry.node_info[node_id.index()].table_index = Some(table_idx);
         }
 
@@ -242,7 +242,7 @@ impl PathRegistry {
         // tables that share a path shape).
         for (table_idx, table_config) in config.tables.iter().enumerate() {
             for (field_idx, field_config) in table_config.fields.iter().enumerate() {
-                let node_id = registry.get_or_create_path(&field_config.xml_path);
+                let node_id = registry.get_or_create_path(field_config.path());
                 registry.node_info[node_id.index()]
                     .field_indices
                     .push((table_idx, field_idx));

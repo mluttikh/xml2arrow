@@ -53,6 +53,47 @@ let table = TableConfig::builder("items", "/data").fields(fields).build();
 `TableConfig::new` for a table that needs them, or set `table.levels` on the
 built value.
 
+### xml_path is an Option
+
+`TableConfig::xml_path` and `FieldConfig::xml_path` changed from `String` to
+`Option<String>`. Nothing about the YAML changes, and the value is always
+`Some` for a configuration that passed validation. The type changes now, in
+the one release that breaks builds, so that a later configuration format can
+spell these locations with another key without breaking them again.
+
+Code that reads the path uses the new accessors, which return `&str` and will
+keep working whichever key a configuration uses:
+
+```rust
+// before
+let table_path: &str = &table.xml_path;
+let field_path: &str = &field.xml_path;
+
+// after
+let table_path: &str = table.scope();
+let field_path: &str = field.path();
+```
+
+Code that assigns the field wraps the value: `table.xml_path = Some(path)`.
+
+A YAML table or field that leaves `xml_path` out used to fail while
+deserializing, with serde's "missing field" message. It now deserializes and
+fails validation instead, with `ConfigIssue::TablePathMissing` or
+`ConfigIssue::FieldPathMissing`. `Config::from_yaml_file`,
+`Config::from_yaml_str` and `Parser::new` all validate, so such a config is
+still rejected before any parsing.
+
+### ConfigIssue variants renamed
+
+Three variants lose the `Xml` in their name, for the same reason. Their
+messages are unchanged.
+
+| 0.19 | 0.20 |
+|---|---|
+| `ConfigIssue::DuplicateTableXmlPath { xml_path, .. }` | `ConfigIssue::DuplicateTablePath { path, .. }` |
+| `ConfigIssue::EmptyTableXmlPath` | `ConfigIssue::EmptyTablePath` |
+| `ConfigIssue::EmptyFieldXmlPath` | `ConfigIssue::EmptyFieldPath` |
+
 ### FieldConfig
 
 Use `FieldConfigBuilder`, which is unchanged:

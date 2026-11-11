@@ -278,9 +278,19 @@ impl Config {
                     },
                 });
             }
-            if table.xml_path.is_empty() {
+            // `xml_path` is optional in the struct so that a later format
+            // can spell the element with a different key; until one exists, a
+            // table without it names no element at all.
+            let Some(table_path) = table.xml_path.as_deref() else {
                 return Err(Error::InvalidConfig {
-                    reason: ConfigIssue::EmptyTableXmlPath {
+                    reason: ConfigIssue::TablePathMissing {
+                        table: table.name.clone(),
+                    },
+                });
+            };
+            if table_path.is_empty() {
+                return Err(Error::InvalidConfig {
+                    reason: ConfigIssue::EmptyTablePath {
                         table: table.name.clone(),
                     },
                 });
@@ -291,12 +301,12 @@ impl Config {
             // than a hash set of built keys) keeps `Parser::new` free of
             // per-table allocations; table counts are small.
             for earlier_table in &self.tables[..table_idx] {
-                if paths_equal(&earlier_table.xml_path, &table.xml_path) {
+                if paths_equal(earlier_table.scope(), table_path) {
                     return Err(Error::InvalidConfig {
-                        reason: ConfigIssue::DuplicateTableXmlPath {
+                        reason: ConfigIssue::DuplicateTablePath {
                             table_a: earlier_table.name.clone(),
                             table_b: table.name.clone(),
-                            xml_path: table.xml_path.clone(),
+                            path: table_path.to_string(),
                         },
                     });
                 }
@@ -320,9 +330,17 @@ impl Config {
                         },
                     });
                 }
-                if field.xml_path.is_empty() {
+                let Some(field_path) = field.xml_path.as_deref() else {
                     return Err(Error::InvalidConfig {
-                        reason: ConfigIssue::EmptyFieldXmlPath {
+                        reason: ConfigIssue::FieldPathMissing {
+                            table: table.name.clone(),
+                            field: field.name.clone(),
+                        },
+                    });
+                };
+                if field_path.is_empty() {
+                    return Err(Error::InvalidConfig {
+                        reason: ConfigIssue::EmptyFieldPath {
                             table: table.name.clone(),
                             field: field.name.clone(),
                         },
@@ -332,13 +350,13 @@ impl Config {
                 // Field path must be under the table path, compared per
                 // segment (the root table "/" has no segments and thus
                 // accepts any field path).
-                if !path_is_under(&field.xml_path, &table.xml_path) {
+                if !path_is_under(field_path, table_path) {
                     return Err(Error::InvalidConfig {
                         reason: ConfigIssue::FieldPathNotUnderTable {
                             table: table.name.clone(),
-                            table_path: table.xml_path.clone(),
+                            table_path: table_path.to_string(),
                             field: field.name.clone(),
-                            field_path: field.xml_path.clone(),
+                            field_path: field_path.to_string(),
                         },
                     });
                 }
@@ -461,7 +479,7 @@ impl Config {
     pub fn requires_attribute_parsing(&self) -> bool {
         for table in &self.tables {
             for field in &table.fields {
-                if field.xml_path.contains('@') {
+                if field.path().contains('@') {
                     return true;
                 }
             }
@@ -486,7 +504,14 @@ pub struct TableConfig {
     /// The name of the table.
     pub name: String,
     /// The XML path to the table elements. For example `/data/dataset/table`.
-    pub xml_path: String,
+    ///
+    /// Optional in the type, required in practice: a table without it fails
+    /// validation. It is an `Option` so that a later configuration format can
+    /// spell the element with a different key without another breaking change
+    /// to this struct. Read it through [`TableConfig::scope`], which keeps
+    /// working whichever key a config uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xml_path: Option<String>,
     /// The levels of nesting for this table. This is used to create the indices for nested tables.
     /// For example if the `xml_path` is `/data/dataset/table/item/properties` the levels should
     /// be `["table", "properties"]`.
@@ -500,10 +525,22 @@ impl TableConfig {
     pub fn new(name: &str, xml_path: &str, levels: Vec<String>, fields: Vec<FieldConfig>) -> Self {
         Self {
             name: name.to_string(),
-            xml_path: xml_path.to_string(),
+            xml_path: Some(xml_path.to_string()),
             levels,
             fields,
         }
+    }
+
+    /// The path of the element that scopes this table, for example
+    /// `/data/dataset/table`.
+    ///
+    /// Prefer this to reading [`TableConfig::xml_path`] directly: the accessor
+    /// stays the same when a later configuration format spells the element
+    /// with another key. Empty only for a table that names no element, which
+    /// validation rejects.
+    #[must_use]
+    pub fn scope(&self) -> &str {
+        self.xml_path.as_deref().unwrap_or_default()
     }
 
     /// Starts building a table configuration, adding fields one at a time.
@@ -598,7 +635,7 @@ impl TableConfigBuilder {
     pub fn build(self) -> TableConfig {
         TableConfig {
             name: self.name,
-            xml_path: self.xml_path,
+            xml_path: Some(self.xml_path),
             levels: Vec::new(),
             fields: self.fields,
         }
@@ -618,7 +655,13 @@ pub struct FieldConfig {
     /// The name of the field (and the name of the resulting Arrow column).
     pub name: String,
     /// The XML path to the element or attribute.
-    pub xml_path: String,
+    ///
+    /// Optional in the type, required in practice: a field without it fails
+    /// validation. It is an `Option` so that a later configuration format can
+    /// spell the location with a different key without another breaking
+    /// change to this struct. Read it through [`FieldConfig::path`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xml_path: Option<String>,
     /// The data type of the field. This determines the Arrow data type of the resulting column.
     pub data_type: DType,
     /// Whether the field is nullable (can contain null values). Defaults to false.
@@ -639,6 +682,18 @@ pub struct FieldConfig {
 }
 
 impl FieldConfig {
+    /// The location this field reads, as the configuration spells it: for
+    /// example `/data/item/value`, or `/data/item/@id` for an attribute.
+    ///
+    /// Prefer this to reading [`FieldConfig::xml_path`] directly: the accessor
+    /// stays the same when a later configuration format spells the location
+    /// with another key. Empty only for a field that names no location, which
+    /// validation rejects.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        self.xml_path.as_deref().unwrap_or_default()
+    }
+
     /// Validates that scale/offset are only used with floating point data types.
     ///
     /// # Errors
@@ -768,7 +823,7 @@ impl FieldConfigBuilder {
     pub fn build(self) -> Result<FieldConfig> {
         let cfg = FieldConfig {
             name: self.name,
-            xml_path: self.xml_path,
+            xml_path: Some(self.xml_path),
             data_type: self.data_type,
             nullable: self.nullable,
             scale: self.scale,
@@ -1280,7 +1335,7 @@ tables:
             .unwrap();
 
         assert_eq!(field.name, "test_field");
-        assert_eq!(field.xml_path, "/path/to/field");
+        assert_eq!(field.path(), "/path/to/field");
         assert_eq!(field.data_type, DType::Float64);
         assert!(field.nullable);
         assert_eq!(field.scale, Some(0.001));
@@ -1345,6 +1400,58 @@ tables:
         let err = config.validate().unwrap_err();
         assert!(matches!(err, Error::InvalidConfig { .. }));
         assert!(err.to_string().contains("empty xml_path"));
+    }
+
+    #[test]
+    fn test_missing_xml_path_is_rejected_by_validation_not_by_serde() {
+        // `xml_path` is an `Option` in both structs, so serde accepts a YAML
+        // that leaves it out. Validation is what must refuse it: a table or
+        // field that names nothing would otherwise register the root path.
+        let table_missing: Config =
+            yaml_serde::from_str("tables:\n  - name: items\n    levels: []\n    fields: []\n")
+                .unwrap();
+        assert_eq!(table_missing.tables[0].xml_path, None);
+        assert_eq!(table_missing.tables[0].scope(), "");
+        match table_missing.validate().unwrap_err() {
+            Error::InvalidConfig {
+                reason: ConfigIssue::TablePathMissing { table },
+            } => assert_eq!(table, "items"),
+            other => panic!("expected TablePathMissing, got {other}"),
+        }
+
+        let field_missing: Config = yaml_serde::from_str(
+            "tables:\n  - name: items\n    xml_path: /data\n    levels: []\n    fields:\n      - {name: v, data_type: Utf8}\n",
+        )
+        .unwrap();
+        assert_eq!(field_missing.tables[0].fields[0].path(), "");
+        match field_missing.validate().unwrap_err() {
+            Error::InvalidConfig {
+                reason: ConfigIssue::FieldPathMissing { table, field },
+            } => {
+                assert_eq!(table, "items");
+                assert_eq!(field, "v");
+            }
+            other => panic!("expected FieldPathMissing, got {other}"),
+        }
+    }
+
+    #[test]
+    fn test_path_accessors_read_xml_path() {
+        let table = TableConfig::builder("items", "/data")
+            .field(
+                FieldConfigBuilder::new("v", "/data/item/@id", DType::Utf8)
+                    .build()
+                    .unwrap(),
+            )
+            .build();
+        assert_eq!(table.scope(), "/data");
+        assert_eq!(table.xml_path.as_deref(), Some("/data"));
+        assert_eq!(table.fields[0].path(), "/data/item/@id");
+        assert_eq!(table.fields[0].xml_path.as_deref(), Some("/data/item/@id"));
+
+        // The key is still written out under its own name.
+        let yaml = yaml_serde::to_string(&table).unwrap();
+        assert!(yaml.contains("xml_path: /data"), "{yaml}");
     }
 
     #[test]

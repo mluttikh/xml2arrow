@@ -104,6 +104,11 @@ configs through the builders, which is what proves they are sufficient.
 `parse_xml`, `parse_xml_slice` and `Parser::parse_streaming` are deprecated and
 stay until 1.0. Use `Parser` in new code, tests, benches and examples.
 
+`TableConfig::xml_path` and `FieldConfig::xml_path` are `Option<String>` so a
+later config format can spell them with another key. Read them through
+`TableConfig::scope()` and `FieldConfig::path()`, never the field directly;
+`Config::validate` is what rejects a `None`.
+
 ## Testing Conventions
 
 - Parsing behavior is tested in `src/xml_parser.rs` `mod tests` using the
