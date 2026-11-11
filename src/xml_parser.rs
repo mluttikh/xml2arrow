@@ -1520,13 +1520,12 @@ impl Parser {
         let first = output_tables.next();
         match (first, output_tables.next()) {
             (Some(idx), None) => Ok(idx),
-            _ => Err(Error::InvalidConfig {
-                reason: ConfigIssue::SingleTableRequired {
-                    // Either no output table at all, or the two found plus
-                    // whatever the iterator still holds.
-                    output_tables: first.map_or(0, |_| 2 + output_tables.count()),
-                },
-            }),
+            _ => Err(ConfigIssue::SingleTableRequired {
+                // Either no output table at all, or the two found plus
+                // whatever the iterator still holds.
+                output_tables: first.map_or(0, |_| 2 + output_tables.count()),
+            }
+            .into()),
         }
     }
 

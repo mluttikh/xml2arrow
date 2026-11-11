@@ -502,6 +502,15 @@ impl fmt::Display for ConfigIssue {
     }
 }
 
+impl From<ConfigIssue> for Error {
+    /// Every configuration problem reaches callers as
+    /// [`Error::InvalidConfig`], so validation can `return Err(issue.into())`
+    /// and the reader sees the issue rather than the wrapper around it.
+    fn from(reason: ConfigIssue) -> Self {
+        Error::InvalidConfig { reason }
+    }
+}
+
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
@@ -678,6 +687,17 @@ mod tests {
             | Error::UnsupportedConversion { .. }
             | Error::InvalidConfig { .. } => {}
         }
+    }
+
+    #[test]
+    fn config_issue_converts_into_invalid_config() {
+        let err: Error = ConfigIssue::EmptyTableName.into();
+        assert!(matches!(
+            err,
+            Error::InvalidConfig {
+                reason: ConfigIssue::EmptyTableName
+            }
+        ));
     }
 
     fn sample_of_each_variant() -> Vec<Error> {

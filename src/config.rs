@@ -263,106 +263,120 @@ impl Config {
     ///
     /// Returns an error if any of the above constraints are violated.
     pub fn validate(&self) -> Result<()> {
-        // --- Table-level checks ---
+        // One pass per table rather than one pass per concern, so the first
+        // error a broken config reports is the first problem in document
+        // order rather than the first problem of whichever kind is checked
+        // earliest. The helpers below are in the order a reader meets their
+        // keys in the YAML.
         let mut table_names = HashSet::with_capacity(self.tables.len());
         for (table_idx, table) in self.tables.iter().enumerate() {
-            if table.name.is_empty() {
-                return Err(Error::InvalidConfig {
-                    reason: ConfigIssue::EmptyTableName,
-                });
+            Self::validate_table_name(table, &mut table_names)?;
+            let table_path = self.validate_table_path(table, table_idx)?;
+            Self::validate_table_fields(table, table_path)?;
+        }
+        Ok(())
+    }
+
+    /// A table's name must be non-empty and unique: output is keyed by name,
+    /// so a second table of the same name would replace the first.
+    fn validate_table_name<'a>(
+        table: &'a TableConfig,
+        table_names: &mut HashSet<&'a String>,
+    ) -> Result<()> {
+        if table.name.is_empty() {
+            return Err(ConfigIssue::EmptyTableName.into());
+        }
+        if !table_names.insert(&table.name) {
+            return Err(ConfigIssue::DuplicateTableName {
+                name: table.name.clone(),
             }
-            if !table_names.insert(&table.name) {
-                return Err(Error::InvalidConfig {
-                    reason: ConfigIssue::DuplicateTableName {
-                        name: table.name.clone(),
-                    },
-                });
+            .into());
+        }
+        Ok(())
+    }
+
+    /// A table must name an element, and no earlier table may name the same
+    /// one. Returns the path, which the field checks compare against.
+    fn validate_table_path<'a>(&self, table: &'a TableConfig, table_idx: usize) -> Result<&'a str> {
+        // `xml_path` is optional in the struct so that a later format can
+        // spell the element with a different key; until one exists, a table
+        // without it names no element at all.
+        let Some(table_path) = table.xml_path.as_deref() else {
+            return Err(ConfigIssue::TablePathMissing {
+                table: table.name.clone(),
             }
-            // `xml_path` is optional in the struct so that a later format
-            // can spell the element with a different key; until one exists, a
-            // table without it names no element at all.
-            let Some(table_path) = table.xml_path.as_deref() else {
-                return Err(Error::InvalidConfig {
-                    reason: ConfigIssue::TablePathMissing {
-                        table: table.name.clone(),
-                    },
-                });
+            .into());
+        };
+        if table_path.is_empty() {
+            return Err(ConfigIssue::EmptyTablePath {
+                table: table.name.clone(),
+            }
+            .into());
+        }
+        // Duplicate-path detection compares normalized segments so that
+        // "/data", "data" and "/data/" — which all resolve to the same
+        // registry node — count as duplicates. A pairwise scan (rather than a
+        // hash set of built keys) keeps `Parser::new` free of per-table
+        // allocations; table counts are small.
+        for earlier_table in &self.tables[..table_idx] {
+            if paths_equal(earlier_table.scope(), table_path) {
+                return Err(ConfigIssue::DuplicateTablePath {
+                    table_a: earlier_table.name.clone(),
+                    table_b: table.name.clone(),
+                    path: table_path.to_string(),
+                }
+                .into());
+            }
+        }
+        Ok(table_path)
+    }
+
+    /// Each field needs a name unique within its table, a location inside the
+    /// table's element, and a data type its scale and offset apply to.
+    fn validate_table_fields(table: &TableConfig, table_path: &str) -> Result<()> {
+        let mut field_names = HashSet::with_capacity(table.fields.len());
+        for field in &table.fields {
+            if field.name.is_empty() {
+                return Err(ConfigIssue::EmptyFieldName {
+                    table: table.name.clone(),
+                }
+                .into());
+            }
+            if !field_names.insert(&field.name) {
+                return Err(ConfigIssue::DuplicateFieldName {
+                    table: table.name.clone(),
+                    field: field.name.clone(),
+                }
+                .into());
+            }
+            let Some(field_path) = field.xml_path.as_deref() else {
+                return Err(ConfigIssue::FieldPathMissing {
+                    table: table.name.clone(),
+                    field: field.name.clone(),
+                }
+                .into());
             };
-            if table_path.is_empty() {
-                return Err(Error::InvalidConfig {
-                    reason: ConfigIssue::EmptyTablePath {
-                        table: table.name.clone(),
-                    },
-                });
-            }
-            // Duplicate-path detection compares normalized segments so that
-            // "/data", "data" and "/data/" — which all resolve to the same
-            // registry node — count as duplicates. A pairwise scan (rather
-            // than a hash set of built keys) keeps `Parser::new` free of
-            // per-table allocations; table counts are small.
-            for earlier_table in &self.tables[..table_idx] {
-                if paths_equal(earlier_table.scope(), table_path) {
-                    return Err(Error::InvalidConfig {
-                        reason: ConfigIssue::DuplicateTablePath {
-                            table_a: earlier_table.name.clone(),
-                            table_b: table.name.clone(),
-                            path: table_path.to_string(),
-                        },
-                    });
+            if field_path.is_empty() {
+                return Err(ConfigIssue::EmptyFieldPath {
+                    table: table.name.clone(),
+                    field: field.name.clone(),
                 }
+                .into());
             }
 
-            // --- Field-level checks within this table ---
-            let mut field_names = HashSet::with_capacity(table.fields.len());
-            for field in &table.fields {
-                if field.name.is_empty() {
-                    return Err(Error::InvalidConfig {
-                        reason: ConfigIssue::EmptyFieldName {
-                            table: table.name.clone(),
-                        },
-                    });
+            // Compared per segment: the root table "/" has no segments and so
+            // accepts any field path.
+            if !path_is_under(field_path, table_path) {
+                return Err(ConfigIssue::FieldPathNotUnderTable {
+                    table: table.name.clone(),
+                    table_path: table_path.to_string(),
+                    field: field.name.clone(),
+                    field_path: field_path.to_string(),
                 }
-                if !field_names.insert(&field.name) {
-                    return Err(Error::InvalidConfig {
-                        reason: ConfigIssue::DuplicateFieldName {
-                            table: table.name.clone(),
-                            field: field.name.clone(),
-                        },
-                    });
-                }
-                let Some(field_path) = field.xml_path.as_deref() else {
-                    return Err(Error::InvalidConfig {
-                        reason: ConfigIssue::FieldPathMissing {
-                            table: table.name.clone(),
-                            field: field.name.clone(),
-                        },
-                    });
-                };
-                if field_path.is_empty() {
-                    return Err(Error::InvalidConfig {
-                        reason: ConfigIssue::EmptyFieldPath {
-                            table: table.name.clone(),
-                            field: field.name.clone(),
-                        },
-                    });
-                }
-
-                // Field path must be under the table path, compared per
-                // segment (the root table "/" has no segments and thus
-                // accepts any field path).
-                if !path_is_under(field_path, table_path) {
-                    return Err(Error::InvalidConfig {
-                        reason: ConfigIssue::FieldPathNotUnderTable {
-                            table: table.name.clone(),
-                            table_path: table_path.to_string(),
-                            field: field.name.clone(),
-                            field_path: field_path.to_string(),
-                        },
-                    });
-                }
-
-                field.validate()?;
+                .into());
             }
+
+            field.validate()?;
         }
         Ok(())
     }
