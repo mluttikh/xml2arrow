@@ -660,7 +660,13 @@ impl From<Error> for PyErr {
     fn from(value: Error) -> Self {
         match value {
             Error::Io(e) => e.into(),
-            Error::Utf8Error(e) => e.into(),
+            // A `Utf8` field's bytes were not valid UTF-8: a value that failed
+            // to decode into its configured type, like any other `ParseError`.
+            // Python's own `UnicodeDecodeError` would need the offending bytes,
+            // which this variant does not carry. (pyo3 before 0.29 converted
+            // the bare `Utf8Error` with a constructor that could not succeed,
+            // so callers saw a `TypeError`.)
+            Error::Utf8Error(e) => ParseError::new_err(e.to_string()),
             Error::Arrow(e) => PyArrowException::new_err(e.to_string()),
             Error::XmlParsing(e) => match recover_py_err(&e) {
                 Some(py_err) => py_err,
@@ -968,6 +974,23 @@ mod tests {
                     recovered.value(py).to_string(),
                     "I/O operation on closed file"
                 );
+            });
+        }
+
+        #[test]
+        fn invalid_utf8_maps_to_parse_error() {
+            // pyo3 0.29 removed `From<Utf8Error> for PyErr`, whose constructor
+            // could never succeed and surfaced as a `TypeError`. The mapping is
+            // now explicit: a value that failed to decode, under the
+            // package's own base exception.
+            let invalid: Vec<u8> = vec![b'a', 0xFF];
+            let err = Error::Utf8Error(std::str::from_utf8(&invalid).unwrap_err());
+            let py_err: PyErr = err.into();
+            Python::initialize();
+            Python::attach(|py| {
+                assert!(py_err.is_instance_of::<ParseError>(py), "got: {py_err}");
+                assert!(py_err.is_instance_of::<Xml2ArrowError>(py));
+                assert!(py_err.value(py).to_string().contains("invalid utf-8"));
             });
         }
 
