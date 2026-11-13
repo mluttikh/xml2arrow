@@ -140,7 +140,7 @@ dependencies = [
  "arrow-ord",
  "arrow-schema",
  "arrow-select",
- "atoi 3.1.1",
+ "atoi",
  "base64",
  "chrono",
  "half",
@@ -305,15 +305,6 @@ dependencies = [
  "num-traits",
  "regex",
  "regex-syntax",
-]
-
-[[package]]
-name = "atoi"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f28d99ec8bfea296261ca1af174f24225171fea9664ba9003cbebee704810528"
-dependencies = [
- "num-traits",
 ]
 
 [[package]]
@@ -1729,7 +1720,7 @@ version = "0.20.0"
 dependencies = [
  "approx",
  "arrow",
- "atoi 2.0.0",
+ "atoi",
  "codspeed-criterion-compat",
  "criterion",
  "derive_more",
