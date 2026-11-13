@@ -1431,3 +1431,66 @@ fn a_config_without_xml_path_is_rejected_at_load() {
         "{field}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Reader errors
+// ---------------------------------------------------------------------------
+
+/// A reader that yields some bytes and then fails, like a dropped connection.
+struct FailingReader {
+    data: &'static [u8],
+}
+
+impl std::io::Read for FailingReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.data.is_empty() {
+            return Err(std::io::Error::other("connection reset"));
+        }
+        let n = buf.len().min(self.data.len());
+        buf[..n].copy_from_slice(&self.data[..n]);
+        self.data = &self.data[n..];
+        Ok(n)
+    }
+}
+
+/// The reader's errors are opaque, so `XmlError::io_error` is how a caller
+/// tells a failed read (worth retrying) from a malformed document (not).
+#[test]
+fn reader_errors_distinguish_failed_reads_from_malformed_xml() {
+    let config: Config = yaml_serde::from_str(
+        r#"
+tables:
+  - name: items
+    xml_path: /data
+    levels: []
+    fields:
+      - {name: v, xml_path: /data/item/v, data_type: Utf8}
+"#,
+    )
+    .unwrap();
+    let parser = Parser::new(&config).unwrap();
+
+    let reader = BufReader::new(FailingReader {
+        data: b"<data><item><v>1</v></item>",
+    });
+    match parser.parse(reader).unwrap_err() {
+        xml2arrow::Error::XmlParsing(e) => {
+            let io = e.io_error().expect("a failed read carries its I/O error");
+            assert_eq!(io.to_string(), "connection reset");
+        }
+        other => panic!("expected XmlParsing, got {other}"),
+    }
+
+    match parser
+        .parse_slice(b"<data><item></v></item></data>")
+        .unwrap_err()
+    {
+        xml2arrow::Error::XmlParsing(e) => {
+            assert!(
+                e.io_error().is_none(),
+                "malformed XML is not an I/O error: {e}"
+            );
+        }
+        other => panic!("expected XmlParsing, got {other}"),
+    }
+}

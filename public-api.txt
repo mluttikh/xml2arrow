@@ -283,9 +283,8 @@ pub xml2arrow::errors::Error::ValueTooLarge::field: alloc::sync::Arc<str>
 pub xml2arrow::errors::Error::ValueTooLarge::limit: usize
 pub xml2arrow::errors::Error::ValueTooLarge::location: alloc::boxed::Box<xml2arrow::errors::ErrorLocation>
 pub xml2arrow::errors::Error::ValueTooLarge::path: alloc::sync::Arc<str>
-pub xml2arrow::errors::Error::XmlParseAttr(quick_xml::events::attributes::AttrError)
-pub xml2arrow::errors::Error::XmlParseEncoding(quick_xml::encoding::EncodingError)
-pub xml2arrow::errors::Error::XmlParsing(quick_xml::errors::Error)
+pub xml2arrow::errors::Error::XmlParseAttr(xml2arrow::errors::XmlError)
+pub xml2arrow::errors::Error::XmlParsing(xml2arrow::errors::XmlError)
 pub xml2arrow::errors::Error::Yaml(yaml_serde::error::Error)
 impl core::convert::From<arrow_schema::error::ArrowError> for xml2arrow::errors::Error
 pub fn xml2arrow::errors::Error::from(arrow_schema::error::ArrowError) -> Self
@@ -293,12 +292,6 @@ impl core::convert::From<core::io::error::Error> for xml2arrow::errors::Error
 pub fn xml2arrow::errors::Error::from(core::io::error::Error) -> Self
 impl core::convert::From<core::str::error::Utf8Error> for xml2arrow::errors::Error
 pub fn xml2arrow::errors::Error::from(core::str::error::Utf8Error) -> Self
-impl core::convert::From<quick_xml::encoding::EncodingError> for xml2arrow::errors::Error
-pub fn xml2arrow::errors::Error::from(quick_xml::encoding::EncodingError) -> Self
-impl core::convert::From<quick_xml::errors::Error> for xml2arrow::errors::Error
-pub fn xml2arrow::errors::Error::from(quick_xml::errors::Error) -> Self
-impl core::convert::From<quick_xml::events::attributes::AttrError> for xml2arrow::errors::Error
-pub fn xml2arrow::errors::Error::from(quick_xml::events::attributes::AttrError) -> Self
 impl core::convert::From<xml2arrow::errors::ConfigIssue> for xml2arrow::errors::Error
 pub fn xml2arrow::errors::Error::from(xml2arrow::errors::ConfigIssue) -> Self
 impl core::convert::From<yaml_serde::error::Error> for xml2arrow::errors::Error
@@ -371,6 +364,22 @@ impl core::marker::Unpin for xml2arrow::errors::UnmatchedField
 impl core::marker::UnsafeUnpin for xml2arrow::errors::UnmatchedField
 impl core::panic::unwind_safe::RefUnwindSafe for xml2arrow::errors::UnmatchedField
 impl core::panic::unwind_safe::UnwindSafe for xml2arrow::errors::UnmatchedField
+pub struct xml2arrow::errors::XmlError(_)
+impl xml2arrow::errors::XmlError
+pub fn xml2arrow::errors::XmlError::io_error(&self) -> core::option::Option<&core::io::error::Error>
+impl core::error::Error for xml2arrow::errors::XmlError
+pub fn xml2arrow::errors::XmlError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for xml2arrow::errors::XmlError
+pub fn xml2arrow::errors::XmlError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for xml2arrow::errors::XmlError
+pub fn xml2arrow::errors::XmlError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for xml2arrow::errors::XmlError
+impl core::marker::Send for xml2arrow::errors::XmlError
+impl core::marker::Sync for xml2arrow::errors::XmlError
+impl core::marker::Unpin for xml2arrow::errors::XmlError
+impl core::marker::UnsafeUnpin for xml2arrow::errors::XmlError
+impl !core::panic::unwind_safe::RefUnwindSafe for xml2arrow::errors::XmlError
+impl !core::panic::unwind_safe::UnwindSafe for xml2arrow::errors::XmlError
 pub type xml2arrow::errors::Result<T> = core::result::Result<T, xml2arrow::errors::Error>
 pub mod xml2arrow::lint
 #[non_exhaustive] pub enum xml2arrow::lint::Lint
@@ -479,9 +488,8 @@ pub xml2arrow::Error::ValueTooLarge::field: alloc::sync::Arc<str>
 pub xml2arrow::Error::ValueTooLarge::limit: usize
 pub xml2arrow::Error::ValueTooLarge::location: alloc::boxed::Box<xml2arrow::errors::ErrorLocation>
 pub xml2arrow::Error::ValueTooLarge::path: alloc::sync::Arc<str>
-pub xml2arrow::Error::XmlParseAttr(quick_xml::events::attributes::AttrError)
-pub xml2arrow::Error::XmlParseEncoding(quick_xml::encoding::EncodingError)
-pub xml2arrow::Error::XmlParsing(quick_xml::errors::Error)
+pub xml2arrow::Error::XmlParseAttr(xml2arrow::errors::XmlError)
+pub xml2arrow::Error::XmlParsing(xml2arrow::errors::XmlError)
 pub xml2arrow::Error::Yaml(yaml_serde::error::Error)
 impl core::convert::From<arrow_schema::error::ArrowError> for xml2arrow::errors::Error
 pub fn xml2arrow::errors::Error::from(arrow_schema::error::ArrowError) -> Self
@@ -489,12 +497,6 @@ impl core::convert::From<core::io::error::Error> for xml2arrow::errors::Error
 pub fn xml2arrow::errors::Error::from(core::io::error::Error) -> Self
 impl core::convert::From<core::str::error::Utf8Error> for xml2arrow::errors::Error
 pub fn xml2arrow::errors::Error::from(core::str::error::Utf8Error) -> Self
-impl core::convert::From<quick_xml::encoding::EncodingError> for xml2arrow::errors::Error
-pub fn xml2arrow::errors::Error::from(quick_xml::encoding::EncodingError) -> Self
-impl core::convert::From<quick_xml::errors::Error> for xml2arrow::errors::Error
-pub fn xml2arrow::errors::Error::from(quick_xml::errors::Error) -> Self
-impl core::convert::From<quick_xml::events::attributes::AttrError> for xml2arrow::errors::Error
-pub fn xml2arrow::errors::Error::from(quick_xml::events::attributes::AttrError) -> Self
 impl core::convert::From<xml2arrow::errors::ConfigIssue> for xml2arrow::errors::Error
 pub fn xml2arrow::errors::Error::from(xml2arrow::errors::ConfigIssue) -> Self
 impl core::convert::From<yaml_serde::error::Error> for xml2arrow::errors::Error
