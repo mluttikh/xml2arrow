@@ -1758,7 +1758,7 @@ fn handle_general_ref(
     node_id: PathNodeId,
     xml_to_arrow_converter: &mut XmlToArrowConverter,
 ) -> Result<()> {
-    if let Some(ch) = e.resolve_char_ref()? {
+    if let Some(ch) = e.resolve_char_ref().map_err(Error::from_reader)? {
         let mut utf8_buf = [0u8; 4];
         let encoded = ch.encode_utf8(&mut utf8_buf);
         xml_to_arrow_converter.set_field_value_for_node(node_id, encoded.as_bytes());
@@ -1991,7 +1991,9 @@ fn process_xml_events<B: BufRead, const PARSE_ATTRIBUTES: bool>(
     let decoder = reader.decoder();
 
     loop {
-        let event = reader.read_event_into(&mut buf)?;
+        let event = reader
+            .read_event_into(&mut buf)
+            .map_err(Error::from_reader)?;
         let action = handle_event::<PARSE_ATTRIBUTES>(
             event,
             decoder,
@@ -2024,7 +2026,7 @@ fn process_xml_events_slice<const PARSE_ATTRIBUTES: bool>(
     let decoder = reader.decoder();
 
     loop {
-        let event = reader.read_event()?;
+        let event = reader.read_event().map_err(Error::from_reader)?;
         let action = handle_event::<PARSE_ATTRIBUTES>(
             event,
             decoder,
@@ -2058,7 +2060,7 @@ fn parse_attributes(
     // to each attribute key (see `ParserOptions::strip_namespaces`).
     let strip_namespaces = xml_to_arrow_converter.strip_namespaces;
     for attribute in attributes {
-        let attribute = attribute?;
+        let attribute = attribute.map_err(Error::from_attribute)?;
         let key = if strip_namespaces {
             attribute.key.local_name().into_inner()
         } else {
@@ -2099,8 +2101,9 @@ fn parse_attributes(
                 // `Implicit1_0` selects plain XML 1.0 normalization (no
                 // XML 1.1 extras), the same default the deprecated
                 // `decode_and_unescape_value` hardcoded.
-                let value =
-                    attribute.decoded_and_normalized_value(XmlVersion::Implicit1_0, decoder)?;
+                let value = attribute
+                    .decoded_and_normalized_value(XmlVersion::Implicit1_0, decoder)
+                    .map_err(Error::from_reader)?;
                 xml_to_arrow_converter.set_field_value_for_node(id, value.as_bytes());
             } else {
                 xml_to_arrow_converter.set_field_value_for_node(id, raw);
@@ -2419,7 +2422,7 @@ impl<'p, S: EventSource> Iterator for BatchStream<'p, S> {
                         Ok(event) => event,
                         Err(e) => {
                             self.state = StreamState::Done;
-                            return Some(Err(e.into()));
+                            return Some(Err(Error::from_reader(e)));
                         }
                     };
                     // Runtime dispatch on `needs_attrs` where the collect

@@ -7,7 +7,7 @@ parser options and data types without breaking your build.
 1. [Dependencies](#dependencies): arrow 60, pyo3 0.29, and Rust 1.88.
 2. [Required](#required-mechanical-source-changes): source changes, because
    five public types became `#[non_exhaustive]`, two error variants gained
-   a field, and `xml_path` became optional.
+   a field, `xml_path` became optional, and reader errors became opaque.
 3. [Behavioral](#behavioral-changes): value errors end with document
    coordinates, and truncated documents are rejected.
 4. [Deprecated](#deprecated-still-working): what still works, and what
@@ -158,6 +158,29 @@ Error::MissingRequiredField { field, path } => ...
 // after
 Error::MissingRequiredField { field, path, .. } => ...
 ```
+
+### Reader errors are opaque
+
+`Error::XmlParsing` and `Error::XmlParseAttr` now carry an
+`xml2arrow::errors::XmlError` instead of quick-xml's own error types, and the
+`From` conversions from those types are gone. The XML reader is an
+implementation detail; exposing its types made every upgrade of it a breaking
+change to this crate.
+
+Messages and the `source()` chain are unchanged, so code that only displays or
+logs these errors needs nothing. Code that matched on quick-xml's error to
+tell a failed read from a malformed document uses `XmlError::io_error`:
+
+```rust
+// before
+Error::XmlParsing(quick_xml::Error::Io(e)) => retry(e),
+
+// after
+Error::XmlParsing(e) if e.io_error().is_some() => retry(e),
+```
+
+`Error::XmlParseEncoding` is removed. Nothing raised it: the reader reports
+undecodable input inside `Error::XmlParsing`.
 
 ## Behavioral changes
 

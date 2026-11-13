@@ -31,6 +31,75 @@ use pyo3::create_exception;
 /// The result type of every fallible operation in this crate.
 pub type Result<T> = core::result::Result<T, Error>;
 
+/// An error raised by the XML reader, carried by [`Error::XmlParsing`] and
+/// [`Error::XmlParseAttr`].
+///
+/// Opaque on purpose. The reader is an implementation detail, and exposing its
+/// error types would make every upgrade of it a breaking change to this crate
+/// — including upgrades held back for performance reasons. `Display` gives the
+/// reader's message and [`std::error::Error::source`] continues the chain
+/// below it, exactly as the reader's own error would.
+#[derive(Debug)]
+pub struct XmlError(XmlErrorKind);
+
+#[derive(Debug)]
+enum XmlErrorKind {
+    Reader(quick_xml::Error),
+    Attribute(quick_xml::events::attributes::AttrError),
+}
+
+impl XmlError {
+    /// The I/O error that interrupted reading, when the failure was in the
+    /// input rather than in the document: a file that could not be read, a
+    /// dropped connection, a decompression adapter that failed.
+    #[must_use]
+    pub fn io_error(&self) -> Option<&std::io::Error> {
+        match &self.0 {
+            XmlErrorKind::Reader(quick_xml::Error::Io(e)) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for XmlError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.0 {
+            XmlErrorKind::Reader(e) => write!(f, "{e}"),
+            XmlErrorKind::Attribute(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for XmlError {
+    /// Skips the reader's own error and continues with *its* source, so the
+    /// chain has the same shape it had when `Error` held the reader's error
+    /// directly, without exposing that error's type.
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.0 {
+            XmlErrorKind::Reader(e) => e.source(),
+            XmlErrorKind::Attribute(e) => e.source(),
+        }
+    }
+}
+
+// The conversions from the reader's errors are crate-private: a public
+// `From` impl would name the reader's types in this crate's API, which is the
+// coupling `XmlError` exists to avoid. Call sites use `.map_err(...)`. Cold and
+// outlined, so the error arms add nothing to the hot loops that call them.
+impl Error {
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn from_reader(e: quick_xml::Error) -> Self {
+        Error::XmlParsing(XmlError(XmlErrorKind::Reader(e)))
+    }
+
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn from_attribute(e: quick_xml::events::attributes::AttrError) -> Self {
+        Error::XmlParseAttr(XmlError(XmlErrorKind::Attribute(e)))
+    }
+}
+
 /// The crate's top-level error type.
 ///
 /// Marked `#[non_exhaustive]` to keep future variant additions backward
@@ -38,15 +107,12 @@ pub type Result<T> = core::result::Result<T, Error>;
 #[derive(Debug, From)]
 #[non_exhaustive]
 pub enum Error {
-    /// Errors from the `quick-xml` crate during XML parsing.
-    #[from]
-    XmlParsing(quick_xml::Error),
-    /// Errors from the `quick-xml` crate that can be raised during parsing attributes.
-    #[from]
-    XmlParseAttr(quick_xml::events::attributes::AttrError),
-    /// Errors from the `quick-xml` crate that can be raised when decoding or encoding.
-    #[from]
-    XmlParseEncoding(quick_xml::encoding::EncodingError),
+    /// The XML reader rejected the document (malformed markup, a mismatched
+    /// end tag, a bad character reference), or reading the input failed;
+    /// [`XmlError::io_error`] tells the two apart.
+    XmlParsing(XmlError),
+    /// An attribute was malformed, for example duplicated or unquoted.
+    XmlParseAttr(XmlError),
     /// Errors from the Serde YAML crate during configuration parsing.
     #[from]
     Yaml(yaml_serde::Error),
@@ -393,7 +459,6 @@ impl fmt::Display for Error {
         match self {
             Error::XmlParsing(e) => write!(f, "{e}"),
             Error::XmlParseAttr(e) => write!(f, "{e}"),
-            Error::XmlParseEncoding(e) => write!(f, "{e}"),
             Error::Yaml(e) => write!(f, "{e}"),
             Error::Io(e) => write!(f, "{e}"),
             Error::Arrow(e) => write!(f, "{e}"),
@@ -567,7 +632,6 @@ impl std::error::Error for Error {
         match self {
             Error::XmlParsing(e) => Some(e),
             Error::XmlParseAttr(e) => Some(e),
-            Error::XmlParseEncoding(e) => Some(e),
             Error::Yaml(e) => Some(e),
             Error::Io(e) => Some(e),
             Error::Arrow(e) => Some(e),
@@ -647,11 +711,8 @@ create_exception!(
 /// `Python::attach` is only reached when a `PyErr` is actually present,
 /// which implies a live interpreter produced it.
 #[cfg(feature = "python")]
-fn recover_py_err(err: &quick_xml::Error) -> Option<PyErr> {
-    let quick_xml::Error::Io(io_err) = err else {
-        return None;
-    };
-    let py_err = io_err.get_ref()?.downcast_ref::<PyErr>()?;
+fn recover_py_err(err: &XmlError) -> Option<PyErr> {
+    let py_err = err.io_error()?.get_ref()?.downcast_ref::<PyErr>()?;
     Some(Python::attach(|py| py_err.clone_ref(py)))
 }
 
@@ -673,7 +734,6 @@ impl From<Error> for PyErr {
                 None => XmlParsingError::new_err(e.to_string()),
             },
             Error::XmlParseAttr(e) => XmlParsingError::new_err(e.to_string()),
-            Error::XmlParseEncoding(e) => XmlParsingError::new_err(e.to_string()),
             Error::Yaml(e) => YamlParsingError::new_err(e.to_string()),
             e @ Error::ParseError { .. } => ParseError::new_err(e.to_string()),
             e @ Error::MissingRequiredField { .. } => ParseError::new_err(e.to_string()),
@@ -730,7 +790,6 @@ mod tests {
         match e {
             Error::XmlParsing(_)
             | Error::XmlParseAttr(_)
-            | Error::XmlParseEncoding(_)
             | Error::Yaml(_)
             | Error::Io(_)
             | Error::Arrow(_)
@@ -757,6 +816,38 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn xml_error_keeps_the_readers_message_and_chain() {
+        // `XmlError` hides the reader's type but must not change what callers
+        // see: the same message, and a `source()` chain of the same shape.
+        let reader_err = quick_xml::Error::Syntax(quick_xml::errors::SyntaxError::UnclosedTag);
+        let expected_message = reader_err.to_string();
+        let err = Error::from_reader(reader_err);
+        assert_eq!(err.to_string(), expected_message);
+        let Error::XmlParsing(xml) = &err else {
+            panic!("expected XmlParsing, got {err:?}");
+        };
+        assert!(
+            xml.io_error().is_none(),
+            "a syntax error is not an I/O error"
+        );
+
+        let io = std::io::Error::other("disk on fire");
+        let err = Error::from_reader(quick_xml::Error::Io(Arc::new(io)));
+        let Error::XmlParsing(xml) = &err else {
+            panic!("expected XmlParsing, got {err:?}");
+        };
+        assert_eq!(
+            xml.io_error().map(|e| e.to_string()).as_deref(),
+            Some("disk on fire")
+        );
+        // Error -> XmlError -> io::Error: the reader's own error is skipped,
+        // so the I/O failure is still exactly two hops below `Error`.
+        let first = std::error::Error::source(&err).expect("Error has a source");
+        let second = first.source().expect("XmlError continues the chain");
+        assert_eq!(second.to_string(), "disk on fire");
+    }
+
     fn sample_of_each_variant() -> Vec<Error> {
         // A deliberately broken UTF-8 sequence. Building the bytes from a
         // runtime `Vec` rather than a literal hides it from rustc's
@@ -766,11 +857,10 @@ mod tests {
         let bad_utf8 = std::str::from_utf8(&invalid).unwrap_err();
 
         vec![
-            Error::XmlParsing(quick_xml::Error::Syntax(
+            Error::from_reader(quick_xml::Error::Syntax(
                 quick_xml::errors::SyntaxError::UnclosedTag,
             )),
-            Error::XmlParseAttr(quick_xml::events::attributes::AttrError::Duplicated(0, 0)),
-            Error::XmlParseEncoding(quick_xml::encoding::EncodingError::from(bad_utf8)),
+            Error::from_attribute(quick_xml::events::attributes::AttrError::Duplicated(0, 0)),
             Error::Yaml(yaml_serde::from_str::<u32>("not a number").unwrap_err()),
             Error::Io(std::io::Error::other("io")),
             Error::Arrow(arrow::error::ArrowError::ComputeError("compute".into())),
@@ -893,7 +983,6 @@ mod tests {
                 err,
                 Error::XmlParsing(_)
                     | Error::XmlParseAttr(_)
-                    | Error::XmlParseEncoding(_)
                     | Error::Yaml(_)
                     | Error::Io(_)
                     | Error::Arrow(_)
@@ -962,7 +1051,7 @@ mod tests {
 
             let original = pyo3::exceptions::PyValueError::new_err("I/O operation on closed file");
             let io_err: std::io::Error = original.into();
-            let err = Error::XmlParsing(quick_xml::Error::Io(Arc::new(io_err)));
+            let err = Error::from_reader(quick_xml::Error::Io(Arc::new(io_err)));
 
             let recovered: PyErr = err.into();
             Python::attach(|py| {
@@ -1000,7 +1089,7 @@ mod tests {
             // its established mapping; recovery only fires for wrapped
             // PyErrs.
             let io_err = std::io::Error::other("disk on fire");
-            let err = Error::XmlParsing(quick_xml::Error::Io(Arc::new(io_err)));
+            let err = Error::from_reader(quick_xml::Error::Io(Arc::new(io_err)));
             let py_err: PyErr = err.into();
             // `new_err` is lazy, so inspecting the type doesn't need an
             // initialized interpreter beyond what the sibling test did.
