@@ -280,7 +280,9 @@ fn snapshot_batch(name: &str, batch: &RecordBatch) -> String {
 /// Arrow keeps metadata in a `HashMap`, so its order is arbitrary. Sorted and
 /// quoted, the rendering is stable, and a value with a separator or trailing
 /// space in it stays readable.
-fn render_metadata(metadata: &std::collections::HashMap<String, String>) -> String {
+fn render_metadata(metadata: &arrow::datatypes::Metadata) -> String {
+    // Sorted explicitly rather than trusting the container's order, so the
+    // snapshot stays stable whatever map arrow stores metadata in.
     let mut entries: Vec<(&String, &String)> = metadata.iter().collect();
     entries.sort();
     entries

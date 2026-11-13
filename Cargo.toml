@@ -10,7 +10,7 @@ categories = ["data-structures", "encoding"]
 readme = "README.md"
 
 [dependencies]
-arrow = "59.0.0"
+arrow = "60.1.0"
 derive_more = { version = "2.1.1", features = ["from"] }
 indexmap = "2.14.0"
 quick-xml = "0.41"
@@ -31,7 +31,7 @@ codspeed-criterion-compat = "4.4.1"
 python = ["pyo3", "arrow/pyarrow"]
 
 [dependencies.pyo3]
-version = "0.28"
+version = "0.29"
 default-features = false
 optional = true
 

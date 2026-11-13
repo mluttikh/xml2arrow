@@ -4,19 +4,35 @@
 mechanical, and they are what lets every later release add configuration keys,
 parser options and data types without breaking your build.
 
-1. [Required](#required-mechanical-source-changes): source changes, because
-   five public types became `#[non_exhaustive]` and two error variants gained
-   a field.
-2. [Behavioral](#behavioral-changes): value errors end with document
-   coordinates.
-3. [Deprecated](#deprecated-still-working): what still works, and what
+1. [Dependencies](#dependencies): arrow 60, pyo3 0.29, and Rust 1.88.
+2. [Required](#required-mechanical-source-changes): source changes, because
+   five public types became `#[non_exhaustive]`, two error variants gained
+   a field, and `xml_path` became optional.
+3. [Behavioral](#behavioral-changes): value errors end with document
+   coordinates, and truncated documents are rejected.
+4. [Deprecated](#deprecated-still-working): what still works, and what
    replaces it.
-4. [New](#new-no-action-needed): additions that need no action.
+5. [New](#new-no-action-needed): additions that need no action.
 
 If you load configs from YAML, or build them with `TableConfig::new` and
 `FieldConfigBuilder`, and you do not `match` on `DType` or destructure
 `Error::ParseError` or `Error::MissingRequiredField` without `..`, the required
 work is nothing.
+
+## Dependencies
+
+- **arrow 60.** The batches this crate returns are arrow 60 types. If your
+  code also depends on `arrow` directly and passes those batches to it, move
+  that dependency to 60 as well; two arrow major versions in one build are
+  distinct, incompatible types.
+- **Rust 1.88** is the minimum, because arrow 60 requires it.
+- **pyo3 0.29**, under the `python` feature. arrow's `pyarrow` support pins
+  the pyo3 version, so the two move together. Python bindings built on this
+  crate must use pyo3 0.29.
+
+With the `python` feature, invalid UTF-8 in a `Utf8` field now raises the
+package's `ParseError`. Before 0.20 it surfaced as a `TypeError`, because the
+conversion pyo3 provided for it could never succeed; pyo3 0.29 removed it.
 
 ## Required: mechanical source changes
 
