@@ -101,6 +101,15 @@ field is `nullable`, an error otherwise. Trailing garbage after a number
 truncation. One exception to the missing-value rule: a missing non-nullable
 `Utf8` field yields an empty string `""` rather than an error.
 
+**Empty versus absent strings:** for a `Utf8` field, an element that is present
+but has no content — `<v></v>`, `<v/>`, `<v><![CDATA[]]></v>`, or whitespace
+only with `trim_text` — is the empty string `""`, just like an empty attribute
+(`a=""`). Only an element or attribute that is *absent* from the row is null
+(when the field is `nullable`). This follows XML itself: an empty element
+exists and its string value is `""` (XPath, XML Schema), and PostgreSQL's
+`XMLTABLE` and JAXB read it the same way. To treat empty strings as null, map
+them afterwards (e.g. `nullif` in Arrow compute, Polars or pandas).
+
 ### 2. Nested tables and `levels`
 
 When your XML has a parent–child relationship between tables, `levels` creates the

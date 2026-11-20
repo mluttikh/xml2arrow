@@ -739,6 +739,52 @@ fn test_unconfigured_elements_do_not_fabricate_rows() {
     assert_array_values!(batch, "id", &[1, 2], Int32Array);
 }
 
+#[test]
+fn test_empty_element_yields_empty_string_not_null() {
+    // Regression: a present element with no content (`<name></name>`,
+    // `<name/>`) used to read as null in a nullable Utf8 field —
+    // indistinguishable from an absent element, and inconsistent with an
+    // empty CDATA section and an empty attribute, which already read as "".
+    // Null is now reserved for absence.
+    let batches = parse_xml_file(
+        r#"<data>
+            <item code=""><name></name></item>
+            <item><name/></item>
+            <item><name><![CDATA[]]></name></item>
+            <item><name>x</name></item>
+            <item/>
+        </data>"#,
+        r#"
+        tables:
+          - name: items
+            xml_path: /data
+            levels: [item]
+            fields:
+              - name: name
+                xml_path: /data/item/name
+                data_type: Utf8
+                nullable: true
+              - name: code
+                xml_path: /data/item/@code
+                data_type: Utf8
+                nullable: true
+        "#,
+    );
+    let batch = batches.get("items").unwrap();
+    assert_array_values_option!(
+        batch,
+        "name",
+        vec![Some(""), Some(""), Some(""), Some("x"), None],
+        StringArray
+    );
+    assert_array_values_option!(
+        batch,
+        "code",
+        vec![Some(""), None, None, None, None],
+        StringArray
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Realistic end-to-end scenario
 // ---------------------------------------------------------------------------

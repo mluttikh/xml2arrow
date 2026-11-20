@@ -164,10 +164,21 @@ struct FieldBuilder {
     /// *entered* while `has_value` is already set for the current row, the
     /// element appeared twice — historically the raw bytes were silently
     /// concatenated ("1" + "2" → 12 for an Int32), fabricating values; now it
-    /// is a `ParseError` (see `check_element_not_repeated`). Text split
+    /// is a `ParseError` (see `enter_field_element`). Text split
     /// across multiple events *within* one element (text + CDATA, entity
     /// references) never trips this: no re-entry happens in between.
     has_value: bool,
+    /// Whether the field's *element* occurred in the current row, with or
+    /// without text. Distinct from `has_value` because XML distinguishes an
+    /// absent element from a present-but-empty one: `<v></v>` and `<v/>` are
+    /// the two spellings of an element with no content (XML 1.0 §3.1), whose
+    /// string value is `""` (XPath string-value; XSD reserves `xsi:nil` for
+    /// "no value"). Only the `Utf8` append consults it — an empty string is a
+    /// string, but not a number or a boolean.
+    ///
+    /// Kept apart from `has_value` so the repeated-element guard keeps its
+    /// "at most one *value-bearing* occurrence" rule: `<v/><v>2</v>` is legal.
+    present: bool,
     /// Pre-computed `meta.scale.is_some() || meta.offset.is_some()`. The
     /// per-row float append path is hot enough that gating the `Option` loads
     /// behind a single `bool` measurably outperforms unconditionally probing
@@ -349,6 +360,7 @@ impl FieldBuilder {
             meta: FieldMeta::from_config(field_config),
             array_builder,
             has_value: false,
+            present: false,
             has_transform,
             current_value: Vec::with_capacity(128),
             ever_matched: false,
@@ -380,12 +392,16 @@ impl FieldBuilder {
         }
         let value = self.current_value.as_slice();
         let has_value = self.has_value;
+        let present = self.present;
         let has_transform = self.has_transform;
         let fc = &self.meta;
 
         match &mut self.array_builder {
             TypedArrayBuilder::Utf8(b) => {
-                if has_value {
+                // A present element with no text is the empty string, not a
+                // null: only an *absent* element (or attribute) is missing.
+                // `value` is then empty, so the arm below appends `""`.
+                if has_value || present {
                     // UTF-8 is validated exactly once per row per Utf8 field
                     // (here), rather than once per text event in the hot loop.
                     // Numeric/boolean fields never pay this cost.
@@ -558,6 +574,7 @@ impl TableBuilder {
         self.save_row(indices)?;
         for field_builder in &mut self.field_builders {
             field_builder.has_value = false;
+            field_builder.present = false;
             field_builder.current_value.clear();
             // Per-row, like the two above. Exceeding the value cap is fatal
             // today, so the parse never reaches another row and leaving this
@@ -842,31 +859,52 @@ impl XmlToArrowConverter {
         }
     }
 
-    /// Rejects a repeated occurrence of a field's element within one row.
+    /// Records that a field's element was entered, rejecting a repeated
+    /// occurrence within one row.
     ///
     /// Called from the `Start`/`Empty` arms when the *entered* node carries
     /// field mappings (`info` is the `PathNodeInfo` those arms already hold,
-    /// so this adds no registry lookup). If a matching field of the current
-    /// table already accumulated a value in this row, the element is
-    /// appearing a second time — historically the raw bytes were silently
-    /// concatenated ("1" + "2" → 12 for an Int32), fabricating values that
-    /// never appeared in the document; now it is a `ParseError`.
+    /// so this adds no registry lookup). Takes the two converter fields it
+    /// touches rather than `&mut self`, because `info` is borrowed from
+    /// `compiled`: the disjoint borrows let the arms pass it straight through.
     ///
-    /// Value-less occurrences (`<v/><v>2</v>`) pass: nothing was captured, so
-    /// the rule is "at most one value-bearing occurrence per row". Duplicate
-    /// *attributes* (reachable with `validate_attributes: false`) are
-    /// intentionally exempt — attribute pseudo-nodes are entered inside
-    /// `parse_attributes`, which does not run this check, preserving the
-    /// documented concatenation behavior for trusted input.
+    /// Two jobs share the one loop over the node's fields:
+    ///
+    /// - **Repeat guard.** If a matching field of the current table already
+    ///   accumulated a value in this row, the element is appearing a second
+    ///   time — historically the raw bytes were silently concatenated
+    ///   ("1" + "2" → 12 for an Int32), fabricating values that never appeared
+    ///   in the document; now it is a `ParseError`. Value-less occurrences
+    ///   (`<v/><v>2</v>`) pass: nothing was captured, so the rule is "at most
+    ///   one value-bearing occurrence per row". Duplicate *attributes*
+    ///   (reachable with `validate_attributes: false`) are intentionally
+    ///   exempt — attribute pseudo-nodes are entered inside
+    ///   `parse_attributes`, which does not run this check, preserving the
+    ///   documented concatenation behavior for trusted input.
+    /// - **Presence.** Marks the field `present`, so an element with no text
+    ///   (`<v></v>`, `<v/>`) yields `""` for a `Utf8` field instead of the
+    ///   null reserved for an absent element, and counts as matched for
+    ///   `error_on_unmatched_fields` — the element proves the path is right.
+    ///   Both are stores into the cache line the `has_value` load just read.
     #[inline]
-    fn check_element_not_repeated(&self, info: &PathNodeInfo) -> Result<()> {
-        if let Some(current_entry) = self.builder_stack.last() {
+    fn enter_field_element(
+        table_builders: &mut [TableBuilder],
+        builder_stack: &[TableStackEntry],
+        info: &PathNodeInfo,
+    ) -> Result<()> {
+        if let Some(current_entry) = builder_stack.last() {
             let current_table_idx = current_entry.table_idx;
             for &(table_idx, field_idx) in &info.field_indices {
-                if table_idx == current_table_idx
-                    && self.table_builders[table_idx].field_builders[field_idx].has_value
-                {
-                    return Err(self.duplicate_value_error(table_idx, field_idx));
+                if table_idx == current_table_idx {
+                    let field_builder = &mut table_builders[table_idx].field_builders[field_idx];
+                    if field_builder.has_value {
+                        return Err(Self::duplicate_value_error(
+                            &table_builders[table_idx],
+                            field_idx,
+                        ));
+                    }
+                    field_builder.present = true;
+                    field_builder.ever_matched = true;
                 }
             }
         }
@@ -884,14 +922,13 @@ impl XmlToArrowConverter {
         }
     }
 
-    /// Builds the `DuplicateValue` error for `check_element_not_repeated`.
+    /// Builds the `DuplicateValue` error for `enter_field_element`.
     /// Out of line and cold so the check above stays a bare `has_value`
     /// branch in the per-element hot path; the allocations here only run
     /// when the parse is already failing.
     #[cold]
     #[inline(never)]
-    fn duplicate_value_error(&self, table_idx: usize, field_idx: usize) -> Error {
-        let table_builder = &self.table_builders[table_idx];
+    fn duplicate_value_error(table_builder: &TableBuilder, field_idx: usize) -> Error {
         let field_builder = &table_builder.field_builders[field_idx];
         Error::ParseError {
             field: Arc::from(field_builder.meta.name.as_str()),
@@ -1854,9 +1891,14 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
                         // Re-entering a field element whose row value is
                         // already set means the element appeared twice —
                         // rejected while `info` is in hand (no extra
-                        // registry read; see check_element_not_repeated).
+                        // registry read; see enter_field_element), which
+                        // also marks the field present for this row.
                         if !info.field_indices.is_empty() {
-                            xml_to_arrow_converter.check_element_not_repeated(info)?;
+                            XmlToArrowConverter::enter_field_element(
+                                &mut xml_to_arrow_converter.table_builders,
+                                &xml_to_arrow_converter.builder_stack,
+                                info,
+                            )?;
                         }
                         (Some(id), info.table_index, info.has_attribute_children)
                     }
@@ -1892,9 +1934,14 @@ fn handle_event<const PARSE_ATTRIBUTES: bool>(
             let (node_id_opt, table_index, has_attrs) =
                 match path_tracker.enter(name_bytes, &xml_to_arrow_converter.compiled.registry) {
                     Some((id, info)) => {
-                        // Same repeated-element guard as Event::Start.
+                        // Same repeat guard and presence mark as
+                        // Event::Start: `<v/>` is a present, empty element.
                         if !info.field_indices.is_empty() {
-                            xml_to_arrow_converter.check_element_not_repeated(info)?;
+                            XmlToArrowConverter::enter_field_element(
+                                &mut xml_to_arrow_converter.table_builders,
+                                &xml_to_arrow_converter.builder_stack,
+                                info,
+                            )?;
                         }
                         (Some(id), info.table_index, info.has_attribute_children)
                     }
@@ -3401,8 +3448,15 @@ mod tests {
         );
         let batch = record_batches.get("test").unwrap();
         assert_eq!(batch.num_rows(), 2);
-        assert_array_values_option!(batch, "value", vec![Some("1"), None], StringArray);
-        assert_array_values_option!(batch, "empty", vec![None, Some("not empty")], StringArray);
+        // A present element with no content is the empty string even when the
+        // field is nullable; null is reserved for an absent element.
+        assert_array_values_option!(batch, "value", vec![Some("1"), Some("")], StringArray);
+        assert_array_values_option!(
+            batch,
+            "empty",
+            vec![Some(""), Some("not empty")],
+            StringArray
+        );
     }
 
     #[test]
@@ -3628,7 +3682,7 @@ mod tests {
         assert_array_values_option!(
             batch,
             "content",
-            vec![None, None, Some("content")],
+            vec![Some(""), Some(""), Some("content")],
             StringArray
         );
     }
@@ -3988,8 +4042,156 @@ mod tests {
         );
         let batch = record_batches.get("test").unwrap();
         assert_eq!(batch.num_rows(), 2);
-        // Both empty element and missing element should be null
-        assert_array_values_option!(batch, "value", vec![None::<&str>, None], StringArray);
+        // An empty element is present with no content — the empty string
+        // (XML 1.0 §3.1, XPath string-value) — while a missing element is
+        // absent, which is what null means.
+        assert_array_values_option!(batch, "value", vec![Some(""), None], StringArray);
+    }
+
+    /// Every spelling of "element present, no character content" is the same
+    /// value: the empty string. The CDATA case used to yield `""` while
+    /// `<v></v>` yielded null, though the two have identical content; and with
+    /// `trim_text` a whitespace-only element trims to nothing, so it joins them.
+    #[rstest]
+    #[case::start_end_tags("<v></v>", false)]
+    #[case::self_closing("<v/>", false)]
+    #[case::empty_cdata("<v><![CDATA[]]></v>", false)]
+    #[case::only_an_unconfigured_child("<v><x>ignored</x></v>", false)]
+    #[case::whitespace_trimmed("<v>   </v>", true)]
+    #[case::start_end_tags_trimmed("<v></v>", true)]
+    fn test_present_empty_element_is_empty_string(#[case] element: &str, #[case] trim: bool) {
+        let xml = format!("<data><row>{element}</row><row/></data>");
+        let yaml = format!(
+            r#"
+            parser_options:
+                trim_text: {trim}
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: v
+                      xml_path: /data/row/v
+                      data_type: Utf8
+                      nullable: true
+            "#
+        );
+        let record_batches = parse(&xml, &yaml);
+        let batch = record_batches.get("t").unwrap();
+        // The second row has no <v> at all, which stays null: presence is
+        // per row, not sticky across rows.
+        assert_array_values_option!(batch, "v", vec![Some(""), None], StringArray);
+    }
+
+    #[test]
+    fn test_empty_element_and_empty_attribute_agree() {
+        // Both are a present item with an empty value. The attribute already
+        // yielded "" — the element now matches it.
+        let xml = r#"<data><row a=""><v></v></row></data>"#;
+        let record_batches = parse(
+            xml,
+            r#"
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: a
+                      xml_path: /data/row/@a
+                      data_type: Utf8
+                      nullable: true
+                    - name: v
+                      xml_path: /data/row/v
+                      data_type: Utf8
+                      nullable: true
+            "#,
+        );
+        let batch = record_batches.get("t").unwrap();
+        assert_array_values_option!(batch, "a", vec![Some("")], StringArray);
+        assert_array_values_option!(batch, "v", vec![Some("")], StringArray);
+    }
+
+    #[test]
+    fn test_value_less_repeat_still_allowed_with_presence() {
+        // Presence must not feed the repeated-element guard: only a
+        // *value-bearing* earlier occurrence makes a repeat a duplicate.
+        let record_batches = parse(
+            "<data><row><v/><v>x</v></row></data>",
+            r#"
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: v
+                      xml_path: /data/row/v
+                      data_type: Utf8
+                      nullable: true
+            "#,
+        );
+        let batch = record_batches.get("t").unwrap();
+        assert_array_values_option!(batch, "v", vec![Some("x")], StringArray);
+    }
+
+    #[test]
+    fn test_empty_numeric_and_boolean_elements_stay_null() {
+        // "" is a string but not a number or a boolean: presence only changes
+        // Utf8 fields.
+        let record_batches = parse(
+            "<data><row><i></i><f/><b></b></row></data>",
+            r#"
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: i
+                      xml_path: /data/row/i
+                      data_type: Int32
+                      nullable: true
+                    - name: f
+                      xml_path: /data/row/f
+                      data_type: Float64
+                      nullable: true
+                    - name: b
+                      xml_path: /data/row/b
+                      data_type: Boolean
+                      nullable: true
+            "#,
+        );
+        let batch = record_batches.get("t").unwrap();
+        for name in ["i", "f", "b"] {
+            assert!(batch.column_by_name(name).unwrap().is_null(0), "{name}");
+        }
+    }
+
+    #[test]
+    fn test_empty_elements_count_as_matched_fields() {
+        // A field whose element only ever appears empty has a correctly
+        // spelled path and a column of "" — not the misconfiguration
+        // `error_on_unmatched_fields` exists to catch.
+        let config = config_from_yaml!(
+            r#"
+            parser_options:
+                error_on_unmatched_fields: true
+            tables:
+                - name: t
+                  xml_path: /data
+                  levels: [row]
+                  fields:
+                    - name: v
+                      xml_path: /data/row/v
+                      data_type: Utf8
+                      nullable: true
+            "#
+        );
+        let record_batches = parse_document(
+            "<data><row><v/></row><row><v></v></row></data>".as_bytes(),
+            &config,
+        )
+        .unwrap();
+        let batch = record_batches.get("t").unwrap();
+        assert_array_values_option!(batch, "v", vec![Some(""), Some("")], StringArray);
     }
 
     #[test]
